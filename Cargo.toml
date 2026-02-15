@@ -1,5 +1,6 @@
 [workspace]
 members = [
     "crates/fitsio-pure",
+    "crates/fits-benchmark",
 ]
 resolver = "2"

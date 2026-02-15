@@ -49,11 +49,38 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 
 [[package]]
+name = "fits-benchmark"
+version = "0.1.0"
+dependencies = [
+ "fitsio",
+ "fitsio-pure",
+]
+
+[[package]]
+name = "fitsio"
+version = "0.21.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a37418b8a2e67655b4717287f3c170945ca5f453355a02274250b69400148f4"
+dependencies = [
+ "fitsio-sys",
+ "libc",
+]
+
+[[package]]
 name = "fitsio-pure"
 version = "0.9.2"
 dependencies = [
  "ndarray",
  "tempfile",
+]
+
+[[package]]
+name = "fitsio-sys"
+version = "0.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "14929d0b6fa44a87b374a138ea2256c02c1b5beae1dbc98f62a3e132f862fed1"
+dependencies = [
+ "pkg-config",
 ]
 
 [[package]]
@@ -207,6 +234,12 @@ name = "once_cell"
 version = "1.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
+
+[[package]]
+name = "pkg-config"
+version = "0.3.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 
 [[package]]
 name = "portable-atomic"

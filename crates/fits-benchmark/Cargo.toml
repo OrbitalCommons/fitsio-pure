@@ -1,0 +1,18 @@
+[package]
+name = "fits-benchmark"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+default = ["pure"]
+pure = ["dep:fitsio-pure"]
+cfitsio = ["dep:fitsio"]
+
+[dependencies]
+fitsio-pure = { path = "../fitsio-pure", features = ["compat"], optional = true }
+fitsio = { version = "0.21", optional = true }
+
+[[bin]]
+name = "fits-benchmark"
+path = "src/main.rs"
