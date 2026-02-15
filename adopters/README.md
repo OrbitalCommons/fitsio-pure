@@ -4,7 +4,7 @@ Analysis of 25 repos from `potential-adopters.md` that use the `fitsio` crate, e
 
 ## Readiness Tiers
 
-### Ready Today (5 repos)
+### Ready Today (11 repos)
 These projects use a subset of fitsio that our compat layer already covers.
 
 | Project | Use Case | FITS Usage |
@@ -14,18 +14,12 @@ These projects use a subset of fitsio that our compat layer already covers.
 | [Star_Tracker](Star_Tracker_Microcontroller.md) | Satellite star tracking | Read-only: f64 table columns from astrometry.net |
 | [RapidFits](RapidFits.md) | Desktop FITS viewer | Read-only: f32 primary image + shape |
 | [rusty-photon](rusty-photon.md) | PHD2 guider archival | Write-only: u16 guide star images |
-
-### Nearly Ready — Blocked by ndarray (6 repos)
-These projects use the fitsio `array` feature which returns `ArrayD<T>` instead of `Vec<T>`. Adding an optional ndarray integration feature would unblock all of them simultaneously.
-
-| Project | Use Case | Beyond ndarray |
-|---------|----------|----------------|
-| [f2i](f2i.md) | Terminal FITS preview | Nothing else |
-| [fitsrotate_rs](fitsrotate_rs.md) | FITS cube axis rotation | Nothing else |
-| [eventide](eventide.md) | Astrophotography processing | Nothing else |
-| [twinkle](twinkle.md) | Observatory management | Nothing else |
-| [MARVELpipeline](MARVELpipeline.md) | Spectroscopy pipeline | Table creation (likely works) |
-| [ccdi](ccdi.md) | CCD camera imaging | 3D section reads (likely works) |
+| [f2i](f2i.md) | Terminal FITS preview | Read-only: f32 images via `array` feature |
+| [fitsrotate_rs](fitsrotate_rs.md) | FITS cube axis rotation | Read/write images + headers via `array` feature |
+| [eventide](eventide.md) | Astrophotography processing | Read-only: images + metadata via `array` feature |
+| [twinkle](twinkle.md) | Observatory management | Read-only: images + calibration via `array` feature |
+| [MARVELpipeline](MARVELpipeline.md) | Spectroscopy pipeline | Read/write images + tables via `array` feature |
+| [ccdi](ccdi.md) | CCD camera imaging | Read/write images via `array` feature |
 
 ### Probably Ready — Needs Testing (3 repos)
 Core operations are covered but specific edge cases need verification.
@@ -71,19 +65,19 @@ Missing fundamental capabilities.
 
 Based on how many repos each feature would unblock:
 
-| Feature | Unblocks | Repos |
-|---------|----------|-------|
-| **ndarray integration** | 6 repos | f2i, fitsrotate_rs, eventide, twinkle, MARVELpipeline, ccdi |
-| **Long string (CONTINUE cards)** | 2 repos (+3 transitive) | mwa_hyperdrive, mwalib → Birli, mwax_stats |
-| **Tile compression** | 2 repos (+5 transitive) | refimage, serialimage → cameraunit, cameraunit_asi, cameraunit_fli |
-| **`read_col_range()`** | 1 repo | boom-catalogs |
-| **Array-in-cell columns** | 1 repo | mwa_hyperdrive |
-| **Streaming/seek-based I/O** | 1 repo | FITSWebQL |
-| **Random groups format** | 1 repo | marlu |
+| Feature | Status | Unblocks | Repos |
+|---------|--------|----------|-------|
+| ~~**ndarray integration**~~ | **DONE** | ~~6 repos~~ | ~~f2i, fitsrotate_rs, eventide, twinkle, MARVELpipeline, ccdi~~ |
+| **Long string (CONTINUE cards)** | Pending | 2 repos (+3 transitive) | mwa_hyperdrive, mwalib → Birli, mwax_stats |
+| **Tile compression** | Pending | 2 repos (+5 transitive) | refimage, serialimage → cameraunit, cameraunit_asi, cameraunit_fli |
+| **`read_col_range()`** | Pending | 1 repo | boom-catalogs |
+| **Array-in-cell columns** | Pending | 1 repo | mwa_hyperdrive |
+| **Streaming/seek-based I/O** | Pending | 1 repo | FITSWebQL |
+| **Random groups format** | Pending | 1 repo | marlu |
 
 ## Recommended Implementation Order
 
-1. **ndarray feature** — highest leverage, unblocks 6 repos, relatively simple (wrap Vec in ArrayD with shape metadata)
+1. ~~**ndarray feature**~~ — **SHIPPED** via `array` feature flag (#18)
 2. **Long string / CONTINUE cards** — unblocks MWA ecosystem (5 repos), important for credibility with radio astronomy community
 3. **`read_col_range()`** — targeted fix for boom-catalogs, useful general feature
 4. **Tile compression** — large effort but unblocks the sunipkm camera ecosystem (5+ repos)

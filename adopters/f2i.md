@@ -26,11 +26,8 @@ Terminal FITS image previewer. Reads FITS files, generates thumbnails, and conve
 - Image read for all BITPIX types
 - HDU iteration
 
-### Gaps — Must Fix
-- **ndarray integration:** f2i uses the `fitsio` "array" feature which returns `ArrayD<f32>`. Our compat layer returns `Vec<T>`. Users would need to reshape manually, or we'd need to add ndarray support.
-
-### Gaps — Nice to Have
-- Nothing else — this is a minimal read-only use case.
+### Gaps
+- None remaining. The `array` feature provides `ReadImage for ArrayD<T>`.
 
 ### Verdict
-**Nearly ready.** The only gap is ndarray return types. If f2i can accept `Vec<f32>` and reshape to ndarray themselves (trivial), this works today. Adding an optional `array` feature to our compat layer would make it seamless.
+**Ready today.** The `array` feature provides `ArrayD<f32>` return types matching fitsio's API.

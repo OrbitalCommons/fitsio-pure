@@ -37,11 +37,8 @@ Reorders axes of FITS data cubes for performance optimization (e.g., frequency-f
 - Header read/write
 - Custom primary HDU creation
 
-### Gaps — Must Fix
-- **ndarray integration:** Same as f2i — needs `ArrayD<T>` return types or the user reshapes from Vec.
-
-### Gaps — Nice to Have
-- Nothing else significant.
+### Gaps
+- None remaining. The `array` feature provides `ReadImage for ArrayD<T>`.
 
 ### Verdict
-**Nearly ready.** Full read-write cycle is covered. The ndarray gap is the same as f2i — a minor integration issue, not a fundamental capability gap. Good candidate for early adoption.
+**Ready today.** Full read-write cycle covered. The `array` feature provides ndarray integration matching fitsio's API.

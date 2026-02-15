@@ -36,11 +36,8 @@ Desktop application for astrophotography image processing. Loads FITS images, cl
 - Header read
 - ImageType enum matching
 
-### Gaps — Must Fix
-- **ndarray integration:** Same as f2i/fitsrotate_rs — needs `ArrayD<f32>` or manual reshape from Vec.
-
-### Gaps — Nice to Have
-- Batch directory loading (application-level, not library)
+### Gaps
+- None remaining. The `array` feature provides `ReadImage for ArrayD<T>`.
 
 ### Verdict
-**Nearly ready.** Read-only use case with straightforward image + header access. The ndarray gap is the only issue, and it's a minor integration concern shared with several other adopters.
+**Ready today.** Read-only use case with straightforward image + header access, fully covered by the `array` feature.

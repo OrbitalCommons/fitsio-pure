@@ -40,9 +40,11 @@ Data processing and radial velocity pipeline for the MARVEL spectrograph. Multi-
 - Header read/write
 - Table creation and column writing
 
-### Gaps — Must Fix
-- **ndarray integration:** Heavy use of `ArrayD<T>` via the "array" feature. Same gap as other adopters, but more critical here because the pipeline does multi-dimensional array math.
+### Gaps — Resolved
+- ~~**ndarray integration:**~~ Shipped via the `array` feature.
+
+### Gaps — Needs Verification
 - **u32 image type:** FITS doesn't have native u32 — it's represented via BZERO on BITPIX=32. Need to verify our unsigned integer round-trip works for u32.
 
 ### Verdict
-**Nearly ready.** Pipeline operations are straightforward (read image → process → write image), and our compat layer covers the core API. The ndarray gap is more impactful here than in visualization tools because MARVELpipeline does heavy array computation. Adding ndarray support would unblock this and ~5 other adopters simultaneously.
+**Ready today.** Pipeline operations are straightforward (read image → process → write image). The `array` feature provides ndarray integration. Only remaining risk is u32 BZERO round-trip edge case.

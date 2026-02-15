@@ -33,8 +33,8 @@ Astronomical observatory management software with web-based UI. Handles image ca
 - Header read
 - ImageType enum matching
 
-### Gaps — Must Fix
-- **ndarray integration:** Uses `ArrayD<u16>` — same gap as f2i, eventide, fitsrotate_rs.
+### Gaps
+- None remaining. The `array` feature provides `ReadImage for ArrayD<T>`.
 
 ### Verdict
-**Nearly ready.** Read-only image + metadata use case. The ndarray gap is the only issue. Same story as the other astrophotography tools.
+**Ready today.** Read-only image + metadata use case, fully covered by the `array` feature.
