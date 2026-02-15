@@ -19,20 +19,32 @@ pub enum Value {
     ComplexFloat(f64, f64),
 }
 
-/// Split a value field at the ` / ` comment separator.
+/// Split a value field at the comment separator.
 ///
 /// Returns `(value_part, optional_comment)`. The comment does not include the
-/// leading ` / ` delimiter.
+/// leading separator.
+///
+/// The FITS standard uses ` / ` (space-slash-space) but real-world files
+/// produced by IDL and other tools omit the trailing space (e.g.
+/// `BITPIX = -32 /No. of bits per pixel`).  Both cfitsio and fitsrs accept
+/// ` /` without requiring a trailing space, so we do the same.
 fn split_comment(field: &[u8]) -> (&[u8], Option<&str>) {
     // For string values the comment starts after the closing quote, so the
     // caller must handle strings separately.  For non-string values we scan
-    // for ` / `.
+    // for ` /` (space then slash).
     let len = field.len();
     let mut i = 0;
-    while i + 2 < len {
-        if field[i] == b' ' && field[i + 1] == b'/' && field[i + 2] == b' ' {
+    while i + 1 < len {
+        if field[i] == b' ' && field[i + 1] == b'/' {
             let value_part = &field[..i];
-            let comment = str::from_utf8(&field[i + 3..]).ok().map(|s| s.trim_end());
+            // Skip the slash; also skip one optional space after it.
+            let mut comment_start = i + 2;
+            if comment_start < len && field[comment_start] == b' ' {
+                comment_start += 1;
+            }
+            let comment = str::from_utf8(&field[comment_start..])
+                .ok()
+                .map(|s| s.trim_end());
             return (value_part, comment.filter(|s| !s.is_empty()));
         }
         i += 1;
@@ -90,9 +102,14 @@ fn parse_string(field: &[u8]) -> Option<(Value, Option<&str>)> {
 fn find_comment_in_remainder(remainder: &[u8]) -> Option<&str> {
     let len = remainder.len();
     let mut i = 0;
-    while i + 2 < len {
-        if remainder[i] == b' ' && remainder[i + 1] == b'/' && remainder[i + 2] == b' ' {
-            let comment = str::from_utf8(&remainder[i + 3..])
+    while i + 1 < len {
+        if remainder[i] == b' ' && remainder[i + 1] == b'/' {
+            // Skip the slash; also skip one optional space after it.
+            let mut comment_start = i + 2;
+            if comment_start < len && remainder[comment_start] == b' ' {
+                comment_start += 1;
+            }
+            let comment = str::from_utf8(&remainder[comment_start..])
                 .ok()
                 .map(|s| s.trim_end());
             return comment.filter(|s| !s.is_empty());
@@ -640,6 +657,34 @@ mod tests {
     fn parse_all_spaces_returns_none() {
         let field = make_field("");
         assert!(parse_value(&field).is_none());
+    }
+
+    #[test]
+    fn parse_integer_comment_no_trailing_space() {
+        // Real-world: "BITPIX  =                  -32 /No.Bits per pixel"
+        let field = make_field("                 -32 /No.Bits per pixel");
+        let (val, comment) = parse_value(&field).unwrap();
+        assert_eq!(val, Value::Integer(-32));
+        assert_eq!(comment.unwrap(), "No.Bits per pixel");
+    }
+
+    #[test]
+    fn parse_float_comment_no_trailing_space() {
+        let field = make_field("               0.5 /scale");
+        let (val, comment) = parse_value(&field).unwrap();
+        match val {
+            Value::Float(f) => assert!((f - 0.5).abs() < 1e-10),
+            other => panic!("Expected Float, got {:?}", other),
+        }
+        assert_eq!(comment.unwrap(), "scale");
+    }
+
+    #[test]
+    fn parse_string_comment_no_trailing_space() {
+        let field = make_field("'IMAGE   '           /image type");
+        let (val, comment) = parse_value(&field).unwrap();
+        assert_eq!(val, Value::String(String::from("IMAGE")));
+        assert_eq!(comment.unwrap(), "image type");
     }
 
     #[test]

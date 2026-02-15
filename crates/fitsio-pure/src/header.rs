@@ -145,8 +145,15 @@ pub fn parse_card(card_bytes: &[u8; CARD_SIZE]) -> Result<Card> {
 }
 
 fn extract_comment_from_empty_value(field: &str) -> Option<String> {
-    if let Some(idx) = field.find(" / ") {
-        let comment = field[idx + 3..].trim_end();
+    if let Some(idx) = field.find(" /") {
+        // Skip the slash; also skip one optional space after it.
+        let after_slash = idx + 2;
+        let comment_start = if field.as_bytes().get(after_slash) == Some(&b' ') {
+            after_slash + 1
+        } else {
+            after_slash
+        };
+        let comment = field[comment_start..].trim_end();
         if !comment.is_empty() {
             return Some(String::from(comment));
         }
