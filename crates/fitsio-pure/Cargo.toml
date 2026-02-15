@@ -9,6 +9,7 @@ default = ["std"]
 std = []
 compat = ["std"]
 cli = ["std"]
+array = ["dep:ndarray", "compat"]
 
 [dev-dependencies]
 tempfile = "3.25"
@@ -22,3 +23,6 @@ required-features = ["cli"]
 name = "fitsconv"
 path = "src/bin/fitsconv.rs"
 required-features = ["cli"]
+
+[dependencies]
+ndarray = { version = "0.17.2", optional = true }
