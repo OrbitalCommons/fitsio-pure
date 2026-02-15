@@ -1,6 +1,7 @@
 //! FITS header card parsing, writing, and validation.
 
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 use core::str;
 

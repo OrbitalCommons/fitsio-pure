@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use crate::errors::{Error, Result};
-use crate::hdu::FitsHdu;
-use crate::images::ImageDescription;
+use super::errors::{Error, Result};
+use super::hdu::FitsHdu;
+use super::images::ImageDescription;
 
 /// Whether a file is opened for reading or writing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,15 +29,15 @@ pub struct NewFitsFile {
 pub trait DescribesHdu {
     fn get_hdu<'a>(
         &self,
-        fits_data: &'a fitsio_pure::hdu::FitsData,
-    ) -> Option<(usize, &'a fitsio_pure::hdu::Hdu)>;
+        fits_data: &'a crate::hdu::FitsData,
+    ) -> Option<(usize, &'a crate::hdu::Hdu)>;
 }
 
 impl DescribesHdu for usize {
     fn get_hdu<'a>(
         &self,
-        fits_data: &'a fitsio_pure::hdu::FitsData,
-    ) -> Option<(usize, &'a fitsio_pure::hdu::Hdu)> {
+        fits_data: &'a crate::hdu::FitsData,
+    ) -> Option<(usize, &'a crate::hdu::Hdu)> {
         fits_data.get(*self).map(|hdu| (*self, hdu))
     }
 }
@@ -45,12 +45,12 @@ impl DescribesHdu for usize {
 impl DescribesHdu for &str {
     fn get_hdu<'a>(
         &self,
-        fits_data: &'a fitsio_pure::hdu::FitsData,
-    ) -> Option<(usize, &'a fitsio_pure::hdu::Hdu)> {
+        fits_data: &'a crate::hdu::FitsData,
+    ) -> Option<(usize, &'a crate::hdu::Hdu)> {
         for (i, hdu) in fits_data.iter().enumerate() {
             for card in &hdu.cards {
                 if card.keyword_str() == "EXTNAME" {
-                    if let Some(fitsio_pure::value::Value::String(ref s)) = card.value {
+                    if let Some(crate::value::Value::String(ref s)) = card.value {
                         if s.trim() == *self {
                             return Some((i, hdu));
                         }
@@ -65,8 +65,8 @@ impl DescribesHdu for &str {
 impl DescribesHdu for String {
     fn get_hdu<'a>(
         &self,
-        fits_data: &'a fitsio_pure::hdu::FitsData,
-    ) -> Option<(usize, &'a fitsio_pure::hdu::Hdu)> {
+        fits_data: &'a crate::hdu::FitsData,
+    ) -> Option<(usize, &'a crate::hdu::Hdu)> {
         self.as_str().get_hdu(fits_data)
     }
 }
@@ -107,7 +107,7 @@ impl FitsFile {
 
     /// Return a handle to the HDU described by `desc` (index or name).
     pub fn hdu<D: DescribesHdu>(&self, desc: D) -> Result<FitsHdu> {
-        let fits_data = fitsio_pure::hdu::parse_fits(&self.data)?;
+        let fits_data = crate::hdu::parse_fits(&self.data)?;
         let (idx, _) = desc
             .get_hdu(&fits_data)
             .ok_or(Error::Message("HDU not found".to_string()))?;
@@ -116,13 +116,13 @@ impl FitsFile {
 
     /// Return the number of HDUs in this file.
     pub fn num_hdus(&self) -> Result<usize> {
-        let fits_data = fitsio_pure::hdu::parse_fits(&self.data)?;
+        let fits_data = crate::hdu::parse_fits(&self.data)?;
         Ok(fits_data.len())
     }
 
     /// Return handles to all HDUs in the file.
     pub fn iter(&self) -> Result<Vec<FitsHdu>> {
-        let fits_data = fitsio_pure::hdu::parse_fits(&self.data)?;
+        let fits_data = crate::hdu::parse_fits(&self.data)?;
         Ok((0..fits_data.len())
             .map(|i| FitsHdu { hdu_index: i })
             .collect())
@@ -133,31 +133,31 @@ impl FitsFile {
         let bitpix = desc.data_type.to_bitpix();
         let naxes = &desc.dimensions;
 
-        let mut cards = fitsio_pure::extension::build_extension_header(
-            fitsio_pure::extension::ExtensionType::Image,
+        let mut cards = crate::extension::build_extension_header(
+            crate::extension::ExtensionType::Image,
             bitpix,
             naxes,
             0,
             1,
         )?;
 
-        let extname_card = fitsio_pure::header::Card {
+        let extname_card = crate::header::Card {
             keyword: make_keyword("EXTNAME"),
-            value: Some(fitsio_pure::value::Value::String(extname.to_string())),
+            value: Some(crate::value::Value::String(extname.to_string())),
             comment: None,
         };
         cards.push(extname_card);
 
-        let header_bytes = fitsio_pure::header::serialize_header(&cards);
+        let header_bytes = crate::header::serialize_header(&cards);
 
         let data_bytes = desc.dimensions.iter().copied().product::<usize>()
             * ((bitpix.unsigned_abs() as usize) / 8);
-        let padded_data = fitsio_pure::block::padded_byte_len(data_bytes);
+        let padded_data = crate::block::padded_byte_len(data_bytes);
 
         self.data.extend_from_slice(&header_bytes);
         self.data.resize(self.data.len() + padded_data, 0u8);
 
-        let fits_data = fitsio_pure::hdu::parse_fits(&self.data)?;
+        let fits_data = crate::hdu::parse_fits(&self.data)?;
         let idx = fits_data.len() - 1;
         Ok(FitsHdu { hdu_index: idx })
     }
@@ -166,21 +166,21 @@ impl FitsFile {
     pub fn create_table(
         &mut self,
         extname: &str,
-        columns: &[fitsio_pure::bintable::BinaryColumnDescriptor],
+        columns: &[crate::bintable::BinaryColumnDescriptor],
     ) -> Result<FitsHdu> {
-        let mut cards = fitsio_pure::bintable::build_binary_table_cards(columns, 0, 0)?;
+        let mut cards = crate::bintable::build_binary_table_cards(columns, 0, 0)?;
 
-        let extname_card = fitsio_pure::header::Card {
+        let extname_card = crate::header::Card {
             keyword: make_keyword("EXTNAME"),
-            value: Some(fitsio_pure::value::Value::String(extname.to_string())),
+            value: Some(crate::value::Value::String(extname.to_string())),
             comment: None,
         };
         cards.push(extname_card);
 
-        let header_bytes = fitsio_pure::header::serialize_header(&cards);
+        let header_bytes = crate::header::serialize_header(&cards);
         self.data.extend_from_slice(&header_bytes);
 
-        let fits_data = fitsio_pure::hdu::parse_fits(&self.data)?;
+        let fits_data = crate::hdu::parse_fits(&self.data)?;
         let idx = fits_data.len() - 1;
         Ok(FitsHdu { hdu_index: idx })
     }
@@ -238,8 +238,8 @@ impl NewFitsFile {
             )));
         }
 
-        let cards = fitsio_pure::primary::build_primary_header(8, &[])?;
-        let header_bytes = fitsio_pure::header::serialize_header(&cards);
+        let cards = crate::primary::build_primary_header(8, &[])?;
+        let header_bytes = crate::header::serialize_header(&cards);
 
         std::fs::write(&self.path, &header_bytes)?;
 
@@ -262,7 +262,7 @@ fn make_keyword(name: &str) -> [u8; 8] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::images::ImageType;
+    use crate::compat::images::ImageType;
 
     #[test]
     fn create_and_open() {

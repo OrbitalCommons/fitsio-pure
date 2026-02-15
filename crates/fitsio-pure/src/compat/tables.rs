@@ -1,6 +1,6 @@
-use crate::errors::{Error, Result};
-use crate::fitsfile::FitsFile;
-use crate::hdu::FitsHdu;
+use super::errors::{Error, Result};
+use super::fitsfile::FitsFile;
+use super::hdu::FitsHdu;
 
 /// Describes one column in a table extension.
 #[derive(Debug, Clone, PartialEq)]
@@ -87,8 +87,8 @@ pub enum Column {
     Logical(Vec<bool>),
 }
 
-fn get_core_hdu(file: &FitsFile, hdu: &FitsHdu) -> Result<(fitsio_pure::hdu::FitsData, usize)> {
-    let fits_data = fitsio_pure::hdu::parse_fits(file.data())?;
+fn get_core_hdu(file: &FitsFile, hdu: &FitsHdu) -> Result<(crate::hdu::FitsData, usize)> {
+    let fits_data = crate::hdu::parse_fits(file.data())?;
     if hdu.hdu_index >= fits_data.len() {
         return Err(Error::Message(format!(
             "HDU index {} out of range",
@@ -108,16 +108,12 @@ pub trait WritesCol: Sized {
     fn write_col(file: &mut FitsFile, hdu: &FitsHdu, name: &str, data: &[Self]) -> Result<()>;
 }
 
-fn find_column_index(
-    cards: &[fitsio_pure::header::Card],
-    name: &str,
-    tfields: usize,
-) -> Result<usize> {
+fn find_column_index(cards: &[crate::header::Card], name: &str, tfields: usize) -> Result<usize> {
     for i in 1..=tfields {
         let ttype_key = format!("TTYPE{}", i);
         for card in cards {
             if card.keyword_str() == ttype_key {
-                if let Some(fitsio_pure::value::Value::String(ref s)) = card.value {
+                if let Some(crate::value::Value::String(ref s)) = card.value {
                     if s.trim() == name {
                         return Ok(i - 1);
                     }
@@ -128,10 +124,10 @@ fn find_column_index(
     Err(Error::Message(format!("column '{}' not found", name)))
 }
 
-fn get_tfields(hdu: &fitsio_pure::hdu::Hdu) -> Result<usize> {
+fn get_tfields(hdu: &crate::hdu::Hdu) -> Result<usize> {
     match &hdu.info {
-        fitsio_pure::hdu::HduInfo::BinaryTable { tfields, .. } => Ok(*tfields),
-        fitsio_pure::hdu::HduInfo::AsciiTable { tfields, .. } => Ok(*tfields),
+        crate::hdu::HduInfo::BinaryTable { tfields, .. } => Ok(*tfields),
+        crate::hdu::HduInfo::AsciiTable { tfields, .. } => Ok(*tfields),
         _ => Err(Error::Message("HDU is not a table".to_string())),
     }
 }
@@ -142,15 +138,13 @@ impl ReadsCol for i32 {
         let core_hdu = &fits_data.hdus[idx];
         let tfields = get_tfields(core_hdu)?;
         let col_idx = find_column_index(&core_hdu.cards, name, tfields)?;
-        let col_data = fitsio_pure::bintable::read_binary_column(file.data(), core_hdu, col_idx)?;
+        let col_data = crate::bintable::read_binary_column(file.data(), core_hdu, col_idx)?;
         match col_data {
-            fitsio_pure::bintable::BinaryColumnData::Int(v) => Ok(v),
-            fitsio_pure::bintable::BinaryColumnData::Short(v) => {
+            crate::bintable::BinaryColumnData::Int(v) => Ok(v),
+            crate::bintable::BinaryColumnData::Short(v) => {
                 Ok(v.iter().map(|&x| x as i32).collect())
             }
-            fitsio_pure::bintable::BinaryColumnData::Long(v) => {
-                Ok(v.iter().map(|&x| x as i32).collect())
-            }
+            crate::bintable::BinaryColumnData::Long(v) => Ok(v.iter().map(|&x| x as i32).collect()),
             _ => Err(Error::Message("column is not integer type".to_string())),
         }
     }
@@ -162,13 +156,11 @@ impl ReadsCol for i64 {
         let core_hdu = &fits_data.hdus[idx];
         let tfields = get_tfields(core_hdu)?;
         let col_idx = find_column_index(&core_hdu.cards, name, tfields)?;
-        let col_data = fitsio_pure::bintable::read_binary_column(file.data(), core_hdu, col_idx)?;
+        let col_data = crate::bintable::read_binary_column(file.data(), core_hdu, col_idx)?;
         match col_data {
-            fitsio_pure::bintable::BinaryColumnData::Long(v) => Ok(v),
-            fitsio_pure::bintable::BinaryColumnData::Int(v) => {
-                Ok(v.iter().map(|&x| x as i64).collect())
-            }
-            fitsio_pure::bintable::BinaryColumnData::Short(v) => {
+            crate::bintable::BinaryColumnData::Long(v) => Ok(v),
+            crate::bintable::BinaryColumnData::Int(v) => Ok(v.iter().map(|&x| x as i64).collect()),
+            crate::bintable::BinaryColumnData::Short(v) => {
                 Ok(v.iter().map(|&x| x as i64).collect())
             }
             _ => Err(Error::Message("column is not integer type".to_string())),
@@ -182,10 +174,10 @@ impl ReadsCol for f32 {
         let core_hdu = &fits_data.hdus[idx];
         let tfields = get_tfields(core_hdu)?;
         let col_idx = find_column_index(&core_hdu.cards, name, tfields)?;
-        let col_data = fitsio_pure::bintable::read_binary_column(file.data(), core_hdu, col_idx)?;
+        let col_data = crate::bintable::read_binary_column(file.data(), core_hdu, col_idx)?;
         match col_data {
-            fitsio_pure::bintable::BinaryColumnData::Float(v) => Ok(v),
-            fitsio_pure::bintable::BinaryColumnData::Double(v) => {
+            crate::bintable::BinaryColumnData::Float(v) => Ok(v),
+            crate::bintable::BinaryColumnData::Double(v) => {
                 Ok(v.iter().map(|&x| x as f32).collect())
             }
             _ => Err(Error::Message("column is not float type".to_string())),
@@ -199,18 +191,14 @@ impl ReadsCol for f64 {
         let core_hdu = &fits_data.hdus[idx];
         let tfields = get_tfields(core_hdu)?;
         let col_idx = find_column_index(&core_hdu.cards, name, tfields)?;
-        let col_data = fitsio_pure::bintable::read_binary_column(file.data(), core_hdu, col_idx)?;
+        let col_data = crate::bintable::read_binary_column(file.data(), core_hdu, col_idx)?;
         match col_data {
-            fitsio_pure::bintable::BinaryColumnData::Double(v) => Ok(v),
-            fitsio_pure::bintable::BinaryColumnData::Float(v) => {
+            crate::bintable::BinaryColumnData::Double(v) => Ok(v),
+            crate::bintable::BinaryColumnData::Float(v) => {
                 Ok(v.iter().map(|&x| x as f64).collect())
             }
-            fitsio_pure::bintable::BinaryColumnData::Int(v) => {
-                Ok(v.iter().map(|&x| x as f64).collect())
-            }
-            fitsio_pure::bintable::BinaryColumnData::Long(v) => {
-                Ok(v.iter().map(|&x| x as f64).collect())
-            }
+            crate::bintable::BinaryColumnData::Int(v) => Ok(v.iter().map(|&x| x as f64).collect()),
+            crate::bintable::BinaryColumnData::Long(v) => Ok(v.iter().map(|&x| x as f64).collect()),
             _ => Err(Error::Message("column is not numeric type".to_string())),
         }
     }
@@ -222,9 +210,9 @@ impl ReadsCol for String {
         let core_hdu = &fits_data.hdus[idx];
         let tfields = get_tfields(core_hdu)?;
         let col_idx = find_column_index(&core_hdu.cards, name, tfields)?;
-        let col_data = fitsio_pure::bintable::read_binary_column(file.data(), core_hdu, col_idx)?;
+        let col_data = crate::bintable::read_binary_column(file.data(), core_hdu, col_idx)?;
         match col_data {
-            fitsio_pure::bintable::BinaryColumnData::Ascii(v) => Ok(v),
+            crate::bintable::BinaryColumnData::Ascii(v) => Ok(v),
             _ => Err(Error::Message("column is not string type".to_string())),
         }
     }
@@ -233,7 +221,7 @@ impl ReadsCol for String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fitsfile::FitsFile;
+    use crate::compat::fitsfile::FitsFile;
 
     #[test]
     fn column_description_to_concrete() {
@@ -264,27 +252,27 @@ mod tests {
         let mut f = FitsFile::create(&path).open().unwrap();
 
         let columns = vec![
-            fitsio_pure::bintable::BinaryColumnDescriptor {
+            crate::bintable::BinaryColumnDescriptor {
                 name: Some("ID".to_string()),
                 repeat: 1,
-                col_type: fitsio_pure::bintable::BinaryColumnType::Int,
+                col_type: crate::bintable::BinaryColumnType::Int,
                 byte_width: 4,
             },
-            fitsio_pure::bintable::BinaryColumnDescriptor {
+            crate::bintable::BinaryColumnDescriptor {
                 name: Some("VAL".to_string()),
                 repeat: 1,
-                col_type: fitsio_pure::bintable::BinaryColumnType::Double,
+                col_type: crate::bintable::BinaryColumnType::Double,
                 byte_width: 8,
             },
         ];
 
         let col_data = vec![
-            fitsio_pure::bintable::BinaryColumnData::Int(vec![10, 20, 30]),
-            fitsio_pure::bintable::BinaryColumnData::Double(vec![1.5, 2.5, 3.5]),
+            crate::bintable::BinaryColumnData::Int(vec![10, 20, 30]),
+            crate::bintable::BinaryColumnData::Double(vec![1.5, 2.5, 3.5]),
         ];
 
         let hdu_bytes =
-            fitsio_pure::bintable::serialize_binary_table_hdu(&columns, &col_data, 3).unwrap();
+            crate::bintable::serialize_binary_table_hdu(&columns, &col_data, 3).unwrap();
 
         let mut data = f.data().to_vec();
         data.extend_from_slice(&hdu_bytes);
@@ -307,17 +295,17 @@ mod tests {
         let path = dir.path().join("table.fits");
         let mut f = FitsFile::create(&path).open().unwrap();
 
-        let columns = vec![fitsio_pure::bintable::BinaryColumnDescriptor {
+        let columns = vec![crate::bintable::BinaryColumnDescriptor {
             name: Some("X".to_string()),
             repeat: 1,
-            col_type: fitsio_pure::bintable::BinaryColumnType::Int,
+            col_type: crate::bintable::BinaryColumnType::Int,
             byte_width: 4,
         }];
 
-        let col_data = vec![fitsio_pure::bintable::BinaryColumnData::Int(vec![1])];
+        let col_data = vec![crate::bintable::BinaryColumnData::Int(vec![1])];
 
         let hdu_bytes =
-            fitsio_pure::bintable::serialize_binary_table_hdu(&columns, &col_data, 1).unwrap();
+            crate::bintable::serialize_binary_table_hdu(&columns, &col_data, 1).unwrap();
 
         let mut data = f.data().to_vec();
         data.extend_from_slice(&hdu_bytes);

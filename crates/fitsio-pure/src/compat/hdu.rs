@@ -1,6 +1,6 @@
-use crate::errors::{Error, Result};
-use crate::fitsfile::FitsFile;
-use crate::headers::{ReadsKey, WritesKey};
+use super::errors::{Error, Result};
+use super::fitsfile::FitsFile;
+use super::headers::{ReadsKey, WritesKey};
 
 /// Lightweight handle to one HDU within a FITS file.
 ///
@@ -16,7 +16,7 @@ pub struct FitsHdu {
 pub enum HduInfo {
     ImageInfo {
         shape: Vec<usize>,
-        image_type: crate::images::ImageType,
+        image_type: super::images::ImageType,
     },
     TableInfo {
         column_count: usize,
@@ -43,34 +43,34 @@ impl FitsHdu {
 
     /// Return information about the type and shape of data in this HDU.
     pub fn info(&self, file: &FitsFile) -> Result<HduInfo> {
-        let fits_data = fitsio_pure::hdu::parse_fits(file.data())?;
+        let fits_data = crate::hdu::parse_fits(file.data())?;
         let hdu = fits_data.get(self.hdu_index).ok_or(Error::Message(format!(
             "HDU index {} out of range",
             self.hdu_index
         )))?;
 
         match &hdu.info {
-            fitsio_pure::hdu::HduInfo::Primary { bitpix, naxes } => {
-                let image_type = crate::images::ImageType::from_bitpix(*bitpix)?;
+            crate::hdu::HduInfo::Primary { bitpix, naxes } => {
+                let image_type = super::images::ImageType::from_bitpix(*bitpix)?;
                 Ok(HduInfo::ImageInfo {
                     shape: naxes.clone(),
                     image_type,
                 })
             }
-            fitsio_pure::hdu::HduInfo::Image { bitpix, naxes } => {
-                let image_type = crate::images::ImageType::from_bitpix(*bitpix)?;
+            crate::hdu::HduInfo::Image { bitpix, naxes } => {
+                let image_type = super::images::ImageType::from_bitpix(*bitpix)?;
                 Ok(HduInfo::ImageInfo {
                     shape: naxes.clone(),
                     image_type,
                 })
             }
-            fitsio_pure::hdu::HduInfo::AsciiTable {
+            crate::hdu::HduInfo::AsciiTable {
                 naxis2, tfields, ..
             } => Ok(HduInfo::TableInfo {
                 column_count: *tfields,
                 row_count: *naxis2,
             }),
-            fitsio_pure::hdu::HduInfo::BinaryTable {
+            crate::hdu::HduInfo::BinaryTable {
                 naxis2, tfields, ..
             } => Ok(HduInfo::TableInfo {
                 column_count: *tfields,
@@ -83,7 +83,7 @@ impl FitsHdu {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fitsfile::FitsFile;
+    use crate::compat::fitsfile::FitsFile;
 
     #[test]
     fn hdu_info_primary_empty() {

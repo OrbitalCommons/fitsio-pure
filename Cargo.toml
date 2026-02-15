@@ -1,7 +1,5 @@
 [workspace]
 members = [
     "crates/fitsio-pure",
-    "crates/fitsio-compat",
-    "crates/fitsio-tools",
 ]
 resolver = "2"

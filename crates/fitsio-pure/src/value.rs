@@ -1,4 +1,5 @@
 use alloc::string::String;
+use alloc::string::ToString;
 use core::str;
 
 /// A parsed FITS header value.
