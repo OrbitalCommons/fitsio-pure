@@ -239,21 +239,39 @@ pub fn parse_fits(data: &[u8]) -> Result<FitsData> {
             break;
         }
 
-        let header_len = header_byte_len(remaining)?;
+        let header_len = match header_byte_len(remaining) {
+            Ok(len) => len,
+            Err(_) if !hdus.is_empty() => break,
+            Err(e) => return Err(e),
+        };
         let header_data = &remaining[..header_len];
-        let cards = parse_header_blocks(header_data)?;
+        let cards = match parse_header_blocks(header_data) {
+            Ok(cards) => cards,
+            Err(_) if !hdus.is_empty() => break,
+            Err(e) => return Err(e),
+        };
 
         let is_primary = hdus.is_empty() && is_primary_hdu(&cards);
         if hdus.is_empty() && !is_primary {
             return Err(Error::InvalidHeader);
         }
 
-        let info = parse_hdu_info(&cards, is_primary)?;
-        let data_len = compute_data_byte_len(&cards, is_primary)?;
+        let info = match parse_hdu_info(&cards, is_primary) {
+            Ok(info) => info,
+            Err(_) if !hdus.is_empty() => break,
+            Err(e) => return Err(e),
+        };
+        let data_len = match compute_data_byte_len(&cards, is_primary) {
+            Ok(len) => len,
+            Err(_) if !hdus.is_empty() => break,
+            Err(e) => return Err(e),
+        };
         let data_start = offset + header_len;
 
-        let padded_data = padded_byte_len(data_len);
-        if data_len > 0 && data_start + padded_data > data.len() {
+        // Require that all actual data bytes are present, but allow
+        // the trailing block padding to be missing.  Many real-world
+        // files (HiPS tiles from Aladin/Hipsgen) omit trailing padding.
+        if data_len > 0 && data_start + data_len > data.len() {
             return Err(Error::UnexpectedEof);
         }
 
@@ -265,6 +283,7 @@ pub fn parse_fits(data: &[u8]) -> Result<FitsData> {
             cards,
         });
 
+        let padded_data = padded_byte_len(data_len);
         offset = data_start + padded_data;
     }
 
