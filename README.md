@@ -170,6 +170,24 @@ cargo run --features cli --bin fitsinfo -- path/to/file.fits
 cargo run --features cli --bin fitsconv -- --help
 ```
 
+## Benchmarks
+
+Comparative I/O throughput between fitsio-pure and fitsio (cfitsio C wrapper).
+Run with `cargo run -p fits-benchmark --features pure,cfitsio --no-default-features --release`.
+
+| Test | fitsio-pure Write MP/s | cfitsio Write MP/s | fitsio-pure Read MP/s | cfitsio Read MP/s |
+|------|----------------------:|-------------------:|---------------------:|------------------:|
+| f32 1024x1024 | 90 | 290 | 100 | 981 |
+| f64 1024x1024 | 42 | 147 | 47 | 378 |
+| i32 1024x1024 | 187 | 288 | 295 | 1025 |
+| f32 4096x4096 | 98 | 278 | 96 | 315 |
+| f64 4096x4096 | 51 | 147 | 49 | 161 |
+| i32 4096x4096 | 103 | 283 | 96 | 311 |
+
+cfitsio is faster because it maintains open file handles and writes data in-place, while fitsio-pure's compat layer re-parses headers and rebuilds the byte buffer on each operation. The core serialization (big-endian byte swaps) is similar speed -- the gap is architectural overhead in the compat layer that can be optimized in future releases.
+
+Full results and analysis in [`crates/fits-benchmark/README.md`](crates/fits-benchmark/README.md).
+
 ## Reference Materials
 
 - [FITS Standard 3.0 Specification](https://fits.gsfc.nasa.gov/standard30/fits_standard30aa.pdf) -- The official IAU FITS format definition
