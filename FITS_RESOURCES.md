@@ -19,6 +19,20 @@ LSST data often pushes the limits of FITS, especially with tiled image compressi
 - **Data Preview 0:** [https://dp0-1.lsst.io/](https://dp0-1.lsst.io/)
 - **Validation Data:** [https://github.com/lsst/validation_data_cfht](https://github.com/lsst/validation_data_cfht)
 
+### 4. fitsrs Test Corpus (CDS Strasbourg)
+The `fitsrs` crate's integration test corpus, hosted by CDS. Contains 38 real-world FITS files from NASA missions, CDS HiPS services, and VizieR catalogs.
+- **URL:** `https://alasky.cds.unistra.fr/Aladin-Lite-test-files/fits-rs-test-files.tar`
+- **Setup:**
+  ```sh
+  curl -L -o /tmp/fits-rs-test-files.tar \
+    "https://alasky.cds.unistra.fr/Aladin-Lite-test-files/fits-rs-test-files.tar"
+  mkdir -p reference/fitsrs-samples
+  tar xf /tmp/fits-rs-test-files.tar -C reference/fitsrs-samples/
+  cargo test --test fitsrs_samples -- --nocapture
+  ```
+- **Size:** ~2.2 GB extracted
+- **Coverage:** HST instruments (FGS, FOC, FOS, HRS, NICMOS, WFPC II), EUVE, IUE, UIT, Rice/gzip compressed images, HiPS tiles, VizieR catalogs, random groups, astrometry.net output
+
 ## Selected Test Files
 
 The following files are recommended for initial validation:

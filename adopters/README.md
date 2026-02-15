@@ -67,6 +67,15 @@ Missing fundamental capabilities.
 |---------|-----|
 | [cameraunit stack](cameraunit.md) | Depends on serialimage — migrates automatically |
 
+## fitsrs Users
+
+These projects use the `fitsrs` crate (another pure-Rust FITS library) and could migrate to fitsio-pure.
+
+| Project | Use Case | fitsrs Usage | Readiness |
+|---------|----------|--------------|-----------|
+| [twinkle](twinkle.md) | Observatory management | Read 16-bit camera BLOBs, WASM frontend | Strong candidate -- narrow API surface, WASM alignment |
+| [map2fig](map2fig.md) | HEALPix map visualization | Binary table column reading | Ready today -- all operations supported |
+
 ## Feature Priority Matrix
 
 Based on how many repos each feature would unblock:
