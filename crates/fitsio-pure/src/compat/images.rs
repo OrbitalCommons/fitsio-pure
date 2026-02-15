@@ -1,6 +1,6 @@
-use crate::errors::{Error, Result};
-use crate::fitsfile::FitsFile;
-use crate::hdu::FitsHdu;
+use super::errors::{Error, Result};
+use super::fitsfile::FitsFile;
+use super::hdu::FitsHdu;
 
 /// Describes the shape and type of an image HDU.
 #[derive(Debug, Clone, PartialEq)]
@@ -47,8 +47,8 @@ impl ImageType {
     }
 }
 
-fn get_core_hdu(file: &FitsFile, hdu: &FitsHdu) -> Result<(fitsio_pure::hdu::FitsData, usize)> {
-    let fits_data = fitsio_pure::hdu::parse_fits(file.data())?;
+fn get_core_hdu(file: &FitsFile, hdu: &FitsHdu) -> Result<(crate::hdu::FitsData, usize)> {
+    let fits_data = crate::hdu::parse_fits(file.data())?;
     if hdu.hdu_index >= fits_data.len() {
         return Err(Error::Message(format!(
             "HDU index {} out of range",
@@ -87,7 +87,7 @@ pub trait WriteImage {
 }
 
 fn extract_from_image_data<T: Clone>(
-    data: &fitsio_pure::image::ImageData,
+    data: &crate::image::ImageData,
     convert_u8: fn(&[u8]) -> Vec<T>,
     convert_i16: fn(&[i16]) -> Vec<T>,
     convert_i32: fn(&[i32]) -> Vec<T>,
@@ -96,12 +96,12 @@ fn extract_from_image_data<T: Clone>(
     convert_f64: fn(&[f64]) -> Vec<T>,
 ) -> Vec<T> {
     match data {
-        fitsio_pure::image::ImageData::U8(v) => convert_u8(v),
-        fitsio_pure::image::ImageData::I16(v) => convert_i16(v),
-        fitsio_pure::image::ImageData::I32(v) => convert_i32(v),
-        fitsio_pure::image::ImageData::I64(v) => convert_i64(v),
-        fitsio_pure::image::ImageData::F32(v) => convert_f32(v),
-        fitsio_pure::image::ImageData::F64(v) => convert_f64(v),
+        crate::image::ImageData::U8(v) => convert_u8(v),
+        crate::image::ImageData::I16(v) => convert_i16(v),
+        crate::image::ImageData::I32(v) => convert_i32(v),
+        crate::image::ImageData::I64(v) => convert_i64(v),
+        crate::image::ImageData::F32(v) => convert_f32(v),
+        crate::image::ImageData::F64(v) => convert_f64(v),
     }
 }
 
@@ -115,7 +115,7 @@ macro_rules! impl_read_image {
             fn read_image(file: &FitsFile, hdu: &FitsHdu) -> Result<Vec<Self>> {
                 let (fits_data, idx) = get_core_hdu(file, hdu)?;
                 let core_hdu = &fits_data.hdus[idx];
-                let img = fitsio_pure::image::read_image_data(file.data(), core_hdu)?;
+                let img = crate::image::read_image_data(file.data(), core_hdu)?;
                 Ok(extract_from_image_data(
                     &img, $u8_fn, $i16_fn, $i32_fn, $i64_fn, $f32_fn, $f64_fn,
                 ))
@@ -129,12 +129,8 @@ macro_rules! impl_read_image {
                 let (fits_data, idx) = get_core_hdu(file, hdu)?;
                 let core_hdu = &fits_data.hdus[idx];
                 let count = range.end.saturating_sub(range.start);
-                let img = fitsio_pure::image::read_image_section(
-                    file.data(),
-                    core_hdu,
-                    range.start,
-                    count,
-                )?;
+                let img =
+                    crate::image::read_image_section(file.data(), core_hdu, range.start, count)?;
                 Ok(extract_from_image_data(
                     &img, $u8_fn, $i16_fn, $i32_fn, $i64_fn, $f32_fn, $f64_fn,
                 ))
@@ -148,12 +144,8 @@ macro_rules! impl_read_image {
             ) -> Result<Vec<Self>> {
                 let (fits_data, idx) = get_core_hdu(file, hdu)?;
                 let core_hdu = &fits_data.hdus[idx];
-                let img = fitsio_pure::image::read_image_rows(
-                    file.data(),
-                    core_hdu,
-                    start_row,
-                    num_rows,
-                )?;
+                let img =
+                    crate::image::read_image_rows(file.data(), core_hdu, start_row, num_rows)?;
                 Ok(extract_from_image_data(
                     &img, $u8_fn, $i16_fn, $i32_fn, $i64_fn, $f32_fn, $f64_fn,
                 ))
@@ -167,7 +159,7 @@ macro_rules! impl_read_image {
                 let (fits_data, idx) = get_core_hdu(file, hdu)?;
                 let core_hdu = &fits_data.hdus[idx];
                 let tuples = ranges_to_tuples(ranges);
-                let img = fitsio_pure::image::read_image_region(file.data(), core_hdu, &tuples)?;
+                let img = crate::image::read_image_region(file.data(), core_hdu, &tuples)?;
                 Ok(extract_from_image_data(
                     &img, $u8_fn, $i16_fn, $i32_fn, $i64_fn, $f32_fn, $f64_fn,
                 ))
@@ -240,7 +232,7 @@ macro_rules! impl_write_image {
     ($t:ty, $bitpix:expr, $serialize_fn:path) => {
         impl WriteImage for $t {
             fn write_image(file: &mut FitsFile, hdu: &FitsHdu, data: &[Self]) -> Result<()> {
-                let fits_data = fitsio_pure::hdu::parse_fits(file.data())?;
+                let fits_data = crate::hdu::parse_fits(file.data())?;
                 let core_hdu = fits_data
                     .hdus
                     .get(hdu.hdu_index)
@@ -258,7 +250,7 @@ macro_rules! impl_write_image {
                 new_data.extend_from_slice(&serialized);
 
                 // Append remaining HDUs after this one
-                let padded_data_len = fitsio_pure::block::padded_byte_len(core_hdu.data_len);
+                let padded_data_len = crate::block::padded_byte_len(core_hdu.data_len);
                 let next_hdu_start = core_hdu.data_start + padded_data_len;
                 if next_hdu_start < file.data().len() {
                     new_data.extend_from_slice(&file.data()[next_hdu_start..]);
@@ -271,17 +263,17 @@ macro_rules! impl_write_image {
     };
 }
 
-impl_write_image!(u8, 8, fitsio_pure::image::serialize_image_u8);
-impl_write_image!(i16, 16, fitsio_pure::image::serialize_image_i16);
-impl_write_image!(i32, 32, fitsio_pure::image::serialize_image_i32);
-impl_write_image!(i64, 64, fitsio_pure::image::serialize_image_i64);
-impl_write_image!(f32, -32, fitsio_pure::image::serialize_image_f32);
-impl_write_image!(f64, -64, fitsio_pure::image::serialize_image_f64);
+impl_write_image!(u8, 8, crate::image::serialize_image_u8);
+impl_write_image!(i16, 16, crate::image::serialize_image_i16);
+impl_write_image!(i32, 32, crate::image::serialize_image_i32);
+impl_write_image!(i64, 64, crate::image::serialize_image_i64);
+impl_write_image!(f32, -32, crate::image::serialize_image_f32);
+impl_write_image!(f64, -64, crate::image::serialize_image_f64);
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fitsfile::FitsFile;
+    use crate::compat::fitsfile::FitsFile;
 
     #[test]
     fn image_type_bitpix_roundtrip() {

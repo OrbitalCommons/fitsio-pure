@@ -2,15 +2,15 @@
 #[derive(Debug)]
 pub enum Error {
     /// An error from the fitsio-pure core library.
-    Fits(fitsio_pure::Error),
+    Fits(crate::Error),
     /// A standard I/O error.
     Io(std::io::Error),
     /// A free-form error message.
     Message(String),
 }
 
-impl From<fitsio_pure::Error> for Error {
-    fn from(e: fitsio_pure::Error) -> Self {
+impl From<crate::Error> for Error {
+    fn from(e: crate::Error) -> Self {
         Error::Fits(e)
     }
 }
@@ -50,8 +50,8 @@ mod tests {
 
     #[test]
     fn from_fits_error() {
-        let e: Error = fitsio_pure::Error::InvalidHeader.into();
-        assert!(matches!(e, Error::Fits(fitsio_pure::Error::InvalidHeader)));
+        let e: Error = crate::Error::InvalidHeader.into();
+        assert!(matches!(e, Error::Fits(crate::Error::InvalidHeader)));
     }
 
     #[test]
@@ -63,7 +63,7 @@ mod tests {
 
     #[test]
     fn display_fits_error() {
-        let e = Error::Fits(fitsio_pure::Error::InvalidHeader);
+        let e = Error::Fits(crate::Error::InvalidHeader);
         let s = e.to_string();
         assert!(s.contains("FITS error"));
     }
@@ -89,7 +89,7 @@ mod tests {
         let e = Error::Message("msg".into());
         assert!(e.source().is_none());
 
-        let e = Error::Fits(fitsio_pure::Error::InvalidHeader);
+        let e = Error::Fits(crate::Error::InvalidHeader);
         assert!(e.source().is_some());
     }
 }

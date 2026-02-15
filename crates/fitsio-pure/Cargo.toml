@@ -2,7 +2,23 @@
 name = "fitsio-pure"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
 
 [features]
 default = ["std"]
 std = []
+compat = ["std"]
+cli = ["std"]
+
+[dev-dependencies]
+tempfile = "3.25"
+
+[[bin]]
+name = "fitsinfo"
+path = "src/bin/fitsinfo.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "fitsconv"
+path = "src/bin/fitsconv.rs"
+required-features = ["cli"]

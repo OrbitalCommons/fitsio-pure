@@ -17,3 +17,6 @@ pub mod value;
 
 pub use block::{BLOCK_SIZE, CARDS_PER_BLOCK, CARD_SIZE};
 pub use error::{Error, Result};
+
+#[cfg(feature = "compat")]
+pub mod compat;
