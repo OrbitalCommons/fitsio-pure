@@ -5,6 +5,7 @@ extern crate alloc;
 pub mod block;
 pub mod endian;
 pub mod error;
+pub mod header;
 pub mod io;
 pub mod value;
 
