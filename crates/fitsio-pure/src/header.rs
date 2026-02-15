@@ -155,12 +155,15 @@ fn extract_comment_from_empty_value(field: &str) -> Option<String> {
 }
 
 /// Parse consecutive 2880-byte header blocks until the END card is found.
+///
+/// The input data does not need to be an exact multiple of [`BLOCK_SIZE`].
+/// Only complete 2880-byte blocks are scanned; any trailing bytes shorter
+/// than a full block are ignored.  This allows parsing headers from files
+/// whose total size is not block-aligned (e.g. HiPS tiles that omit
+/// trailing padding).
 pub fn parse_header_blocks(data: &[u8]) -> Result<Vec<Card>> {
-    if data.is_empty() {
+    if data.len() < BLOCK_SIZE {
         return Err(Error::UnexpectedEof);
-    }
-    if !data.len().is_multiple_of(BLOCK_SIZE) {
-        return Err(Error::InvalidHeader);
     }
 
     let mut cards = Vec::new();
@@ -188,12 +191,12 @@ pub fn parse_header_blocks(data: &[u8]) -> Result<Vec<Card>> {
 }
 
 /// Return the number of bytes consumed by the header (always a multiple of BLOCK_SIZE).
+///
+/// The input data does not need to be block-aligned.  Only complete
+/// 2880-byte blocks are scanned for the END card.
 pub fn header_byte_len(data: &[u8]) -> Result<usize> {
-    if data.is_empty() {
+    if data.len() < BLOCK_SIZE {
         return Err(Error::UnexpectedEof);
-    }
-    if !data.len().is_multiple_of(BLOCK_SIZE) {
-        return Err(Error::InvalidHeader);
     }
 
     let num_blocks = data.len() / BLOCK_SIZE;
@@ -648,11 +651,11 @@ mod parse_tests {
     }
 
     #[test]
-    fn parse_header_not_block_aligned() {
+    fn parse_header_too_small() {
         let data = vec![b' '; 100];
         assert!(matches!(
             parse_header_blocks(&data),
-            Err(Error::InvalidHeader)
+            Err(Error::UnexpectedEof)
         ));
     }
 
