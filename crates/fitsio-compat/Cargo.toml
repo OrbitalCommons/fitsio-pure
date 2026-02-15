@@ -5,3 +5,6 @@ edition = "2021"
 
 [dependencies]
 fitsio-pure = { path = "../fitsio-pure" }
+
+[dev-dependencies]
+tempfile = "3.25.0"
