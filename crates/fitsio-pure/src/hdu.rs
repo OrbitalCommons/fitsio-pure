@@ -577,7 +577,7 @@ mod tests {
     fn data_length_bintable_with_pcount() {
         let cards_vec = bintable_extension_header(24, 100, 500, 3, None);
         let len = compute_data_byte_len(&cards_vec, false).unwrap();
-        assert_eq!(len, 1 * (24 * 100) + 1 * 500);
+        assert_eq!(len, 24 * 100 + 500);
     }
 
     #[test]
