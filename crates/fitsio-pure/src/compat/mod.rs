@@ -3,6 +3,8 @@ pub mod fitsfile;
 pub mod hdu;
 pub mod headers;
 pub mod images;
+#[cfg(feature = "array")]
+pub mod ndarray_compat;
 pub mod tables;
 
 #[cfg(test)]
