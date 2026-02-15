@@ -1,0 +1,15 @@
+[package]
+name = "fitsio-tools"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fitsio-pure = { path = "../fitsio-pure" }
+
+[[bin]]
+name = "fitsinfo"
+path = "src/bin/fitsinfo.rs"
+
+[[bin]]
+name = "fitsconv"
+path = "src/bin/fitsconv.rs"
