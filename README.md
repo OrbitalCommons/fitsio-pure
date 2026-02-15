@@ -1,3 +1,5 @@
+![CI](https://github.com/OrbitalCommons/fitsio-pure/actions/workflows/ci.yml/badge.svg) ![License](https://img.shields.io/badge/license-TBD-lightgrey.svg) ![crates.io](https://img.shields.io/crates/v/fitsio-pure.svg) ![crates.io](https://img.shields.io/crates/v/fitsio-compat.svg) ![docs.rs](https://docs.rs/fitsio-pure/badge.svg)
+
 # fitsio-pure
 
 A pure Rust implementation of the FITS (Flexible Image Transport System) file format for reading and writing astronomical data. No C dependencies.
