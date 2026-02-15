@@ -2,6 +2,9 @@
 name = "fitsio-compat"
 version = "0.9.0"
 edition = "2021"
+description = "Compatibility layer mirroring the fitsio crate API using fitsio-pure"
+license = "MIT"
+repository = "https://github.com/OrbitalCommons/fitsio-pure"
 
 [dependencies]
 fitsio-pure = { path = "../fitsio-pure", version = "0.9.0" }
