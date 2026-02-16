@@ -1,6 +1,7 @@
 use super::errors::{Error, Result};
 use super::fitsfile::FitsFile;
 use super::headers::{ReadsKey, WritesKey};
+use super::tables::ReadsCol;
 
 /// Lightweight handle to one HDU within a FITS file.
 ///
@@ -39,6 +40,11 @@ impl FitsHdu {
         value: &T,
     ) -> Result<()> {
         T::write_key(file, self, name, value)
+    }
+
+    /// Read a column from a binary table HDU.
+    pub fn read_col<T: ReadsCol>(&self, file: &FitsFile, name: &str) -> Result<Vec<T>> {
+        T::read_col(file, self, name)
     }
 
     /// Return information about the type and shape of data in this HDU.
