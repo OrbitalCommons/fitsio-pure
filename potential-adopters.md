@@ -5,7 +5,7 @@ Rust projects currently depending on `fitsio` (the cfitsio C wrapper) that could
 ## Direct Dependencies
 
 - [MWATelescope/mwa_hyperdrive](https://github.com/MWATelescope/mwa_hyperdrive) - Calibration software for the Murchison Widefield Array (MWA) radio telescope
-- [TrystanScottLambert/dog](https://github.com/TrystanScottLambert/dog) - Like cat but for parquet (also supports FITS)
+- [TrystanScottLambert/dog](https://github.com/TrystanScottLambert/dog) - Like cat but for parquet (also supports FITS) ([issue](https://github.com/TrystanScottLambert/dog/issues/21))
 - [tgblackburn/opal](https://github.com/tgblackburn/opal) - Parallel, relativistic 1d3v PIC code written in Rust
 - [TomCreusot/Star_Tracker_Microcontroller](https://github.com/TomCreusot/Star_Tracker_Microcontroller) - Star tracker for spacecraft pointing direction identification
 - [IvS-KULeuven/MARVELpipeline](https://github.com/IvS-KULeuven/MARVELpipeline) - Data processing and radial velocity pipeline of the MARVEL spectrograph
