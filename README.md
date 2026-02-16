@@ -172,7 +172,7 @@ cargo run --features cli --bin fitsconv -- --help
 
 ## Benchmarks
 
-See [`docs/benchmarks.md`](docs/benchmarks.md) for comparative I/O throughput between fitsio-pure and cfitsio (image and binary table column operations).
+See [`docs/benchmarks.md`](docs/benchmarks.md) for comparative I/O throughput between fitsio-pure and cfitsio (image and binary table column operations). Performance is approaching cfitsio, but the project priorities are safety, correctness, and portability first. PRs to help close the gap are welcome.
 
 ## Reference Materials
 
