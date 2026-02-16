@@ -170,23 +170,24 @@ cargo run --features cli --bin fitsinfo -- path/to/file.fits
 cargo run --features cli --bin fitsconv -- --help
 ```
 
-## Benchmarks
+## Performance
 
-Comparative I/O throughput between fitsio-pure and fitsio (cfitsio C wrapper).
-Run with `cargo run -p fits-benchmark --features pure,cfitsio --no-default-features --release`.
+The goal of this library is **broad compatibility and portability**, not maximum I/O throughput. It is a drop-in replacement for `fitsio` that works everywhere Rust compiles -- including WebAssembly, cross-compiled targets, and environments without a C toolchain.
 
-| Test | fitsio-pure Write MP/s | cfitsio Write MP/s | fitsio-pure Read MP/s | cfitsio Read MP/s |
-|------|----------------------:|-------------------:|---------------------:|------------------:|
-| f32 1024x1024 | 88 | 290 | 323 | 981 |
-| f64 1024x1024 | 40 | 147 | 138 | 378 |
-| i32 1024x1024 | 179 | 288 | 349 | 1025 |
-| f32 4096x4096 | 78 | 278 | 103 | 315 |
-| f64 4096x4096 | 49 | 147 | 63 | 161 |
-| i32 4096x4096 | 99 | 283 | 128 | 311 |
+That said, performance is reasonable for most workloads. Compared to `fitsio` (cfitsio C wrapper):
 
-cfitsio is faster because it maintains open file handles and writes data in-place, while fitsio-pure rebuilds the byte buffer on writes. Read performance is much closer thanks to HDU metadata caching and bulk endian conversion via bytemuck.
+| Test | Reads | Writes |
+|------|------:|-------:|
+| f32 1024x1024 | 0.33x | 0.30x |
+| f64 1024x1024 | 0.37x | 0.27x |
+| i32 1024x1024 | 0.34x | 0.62x |
+| f32 4096x4096 | 0.33x | 0.28x |
+| f64 4096x4096 | 0.39x | 0.33x |
+| i32 4096x4096 | 0.41x | 0.35x |
 
-Full results and analysis in [`crates/fits-benchmark/README.md`](crates/fits-benchmark/README.md).
+cfitsio is faster because it operates on open file descriptors with in-place seeks and writes. fitsio-pure holds the file in memory and rebuilds the buffer on writes. For small images (256x256) reads are at parity.
+
+Run benchmarks yourself: `cargo run -p fits-benchmark --features pure,cfitsio --no-default-features --release`. Full results in [`crates/fits-benchmark/README.md`](crates/fits-benchmark/README.md).
 
 ## Reference Materials
 
