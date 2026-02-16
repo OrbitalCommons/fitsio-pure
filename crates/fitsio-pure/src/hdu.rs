@@ -28,6 +28,12 @@ pub enum HduInfo {
         pcount: usize,
         tfields: usize,
     },
+    RandomGroups {
+        bitpix: i64,
+        naxes: Vec<usize>,
+        pcount: usize,
+        gcount: usize,
+    },
 }
 
 /// A single Header Data Unit parsed from a FITS byte stream.
@@ -102,6 +108,19 @@ fn card_string_value(cards: &[Card], keyword: &str) -> Option<String> {
     })
 }
 
+fn card_logical_value(cards: &[Card], keyword: &str) -> Option<bool> {
+    cards.iter().find_map(|c| {
+        if c.keyword_str() == keyword {
+            match &c.value {
+                Some(Value::Logical(b)) => Some(*b),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    })
+}
+
 fn is_primary_hdu(cards: &[Card]) -> bool {
     cards
         .first()
@@ -120,12 +139,40 @@ fn compute_data_byte_len(cards: &[Card], is_primary: bool) -> Result<usize> {
 
     let bytes_per_value = (bitpix.unsigned_abs() as usize) / 8;
 
-    let mut total_pixels: usize = 1;
+    let mut dims = Vec::with_capacity(naxis);
     for i in 1..=naxis {
         let kw = alloc::format!("NAXIS{}", i);
         let dim = card_integer_value(cards, &kw).ok_or(Error::MissingKeyword("NAXISn"))? as usize;
-        total_pixels = total_pixels.checked_mul(dim).ok_or(Error::InvalidHeader)?;
+        dims.push(dim);
     }
+
+    // Random groups: primary HDU with NAXIS1=0 and GROUPS=T
+    if is_primary && dims[0] == 0 && card_logical_value(cards, "GROUPS") == Some(true) {
+        let pcount =
+            card_integer_value(cards, "PCOUNT").ok_or(Error::MissingKeyword("PCOUNT"))? as usize;
+        let gcount =
+            card_integer_value(cards, "GCOUNT").ok_or(Error::MissingKeyword("GCOUNT"))? as usize;
+
+        // Product of NAXIS2 * NAXIS3 * ... * NAXISm
+        let mut product: usize = 1;
+        for &d in &dims[1..] {
+            product = product.checked_mul(d).ok_or(Error::InvalidHeader)?;
+        }
+
+        // Nbytes = bytes_per_value * GCOUNT * (PCOUNT + product)
+        let group_size = pcount.checked_add(product).ok_or(Error::InvalidHeader)?;
+        let data_bytes = bytes_per_value
+            .checked_mul(gcount)
+            .ok_or(Error::InvalidHeader)?
+            .checked_mul(group_size)
+            .ok_or(Error::InvalidHeader)?;
+        return Ok(data_bytes);
+    }
+
+    let total_pixels: usize = dims
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or(Error::InvalidHeader)?;
 
     let pcount = if is_primary {
         0
@@ -169,6 +216,20 @@ fn parse_hdu_info(cards: &[Card], is_primary: bool) -> Result<HduInfo> {
                 card_integer_value(cards, &kw).ok_or(Error::MissingKeyword("NAXISn"))? as usize;
             naxes.push(dim);
         }
+
+        if naxis > 0 && naxes[0] == 0 && card_logical_value(cards, "GROUPS") == Some(true) {
+            let pcount = card_integer_value(cards, "PCOUNT")
+                .ok_or(Error::MissingKeyword("PCOUNT"))? as usize;
+            let gcount = card_integer_value(cards, "GCOUNT")
+                .ok_or(Error::MissingKeyword("GCOUNT"))? as usize;
+            return Ok(HduInfo::RandomGroups {
+                bitpix,
+                naxes: naxes[1..].to_vec(),
+                pcount,
+                gcount,
+            });
+        }
+
         return Ok(HduInfo::Primary { bitpix, naxes });
     }
 
@@ -719,6 +780,96 @@ mod tests {
         assert!(fits.find_by_name("A").is_some());
         assert!(fits.find_by_name("B").is_some());
         assert!(fits.find_by_name("C").is_some());
+    }
+
+    fn random_groups_header(
+        bitpix: i64,
+        naxes: &[usize],
+        pcount: usize,
+        gcount: usize,
+    ) -> Vec<Card> {
+        // naxes should include NAXIS1=0 as the first element
+        let naxis = naxes.len();
+        let mut cards = vec![
+            card("SIMPLE", Value::Logical(true)),
+            card("BITPIX", Value::Integer(bitpix)),
+            card("NAXIS", Value::Integer(naxis as i64)),
+        ];
+        for (i, &d) in naxes.iter().enumerate() {
+            let kw = alloc::format!("NAXIS{}", i + 1);
+            cards.push(card(&kw, Value::Integer(d as i64)));
+        }
+        cards.push(card("GROUPS", Value::Logical(true)));
+        cards.push(card("PCOUNT", Value::Integer(pcount as i64)));
+        cards.push(card("GCOUNT", Value::Integer(gcount as i64)));
+        cards
+    }
+
+    #[test]
+    fn parse_random_groups_synthetic() {
+        // BITPIX=-32, NAXIS=6, NAXIS1=0, NAXIS2=3, NAXIS3=4, NAXIS4-6=1
+        // GROUPS=T, PCOUNT=6, GCOUNT=2
+        // data_bytes = 4 * 2 * (6 + 3*4*1*1*1) = 4 * 2 * 18 = 144
+        let cards = random_groups_header(-32, &[0, 3, 4, 1, 1, 1], 6, 2);
+        let data_bytes = 144; // 4 * 2 * (6 + 3*4*1*1*1)
+        let data = build_fits_bytes(&cards, data_bytes);
+        let fits = parse_fits(&data).unwrap();
+
+        assert_eq!(fits.len(), 1);
+        let primary = fits.primary();
+        assert_eq!(primary.data_len, 144);
+        match &primary.info {
+            HduInfo::RandomGroups {
+                bitpix,
+                naxes,
+                pcount,
+                gcount,
+            } => {
+                assert_eq!(*bitpix, -32);
+                assert_eq!(naxes, &[3, 4, 1, 1, 1]);
+                assert_eq!(*pcount, 6);
+                assert_eq!(*gcount, 2);
+            }
+            other => panic!("Expected RandomGroups, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn random_groups_data_length() {
+        let cards = random_groups_header(-32, &[0, 3, 4, 1, 1, 1], 6, 2);
+        let len = compute_data_byte_len(&cards, true).unwrap();
+        assert_eq!(len, 144);
+    }
+
+    #[test]
+    fn parse_random_groups_real_file() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../reference/fitsrs-samples/samples/fits.gsfc.nasa.gov/Random_Groups.fits");
+        if !path.exists() {
+            eprintln!("Skipping: {:?} not found", path);
+            return;
+        }
+        let data = std::fs::read(&path).unwrap();
+        let fits = parse_fits(&data).unwrap();
+
+        let primary = fits.primary();
+        match &primary.info {
+            HduInfo::RandomGroups {
+                bitpix,
+                naxes,
+                pcount,
+                gcount,
+            } => {
+                assert_eq!(*bitpix, -32);
+                assert_eq!(naxes, &[3, 4, 1, 1, 1]);
+                assert_eq!(*pcount, 6);
+                assert_eq!(*gcount, 7956);
+            }
+            other => panic!("Expected RandomGroups, got {:?}", other),
+        }
+
+        // data_bytes = 4 * 7956 * (6 + 3*4*1*1*1) = 4 * 7956 * 18 = 572832
+        assert_eq!(primary.data_len, 572832);
     }
 
     #[test]

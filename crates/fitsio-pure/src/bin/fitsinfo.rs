@@ -78,6 +78,19 @@ fn format_hdu(index: usize, hdu: &Hdu) -> String {
                 out.push_str(&format!("  Heap size: {} bytes\n", pcount));
             }
         }
+        HduInfo::RandomGroups {
+            bitpix,
+            naxes,
+            pcount,
+            gcount,
+        } => {
+            out.push_str(&format!("HDU {}: Random Groups\n", index));
+            out.push_str(&format!("  BITPIX: {}\n", bitpix));
+            out.push_str(&format!("  Axes: {:?}\n", naxes));
+            out.push_str(&format!("  PCOUNT: {}\n", pcount));
+            out.push_str(&format!("  GCOUNT: {}\n", gcount));
+            out.push_str(&format!("  Data size: {} bytes\n", hdu.data_len));
+        }
     }
     out
 }

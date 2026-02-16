@@ -80,6 +80,14 @@ fn validate_fitsrs_corpus() {
                         } => {
                             format!("BinTable({naxis1}x{naxis2}, pcount={pcount}, {tfields} cols)")
                         }
+                        fitsio_pure::hdu::HduInfo::RandomGroups {
+                            bitpix,
+                            naxes,
+                            pcount,
+                            gcount,
+                        } => {
+                            format!("RandomGroups(bitpix={bitpix}, naxes={naxes:?}, pcount={pcount}, gcount={gcount})")
+                        }
                     })
                     .collect();
                 results.push((
