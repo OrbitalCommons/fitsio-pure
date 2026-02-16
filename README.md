@@ -172,26 +172,7 @@ cargo run --features cli --bin fitsconv -- --help
 
 ## Benchmarks
 
-Comparative I/O throughput between fitsio-pure and fitsio (cfitsio C wrapper) for both image and binary table column operations.
-
-### Image I/O (selected, 1024x1024)
-
-| Type | fitsio-pure Write MP/s | cfitsio Write MP/s | fitsio-pure Read MP/s | cfitsio Read MP/s |
-|------|----------------------:|-------------------:|---------------------:|------------------:|
-| f32 | 88 | 290 | 323 | 981 |
-| f64 | 40 | 147 | 138 | 378 |
-| i32 | 179 | 288 | 349 | 1025 |
-
-### Binary Table Column I/O (selected, 1M rows)
-
-| Type | fitsio-pure Write MR/s | cfitsio Write MR/s | fitsio-pure Read MR/s | cfitsio Read MR/s |
-|------|----------------------:|-------------------:|---------------------:|------------------:|
-| f32 | 24 | 223 | 110 | 704 |
-| f64 | 17 | 116 | 64 | 227 |
-| i32 | 21 | 250 | 202 | 751 |
-| i64 | 14 | 122 | 59 | 232 |
-
-Full results, analysis, and run instructions in [`docs/benchmarks.md`](docs/benchmarks.md).
+See [`docs/benchmarks.md`](docs/benchmarks.md) for comparative I/O throughput between fitsio-pure and cfitsio (image and binary table column operations).
 
 ## Reference Materials
 
