@@ -4,10 +4,21 @@ Rust projects currently depending on `fitsio` (the cfitsio C wrapper) that could
 
 ## Direct Dependencies
 
-- [MWATelescope/mwa_hyperdrive](https://github.com/MWATelescope/mwa_hyperdrive) - Calibration software for the Murchison Widefield Array (MWA) radio telescope
-- [TrystanScottLambert/dog](https://github.com/TrystanScottLambert/dog) - Like cat but for parquet (also supports FITS)
+### Contacted / PR submitted
+
+- [TrystanScottLambert/dog](https://github.com/TrystanScottLambert/dog) (5 stars) - Like cat but for parquet (also supports FITS). **PR submitted:** [#22](https://github.com/TrystanScottLambert/dog/pull/22). Uses FitsFile::open, hdu(), read_key, read_col. Drop-in replacement, only change needed was removing `mut` from file handles.
+- [MWATelescope/Marlu](https://github.com/MWATelescope/Marlu) (7 stars) - Coordinate transformations, Jones matrices, etc. for MWA. [Issue opened](https://github.com/MWATelescope/Marlu/issues/39). **Not a good candidate** -- fitsio is optional (behind `cfitsio` feature), and marlu bypasses the high-level fitsio API almost entirely. All real I/O goes through ~16 raw `fitsio_sys` C function calls via unsafe blocks (raw pointer to `fitsfile`). The only production use of the high-level `fitsio` crate is `errors::check_status`. Also uses random-groups FITS format for uvfits, which is niche. Would require marlu to be rewritten to use a high-level API.
+- [MWATelescope/mwa_hyperdrive](https://github.com/MWATelescope/mwa_hyperdrive) (132 stars) - Calibration software for the MWA radio telescope. Contacted via MWA org (same team as Marlu). Likely has similar raw fitsio_sys usage patterns.
+
+### Skipped
+
+- [ssmichael1/satkit](https://github.com/ssmichael1/satkit) (64 stars) - Satellite and Orbital Dynamics Toolkit. Maintainer already has their own FITS implementations (fitsrs, fitsview). Not a fitsio user despite being in the astronomy space.
+
+### Not yet contacted
+
+- [TomCreusot/Star_Tracker_Microcontroller](https://github.com/TomCreusot/Star_Tracker_Microcontroller) (5 stars) - Star tracker for spacecraft pointing direction identification
+- [art-den/electra_stacking](https://github.com/art-den/electra_stacking) (4 stars) - Software for stacking astronomical deep sky images. Same maintainer as astra_lite (52 stars).
 - [tgblackburn/opal](https://github.com/tgblackburn/opal) - Parallel, relativistic 1d3v PIC code written in Rust
-- [TomCreusot/Star_Tracker_Microcontroller](https://github.com/TomCreusot/Star_Tracker_Microcontroller) - Star tracker for spacecraft pointing direction identification
 - [IvS-KULeuven/MARVELpipeline](https://github.com/IvS-KULeuven/MARVELpipeline) - Data processing and radial velocity pipeline of the MARVEL spectrograph
 - [GreatAttractor/catetool](https://github.com/GreatAttractor/catetool) - Image alignment for the Continental-America Telescopic Eclipse Experiment
 - [ProsiaLAB/citrus](https://github.com/ProsiaLAB/citrus) - Implementation of LIME (LIne Modelling Engine) in Rust
@@ -22,7 +33,6 @@ Rust projects currently depending on `fitsio` (the cfitsio C wrapper) that could
 - [CosmicFrontierLabs/meter-sim](https://github.com/CosmicFrontierLabs/meter-sim)
 - [szqtc/dpltcubers](https://github.com/szqtc/dpltcubers) - Rust implementation of the DAMPE ltcube calculator
 - [asierzapata/eventide](https://github.com/asierzapata/eventide) - Desktop app for astrophotography image processing
-- [MWATelescope/Marlu](https://github.com/MWATelescope/Marlu) - Coordinate transformations, Jones matrices, etc. for MWA ([issue](https://github.com/MWATelescope/Marlu/issues/39))
 - [chrischtel/RapidFits](https://github.com/chrischtel/RapidFits)
 - [sunipkm/asicam_rs](https://github.com/sunipkm/asicam_rs) - ZWO ASI Camera SDK v2 Rust API
 - [dostergaard/astro-core](https://github.com/dostergaard/astro-core)
@@ -34,7 +44,6 @@ Rust projects currently depending on `fitsio` (the cfitsio C wrapper) that could
 - [twinkle-astronomy/twinkle](https://github.com/twinkle-astronomy/twinkle)
 - [MWATelescope/mwalib](https://github.com/MWATelescope/mwalib) - Library to read MWA raw visibilities, voltages, and metadata
 - [GuoHaoxuan/blink](https://github.com/GuoHaoxuan/blink)
-- [art-den/electra_stacking](https://github.com/art-den/electra_stacking) - Software for stacking astronomical deep sky images
 - [jvo203/FITSWebQL](https://github.com/jvo203/FITSWebQL) - High-performance FITSWebQL Supercomputer Edition
 - [robertoabraham/dragonfly-1](https://github.com/robertoabraham/dragonfly-1)
 - [boom-astro/boom-catalogs](https://github.com/boom-astro/boom-catalogs) - Ingest astronomical catalogs into MongoDB for cross-matching

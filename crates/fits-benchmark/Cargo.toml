@@ -16,3 +16,7 @@ fitsio = { version = "0.21", optional = true }
 [[bin]]
 name = "fits-benchmark"
 path = "src/main.rs"
+
+[[bin]]
+name = "column-benchmark"
+path = "src/column_bench.rs"

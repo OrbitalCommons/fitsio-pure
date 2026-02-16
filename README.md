@@ -172,21 +172,7 @@ cargo run --features cli --bin fitsconv -- --help
 
 ## Benchmarks
 
-Comparative I/O throughput between fitsio-pure and fitsio (cfitsio C wrapper).
-Run with `cargo run -p fits-benchmark --features pure,cfitsio --no-default-features --release`.
-
-| Test | fitsio-pure Write MP/s | cfitsio Write MP/s | fitsio-pure Read MP/s | cfitsio Read MP/s |
-|------|----------------------:|-------------------:|---------------------:|------------------:|
-| f32 1024x1024 | 88 | 290 | 323 | 981 |
-| f64 1024x1024 | 40 | 147 | 138 | 378 |
-| i32 1024x1024 | 179 | 288 | 349 | 1025 |
-| f32 4096x4096 | 78 | 278 | 103 | 315 |
-| f64 4096x4096 | 49 | 147 | 63 | 161 |
-| i32 4096x4096 | 99 | 283 | 128 | 311 |
-
-cfitsio is faster because it maintains open file handles and writes data in-place, while fitsio-pure rebuilds the byte buffer on writes. Read performance is much closer thanks to HDU metadata caching and bulk endian conversion via bytemuck.
-
-Full results and analysis in [`crates/fits-benchmark/README.md`](crates/fits-benchmark/README.md).
+See [`docs/benchmarks.md`](docs/benchmarks.md) for comparative I/O throughput between fitsio-pure and cfitsio (image and binary table column operations). Performance is approaching cfitsio, but the project priorities are safety, correctness, and portability first. PRs to help close the gap are welcome.
 
 ## Reference Materials
 
