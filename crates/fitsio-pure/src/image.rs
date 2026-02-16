@@ -6,11 +6,12 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use bytemuck::pod_collect_to_vec;
+
 use crate::block::padded_byte_len;
 use crate::endian::{
-    buf_f32_be_to_native, buf_f64_be_to_native, buf_i16_be_to_native, buf_i32_be_to_native,
-    buf_i64_be_to_native, read_f32_be, read_f64_be, read_i16_be, read_i32_be, read_i64_be,
-    write_f32_be, write_f64_be, write_i16_be, write_i32_be, write_i64_be,
+    buf_f32_native_to_be, buf_f64_native_to_be, buf_i16_native_to_be, buf_i32_native_to_be,
+    buf_i64_native_to_be,
 };
 use crate::error::{Error, Result};
 use crate::hdu::{Hdu, HduInfo};
@@ -79,48 +80,40 @@ pub fn read_image_data(fits_data: &[u8], hdu: &Hdu) -> Result<ImageData> {
     match bitpix {
         8 => Ok(ImageData::U8(raw.to_vec())),
         16 => {
-            let mut buf = raw.to_vec();
-            buf_i16_be_to_native(&mut buf);
-            let pixels: Vec<i16> = buf
-                .chunks_exact(2)
-                .map(|c| i16::from_ne_bytes([c[0], c[1]]))
-                .collect();
+            // Interpret big-endian bytes as i16, collect into properly-aligned Vec<i16>,
+            // then swap each element to native endianness in place.
+            let mut pixels: Vec<i16> = pod_collect_to_vec(raw);
+            for v in &mut pixels {
+                *v = i16::from_be(*v);
+            }
             Ok(ImageData::I16(pixels))
         }
         32 => {
-            let mut buf = raw.to_vec();
-            buf_i32_be_to_native(&mut buf);
-            let pixels: Vec<i32> = buf
-                .chunks_exact(4)
-                .map(|c| i32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
-                .collect();
+            let mut pixels: Vec<i32> = pod_collect_to_vec(raw);
+            for v in &mut pixels {
+                *v = i32::from_be(*v);
+            }
             Ok(ImageData::I32(pixels))
         }
         64 => {
-            let mut buf = raw.to_vec();
-            buf_i64_be_to_native(&mut buf);
-            let pixels: Vec<i64> = buf
-                .chunks_exact(8)
-                .map(|c| i64::from_ne_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
-                .collect();
+            let mut pixels: Vec<i64> = pod_collect_to_vec(raw);
+            for v in &mut pixels {
+                *v = i64::from_be(*v);
+            }
             Ok(ImageData::I64(pixels))
         }
         -32 => {
-            let mut buf = raw.to_vec();
-            buf_f32_be_to_native(&mut buf);
-            let pixels: Vec<f32> = buf
-                .chunks_exact(4)
-                .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
-                .collect();
+            let mut pixels: Vec<f32> = pod_collect_to_vec(raw);
+            for v in &mut pixels {
+                *v = f32::from_bits(u32::from_be(v.to_bits()));
+            }
             Ok(ImageData::F32(pixels))
         }
         -64 => {
-            let mut buf = raw.to_vec();
-            buf_f64_be_to_native(&mut buf);
-            let pixels: Vec<f64> = buf
-                .chunks_exact(8)
-                .map(|c| f64::from_ne_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
-                .collect();
+            let mut pixels: Vec<f64> = pod_collect_to_vec(raw);
+            for v in &mut pixels {
+                *v = f64::from_bits(u64::from_be(v.to_bits()));
+            }
             Ok(ImageData::F64(pixels))
         }
         other => Err(Error::InvalidBitpix(other)),
@@ -193,10 +186,10 @@ pub fn serialize_image_u8(pixels: &[u8]) -> Vec<u8> {
 pub fn serialize_image_i16(pixels: &[i16]) -> Vec<u8> {
     let raw_len = pixels.len() * 2;
     let padded_len = padded_byte_len(raw_len);
-    let mut buf = vec![0u8; padded_len];
-    for (i, &val) in pixels.iter().enumerate() {
-        write_i16_be(&mut buf[i * 2..], val);
-    }
+    // Copy pixel bytes via bytemuck, then swap endianness in-place
+    let mut buf: Vec<u8> = pod_collect_to_vec(pixels);
+    buf_i16_native_to_be(&mut buf);
+    buf.resize(padded_len, 0);
     buf
 }
 
@@ -204,10 +197,9 @@ pub fn serialize_image_i16(pixels: &[i16]) -> Vec<u8> {
 pub fn serialize_image_i32(pixels: &[i32]) -> Vec<u8> {
     let raw_len = pixels.len() * 4;
     let padded_len = padded_byte_len(raw_len);
-    let mut buf = vec![0u8; padded_len];
-    for (i, &val) in pixels.iter().enumerate() {
-        write_i32_be(&mut buf[i * 4..], val);
-    }
+    let mut buf: Vec<u8> = pod_collect_to_vec(pixels);
+    buf_i32_native_to_be(&mut buf);
+    buf.resize(padded_len, 0);
     buf
 }
 
@@ -215,10 +207,9 @@ pub fn serialize_image_i32(pixels: &[i32]) -> Vec<u8> {
 pub fn serialize_image_i64(pixels: &[i64]) -> Vec<u8> {
     let raw_len = pixels.len() * 8;
     let padded_len = padded_byte_len(raw_len);
-    let mut buf = vec![0u8; padded_len];
-    for (i, &val) in pixels.iter().enumerate() {
-        write_i64_be(&mut buf[i * 8..], val);
-    }
+    let mut buf: Vec<u8> = pod_collect_to_vec(pixels);
+    buf_i64_native_to_be(&mut buf);
+    buf.resize(padded_len, 0);
     buf
 }
 
@@ -226,10 +217,9 @@ pub fn serialize_image_i64(pixels: &[i64]) -> Vec<u8> {
 pub fn serialize_image_f32(pixels: &[f32]) -> Vec<u8> {
     let raw_len = pixels.len() * 4;
     let padded_len = padded_byte_len(raw_len);
-    let mut buf = vec![0u8; padded_len];
-    for (i, &val) in pixels.iter().enumerate() {
-        write_f32_be(&mut buf[i * 4..], val);
-    }
+    let mut buf: Vec<u8> = pod_collect_to_vec(pixels);
+    buf_f32_native_to_be(&mut buf);
+    buf.resize(padded_len, 0);
     buf
 }
 
@@ -237,10 +227,9 @@ pub fn serialize_image_f32(pixels: &[f32]) -> Vec<u8> {
 pub fn serialize_image_f64(pixels: &[f64]) -> Vec<u8> {
     let raw_len = pixels.len() * 8;
     let padded_len = padded_byte_len(raw_len);
-    let mut buf = vec![0u8; padded_len];
-    for (i, &val) in pixels.iter().enumerate() {
-        write_f64_be(&mut buf[i * 8..], val);
-    }
+    let mut buf: Vec<u8> = pod_collect_to_vec(pixels);
+    buf_f64_native_to_be(&mut buf);
+    buf.resize(padded_len, 0);
     buf
 }
 
@@ -290,44 +279,43 @@ fn hdu_bitpix_naxes(hdu: &Hdu) -> Result<(i64, &[usize])> {
 
 /// Decode a contiguous byte slice into an `ImageData` variant based on BITPIX.
 fn decode_pixels(raw: &[u8], bitpix: i64) -> Result<ImageData> {
-    let bpp = bytes_per_pixel(bitpix)?;
-    let count = if bpp > 0 { raw.len() / bpp } else { 0 };
+    bytes_per_pixel(bitpix)?; // validate
     match bitpix {
         8 => Ok(ImageData::U8(raw.to_vec())),
         16 => {
-            let mut out = Vec::with_capacity(count);
-            for chunk in raw.chunks_exact(2) {
-                out.push(read_i16_be(chunk));
+            let mut pixels: Vec<i16> = pod_collect_to_vec(raw);
+            for v in &mut pixels {
+                *v = i16::from_be(*v);
             }
-            Ok(ImageData::I16(out))
+            Ok(ImageData::I16(pixels))
         }
         32 => {
-            let mut out = Vec::with_capacity(count);
-            for chunk in raw.chunks_exact(4) {
-                out.push(read_i32_be(chunk));
+            let mut pixels: Vec<i32> = pod_collect_to_vec(raw);
+            for v in &mut pixels {
+                *v = i32::from_be(*v);
             }
-            Ok(ImageData::I32(out))
+            Ok(ImageData::I32(pixels))
         }
         64 => {
-            let mut out = Vec::with_capacity(count);
-            for chunk in raw.chunks_exact(8) {
-                out.push(read_i64_be(chunk));
+            let mut pixels: Vec<i64> = pod_collect_to_vec(raw);
+            for v in &mut pixels {
+                *v = i64::from_be(*v);
             }
-            Ok(ImageData::I64(out))
+            Ok(ImageData::I64(pixels))
         }
         -32 => {
-            let mut out = Vec::with_capacity(count);
-            for chunk in raw.chunks_exact(4) {
-                out.push(read_f32_be(chunk));
+            let mut pixels: Vec<f32> = pod_collect_to_vec(raw);
+            for v in &mut pixels {
+                *v = f32::from_bits(u32::from_be(v.to_bits()));
             }
-            Ok(ImageData::F32(out))
+            Ok(ImageData::F32(pixels))
         }
         -64 => {
-            let mut out = Vec::with_capacity(count);
-            for chunk in raw.chunks_exact(8) {
-                out.push(read_f64_be(chunk));
+            let mut pixels: Vec<f64> = pod_collect_to_vec(raw);
+            for v in &mut pixels {
+                *v = f64::from_bits(u64::from_be(v.to_bits()));
             }
-            Ok(ImageData::F64(out))
+            Ok(ImageData::F64(pixels))
         }
         _ => Err(Error::InvalidBitpix(bitpix)),
     }
@@ -469,6 +457,10 @@ pub fn read_image_region(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::endian::{
+        read_f32_be, read_f64_be, read_i16_be, read_i32_be, write_f32_be, write_f64_be,
+        write_i16_be, write_i32_be, write_i64_be,
+    };
     use crate::header::Card;
     use crate::value::Value;
 

@@ -47,15 +47,15 @@ impl ImageType {
     }
 }
 
-fn get_core_hdu(file: &FitsFile, hdu: &FitsHdu) -> Result<(crate::hdu::FitsData, usize)> {
-    let fits_data = crate::hdu::parse_fits(file.data())?;
+fn validate_hdu_index(file: &FitsFile, hdu: &FitsHdu) -> Result<usize> {
+    let fits_data = file.parsed()?;
     if hdu.hdu_index >= fits_data.len() {
         return Err(Error::Message(format!(
             "HDU index {} out of range",
             hdu.hdu_index
         )));
     }
-    Ok((fits_data, hdu.hdu_index))
+    Ok(hdu.hdu_index)
 }
 
 /// Trait for types that can read image pixel data from a FITS file.
@@ -113,8 +113,9 @@ macro_rules! impl_read_image {
     ($t:ty, $u8_fn:expr, $i16_fn:expr, $i32_fn:expr, $i64_fn:expr, $f32_fn:expr, $f64_fn:expr) => {
         impl ReadImage for $t {
             fn read_image(file: &FitsFile, hdu: &FitsHdu) -> Result<Vec<Self>> {
-                let (fits_data, idx) = get_core_hdu(file, hdu)?;
-                let core_hdu = &fits_data.hdus[idx];
+                let idx = validate_hdu_index(file, hdu)?;
+                let parsed = file.parsed()?;
+                let core_hdu = &parsed.hdus[idx];
                 let img = crate::image::read_image_data(file.data(), core_hdu)?;
                 Ok(extract_from_image_data(
                     &img, $u8_fn, $i16_fn, $i32_fn, $i64_fn, $f32_fn, $f64_fn,
@@ -126,8 +127,9 @@ macro_rules! impl_read_image {
                 hdu: &FitsHdu,
                 range: std::ops::Range<usize>,
             ) -> Result<Vec<Self>> {
-                let (fits_data, idx) = get_core_hdu(file, hdu)?;
-                let core_hdu = &fits_data.hdus[idx];
+                let idx = validate_hdu_index(file, hdu)?;
+                let parsed = file.parsed()?;
+                let core_hdu = &parsed.hdus[idx];
                 let count = range.end.saturating_sub(range.start);
                 let img =
                     crate::image::read_image_section(file.data(), core_hdu, range.start, count)?;
@@ -142,8 +144,9 @@ macro_rules! impl_read_image {
                 start_row: usize,
                 num_rows: usize,
             ) -> Result<Vec<Self>> {
-                let (fits_data, idx) = get_core_hdu(file, hdu)?;
-                let core_hdu = &fits_data.hdus[idx];
+                let idx = validate_hdu_index(file, hdu)?;
+                let parsed = file.parsed()?;
+                let core_hdu = &parsed.hdus[idx];
                 let img =
                     crate::image::read_image_rows(file.data(), core_hdu, start_row, num_rows)?;
                 Ok(extract_from_image_data(
@@ -156,8 +159,9 @@ macro_rules! impl_read_image {
                 hdu: &FitsHdu,
                 ranges: &[std::ops::Range<usize>],
             ) -> Result<Vec<Self>> {
-                let (fits_data, idx) = get_core_hdu(file, hdu)?;
-                let core_hdu = &fits_data.hdus[idx];
+                let idx = validate_hdu_index(file, hdu)?;
+                let parsed = file.parsed()?;
+                let core_hdu = &parsed.hdus[idx];
                 let tuples = ranges_to_tuples(ranges);
                 let img = crate::image::read_image_region(file.data(), core_hdu, &tuples)?;
                 Ok(extract_from_image_data(
@@ -232,27 +236,39 @@ macro_rules! impl_write_image {
     ($t:ty, $bitpix:expr, $serialize_fn:path) => {
         impl WriteImage for $t {
             fn write_image(file: &mut FitsFile, hdu: &FitsHdu, data: &[Self]) -> Result<()> {
-                let fits_data = crate::hdu::parse_fits(file.data())?;
-                let core_hdu = fits_data
-                    .hdus
-                    .get(hdu.hdu_index)
-                    .ok_or(Error::Message(format!(
-                        "HDU index {} out of range",
-                        hdu.hdu_index
-                    )))?;
+                // Read HDU metadata from cache before mutating
+                let (header_end, data_start, padded_data_len, file_len) = {
+                    let parsed = file.parsed()?;
+                    let core_hdu =
+                        parsed
+                            .hdus
+                            .get(hdu.hdu_index)
+                            .ok_or(Error::Message(format!(
+                                "HDU index {} out of range",
+                                hdu.hdu_index
+                            )))?;
+                    let padded = crate::block::padded_byte_len(core_hdu.data_len);
+                    (
+                        core_hdu.data_start,
+                        core_hdu.data_start,
+                        padded,
+                        file.data().len(),
+                    )
+                };
 
-                let header_end = core_hdu.data_start;
-                let header_bytes = file.data()[..header_end].to_vec();
                 let serialized = $serialize_fn(data);
 
-                let mut new_data = Vec::with_capacity(header_bytes.len() + serialized.len());
-                new_data.extend_from_slice(&header_bytes);
-                new_data.extend_from_slice(&serialized);
+                let next_hdu_start = data_start + padded_data_len;
+                let tail_len = if next_hdu_start < file_len {
+                    file_len - next_hdu_start
+                } else {
+                    0
+                };
 
-                // Append remaining HDUs after this one
-                let padded_data_len = crate::block::padded_byte_len(core_hdu.data_len);
-                let next_hdu_start = core_hdu.data_start + padded_data_len;
-                if next_hdu_start < file.data().len() {
+                let mut new_data = Vec::with_capacity(header_end + serialized.len() + tail_len);
+                new_data.extend_from_slice(&file.data()[..header_end]);
+                new_data.extend_from_slice(&serialized);
+                if tail_len > 0 {
                     new_data.extend_from_slice(&file.data()[next_hdu_start..]);
                 }
 

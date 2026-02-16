@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 use super::errors::{Error, Result};
@@ -12,11 +13,11 @@ pub enum FileOpenMode {
 }
 
 /// An in-memory representation of an open FITS file.
-#[derive(Debug)]
 pub struct FitsFile {
     data: Vec<u8>,
     filename: PathBuf,
     mode: FileOpenMode,
+    cached_parse: RefCell<Option<crate::hdu::FitsData>>,
 }
 
 /// Builder for creating a new FITS file.
@@ -79,6 +80,7 @@ impl FitsFile {
             data,
             filename: path.as_ref().to_path_buf(),
             mode: FileOpenMode::ReadOnly,
+            cached_parse: RefCell::new(None),
         })
     }
 
@@ -89,7 +91,28 @@ impl FitsFile {
             data,
             filename: path.as_ref().to_path_buf(),
             mode: FileOpenMode::ReadWrite,
+            cached_parse: RefCell::new(None),
         })
+    }
+
+    /// Return the cached parse of the FITS data, parsing if needed.
+    pub fn parsed(&self) -> Result<std::cell::Ref<'_, crate::hdu::FitsData>> {
+        {
+            let cache = self.cached_parse.borrow();
+            if cache.is_some() {
+                return Ok(std::cell::Ref::map(cache, |c| c.as_ref().unwrap()));
+            }
+        }
+        let parsed = crate::hdu::parse_fits(&self.data)?;
+        *self.cached_parse.borrow_mut() = Some(parsed);
+        Ok(std::cell::Ref::map(self.cached_parse.borrow(), |c| {
+            c.as_ref().unwrap()
+        }))
+    }
+
+    /// Invalidate the cached parse (called after data mutations).
+    fn invalidate_cache(&self) {
+        *self.cached_parse.borrow_mut() = None;
     }
 
     /// Return a builder for creating a new FITS file.
@@ -107,7 +130,7 @@ impl FitsFile {
 
     /// Return a handle to the HDU described by `desc` (index or name).
     pub fn hdu<D: DescribesHdu>(&self, desc: D) -> Result<FitsHdu> {
-        let fits_data = crate::hdu::parse_fits(&self.data)?;
+        let fits_data = self.parsed()?;
         let (idx, _) = desc
             .get_hdu(&fits_data)
             .ok_or(Error::Message("HDU not found".to_string()))?;
@@ -116,13 +139,13 @@ impl FitsFile {
 
     /// Return the number of HDUs in this file.
     pub fn num_hdus(&self) -> Result<usize> {
-        let fits_data = crate::hdu::parse_fits(&self.data)?;
+        let fits_data = self.parsed()?;
         Ok(fits_data.len())
     }
 
     /// Return handles to all HDUs in the file.
     pub fn iter(&self) -> Result<Vec<FitsHdu>> {
-        let fits_data = crate::hdu::parse_fits(&self.data)?;
+        let fits_data = self.parsed()?;
         Ok((0..fits_data.len())
             .map(|i| FitsHdu { hdu_index: i })
             .collect())
@@ -157,7 +180,8 @@ impl FitsFile {
         self.data.extend_from_slice(&header_bytes);
         self.data.resize(self.data.len() + padded_data, 0u8);
 
-        let fits_data = crate::hdu::parse_fits(&self.data)?;
+        self.invalidate_cache();
+        let fits_data = self.parsed()?;
         let idx = fits_data.len() - 1;
         Ok(FitsHdu { hdu_index: idx })
     }
@@ -180,7 +204,8 @@ impl FitsFile {
         let header_bytes = crate::header::serialize_header(&cards);
         self.data.extend_from_slice(&header_bytes);
 
-        let fits_data = crate::hdu::parse_fits(&self.data)?;
+        self.invalidate_cache();
+        let fits_data = self.parsed()?;
         let idx = fits_data.len() - 1;
         Ok(FitsHdu { hdu_index: idx })
     }
@@ -193,6 +218,7 @@ impl FitsFile {
     /// Replace the in-memory FITS bytes (used by write operations).
     pub fn set_data(&mut self, data: Vec<u8>) {
         self.data = data;
+        self.invalidate_cache();
     }
 
     /// Flush the in-memory data to disk if opened for writing.
@@ -247,6 +273,7 @@ impl NewFitsFile {
             data: header_bytes,
             filename: self.path,
             mode: FileOpenMode::ReadWrite,
+            cached_parse: RefCell::new(None),
         })
     }
 }

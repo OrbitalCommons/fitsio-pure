@@ -20,7 +20,7 @@ pub trait WritesKey {
 }
 
 fn find_card_value(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<crate::value::Value> {
-    let fits_data = crate::hdu::parse_fits(file.data())?;
+    let fits_data = file.parsed()?;
     let core_hdu = fits_data.get(hdu.hdu_index).ok_or(Error::Message(format!(
         "HDU index {} not found",
         hdu.hdu_index

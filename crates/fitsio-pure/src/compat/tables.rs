@@ -87,15 +87,15 @@ pub enum Column {
     Logical(Vec<bool>),
 }
 
-fn get_core_hdu(file: &FitsFile, hdu: &FitsHdu) -> Result<(crate::hdu::FitsData, usize)> {
-    let fits_data = crate::hdu::parse_fits(file.data())?;
+fn validate_hdu_index(file: &FitsFile, hdu: &FitsHdu) -> Result<usize> {
+    let fits_data = file.parsed()?;
     if hdu.hdu_index >= fits_data.len() {
         return Err(Error::Message(format!(
             "HDU index {} out of range",
             hdu.hdu_index
         )));
     }
-    Ok((fits_data, hdu.hdu_index))
+    Ok(hdu.hdu_index)
 }
 
 /// Trait for types that can be read from a table column.
@@ -134,8 +134,9 @@ fn get_tfields(hdu: &crate::hdu::Hdu) -> Result<usize> {
 
 impl ReadsCol for i32 {
     fn read_col(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<Vec<Self>> {
-        let (fits_data, idx) = get_core_hdu(file, hdu)?;
-        let core_hdu = &fits_data.hdus[idx];
+        let idx = validate_hdu_index(file, hdu)?;
+        let parsed = file.parsed()?;
+        let core_hdu = &parsed.hdus[idx];
         let tfields = get_tfields(core_hdu)?;
         let col_idx = find_column_index(&core_hdu.cards, name, tfields)?;
         let col_data = crate::bintable::read_binary_column(file.data(), core_hdu, col_idx)?;
@@ -152,8 +153,9 @@ impl ReadsCol for i32 {
 
 impl ReadsCol for i64 {
     fn read_col(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<Vec<Self>> {
-        let (fits_data, idx) = get_core_hdu(file, hdu)?;
-        let core_hdu = &fits_data.hdus[idx];
+        let idx = validate_hdu_index(file, hdu)?;
+        let parsed = file.parsed()?;
+        let core_hdu = &parsed.hdus[idx];
         let tfields = get_tfields(core_hdu)?;
         let col_idx = find_column_index(&core_hdu.cards, name, tfields)?;
         let col_data = crate::bintable::read_binary_column(file.data(), core_hdu, col_idx)?;
@@ -170,8 +172,9 @@ impl ReadsCol for i64 {
 
 impl ReadsCol for f32 {
     fn read_col(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<Vec<Self>> {
-        let (fits_data, idx) = get_core_hdu(file, hdu)?;
-        let core_hdu = &fits_data.hdus[idx];
+        let idx = validate_hdu_index(file, hdu)?;
+        let parsed = file.parsed()?;
+        let core_hdu = &parsed.hdus[idx];
         let tfields = get_tfields(core_hdu)?;
         let col_idx = find_column_index(&core_hdu.cards, name, tfields)?;
         let col_data = crate::bintable::read_binary_column(file.data(), core_hdu, col_idx)?;
@@ -187,8 +190,9 @@ impl ReadsCol for f32 {
 
 impl ReadsCol for f64 {
     fn read_col(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<Vec<Self>> {
-        let (fits_data, idx) = get_core_hdu(file, hdu)?;
-        let core_hdu = &fits_data.hdus[idx];
+        let idx = validate_hdu_index(file, hdu)?;
+        let parsed = file.parsed()?;
+        let core_hdu = &parsed.hdus[idx];
         let tfields = get_tfields(core_hdu)?;
         let col_idx = find_column_index(&core_hdu.cards, name, tfields)?;
         let col_data = crate::bintable::read_binary_column(file.data(), core_hdu, col_idx)?;
@@ -206,8 +210,9 @@ impl ReadsCol for f64 {
 
 impl ReadsCol for String {
     fn read_col(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<Vec<Self>> {
-        let (fits_data, idx) = get_core_hdu(file, hdu)?;
-        let core_hdu = &fits_data.hdus[idx];
+        let idx = validate_hdu_index(file, hdu)?;
+        let parsed = file.parsed()?;
+        let core_hdu = &parsed.hdus[idx];
         let tfields = get_tfields(core_hdu)?;
         let col_idx = find_column_index(&core_hdu.cards, name, tfields)?;
         let col_data = crate::bintable::read_binary_column(file.data(), core_hdu, col_idx)?;

@@ -27,4 +27,5 @@ path = "src/bin/fitsconv.rs"
 required-features = ["cli"]
 
 [dependencies]
+bytemuck = { version = "1.25.0", features = ["extern_crate_alloc"] }
 ndarray = { version = "0.17.2", optional = true }

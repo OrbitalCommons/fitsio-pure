@@ -177,14 +177,14 @@ Run with `cargo run -p fits-benchmark --features pure,cfitsio --no-default-featu
 
 | Test | fitsio-pure Write MP/s | cfitsio Write MP/s | fitsio-pure Read MP/s | cfitsio Read MP/s |
 |------|----------------------:|-------------------:|---------------------:|------------------:|
-| f32 1024x1024 | 90 | 290 | 100 | 981 |
-| f64 1024x1024 | 42 | 147 | 47 | 378 |
-| i32 1024x1024 | 187 | 288 | 295 | 1025 |
-| f32 4096x4096 | 98 | 278 | 96 | 315 |
-| f64 4096x4096 | 51 | 147 | 49 | 161 |
-| i32 4096x4096 | 103 | 283 | 96 | 311 |
+| f32 1024x1024 | 88 | 290 | 323 | 981 |
+| f64 1024x1024 | 40 | 147 | 138 | 378 |
+| i32 1024x1024 | 179 | 288 | 349 | 1025 |
+| f32 4096x4096 | 78 | 278 | 103 | 315 |
+| f64 4096x4096 | 49 | 147 | 63 | 161 |
+| i32 4096x4096 | 99 | 283 | 128 | 311 |
 
-cfitsio is faster because it maintains open file handles and writes data in-place, while fitsio-pure's compat layer re-parses headers and rebuilds the byte buffer on each operation. The core serialization (big-endian byte swaps) is similar speed -- the gap is architectural overhead in the compat layer that can be optimized in future releases.
+cfitsio is faster because it maintains open file handles and writes data in-place, while fitsio-pure rebuilds the byte buffer on writes. Read performance is much closer thanks to HDU metadata caching and bulk endian conversion via bytemuck.
 
 Full results and analysis in [`crates/fits-benchmark/README.md`](crates/fits-benchmark/README.md).
 
