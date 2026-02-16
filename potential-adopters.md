@@ -22,7 +22,7 @@ Rust projects currently depending on `fitsio` (the cfitsio C wrapper) that could
 - [CosmicFrontierLabs/meter-sim](https://github.com/CosmicFrontierLabs/meter-sim)
 - [szqtc/dpltcubers](https://github.com/szqtc/dpltcubers) - Rust implementation of the DAMPE ltcube calculator
 - [asierzapata/eventide](https://github.com/asierzapata/eventide) - Desktop app for astrophotography image processing
-- [MWATelescope/Marlu](https://github.com/MWATelescope/Marlu) - Coordinate transformations, Jones matrices, etc. for MWA
+- [MWATelescope/Marlu](https://github.com/MWATelescope/Marlu) - Coordinate transformations, Jones matrices, etc. for MWA ([issue](https://github.com/MWATelescope/Marlu/issues/39))
 - [chrischtel/RapidFits](https://github.com/chrischtel/RapidFits)
 - [sunipkm/asicam_rs](https://github.com/sunipkm/asicam_rs) - ZWO ASI Camera SDK v2 Rust API
 - [dostergaard/astro-core](https://github.com/dostergaard/astro-core)
