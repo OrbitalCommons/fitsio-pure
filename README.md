@@ -172,21 +172,26 @@ cargo run --features cli --bin fitsconv -- --help
 
 ## Benchmarks
 
-Comparative I/O throughput between fitsio-pure and fitsio (cfitsio C wrapper).
-Run with `cargo run -p fits-benchmark --features pure,cfitsio --no-default-features --release`.
+Comparative I/O throughput between fitsio-pure and fitsio (cfitsio C wrapper) for both image and binary table column operations.
 
-| Test | fitsio-pure Write MP/s | cfitsio Write MP/s | fitsio-pure Read MP/s | cfitsio Read MP/s |
+### Image I/O (selected, 1024x1024)
+
+| Type | fitsio-pure Write MP/s | cfitsio Write MP/s | fitsio-pure Read MP/s | cfitsio Read MP/s |
 |------|----------------------:|-------------------:|---------------------:|------------------:|
-| f32 1024x1024 | 88 | 290 | 323 | 981 |
-| f64 1024x1024 | 40 | 147 | 138 | 378 |
-| i32 1024x1024 | 179 | 288 | 349 | 1025 |
-| f32 4096x4096 | 78 | 278 | 103 | 315 |
-| f64 4096x4096 | 49 | 147 | 63 | 161 |
-| i32 4096x4096 | 99 | 283 | 128 | 311 |
+| f32 | 88 | 290 | 323 | 981 |
+| f64 | 40 | 147 | 138 | 378 |
+| i32 | 179 | 288 | 349 | 1025 |
 
-cfitsio is faster because it maintains open file handles and writes data in-place, while fitsio-pure rebuilds the byte buffer on writes. Read performance is much closer thanks to HDU metadata caching and bulk endian conversion via bytemuck.
+### Binary Table Column I/O (selected, 1M rows)
 
-Full results and analysis in [`crates/fits-benchmark/README.md`](crates/fits-benchmark/README.md).
+| Type | fitsio-pure Write MR/s | cfitsio Write MR/s | fitsio-pure Read MR/s | cfitsio Read MR/s |
+|------|----------------------:|-------------------:|---------------------:|------------------:|
+| f32 | 24 | 223 | 110 | 704 |
+| f64 | 17 | 116 | 64 | 227 |
+| i32 | 21 | 250 | 202 | 751 |
+| i64 | 14 | 122 | 59 | 232 |
+
+Full results, analysis, and run instructions in [`docs/benchmarks.md`](docs/benchmarks.md).
 
 ## Reference Materials
 
