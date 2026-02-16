@@ -43,7 +43,7 @@ impl FitsHdu {
 
     /// Return information about the type and shape of data in this HDU.
     pub fn info(&self, file: &FitsFile) -> Result<HduInfo> {
-        let fits_data = crate::hdu::parse_fits(file.data())?;
+        let fits_data = file.parsed()?;
         let hdu = fits_data.get(self.hdu_index).ok_or(Error::Message(format!(
             "HDU index {} out of range",
             self.hdu_index

@@ -35,18 +35,18 @@ Measured on Linux 6.8, AMD/Intel (your numbers will vary).
 
 | Test                   |   Write ms |   Write MP/s |    Read ms |    Read MP/s |
 |------------------------|------------|--------------|------------|--------------|
-| f32 256x256            |       0.58 |        112.6 |       0.43 |        151.4 |
-| f64 256x256            |       1.15 |         56.8 |       0.87 |         75.2 |
-| i32 256x256            |       0.23 |        286.6 |       0.12 |        564.0 |
-| f32 1024x1024          |      11.61 |         90.3 |      10.47 |        100.1 |
-| f64 1024x1024          |      25.09 |         41.8 |      22.34 |         46.9 |
-| i32 1024x1024          |       5.61 |        187.0 |       3.55 |        295.1 |
-| f32 4096x4096          |     170.63 |         98.3 |     175.58 |         95.6 |
-| f64 4096x4096          |     327.94 |         51.2 |     344.35 |         48.7 |
-| i32 4096x4096          |     162.90 |        103.0 |     175.45 |         95.6 |
-| f32 512x512x100        |     257.64 |        101.7 |     277.18 |         94.6 |
-| f64 512x512x100        |     514.26 |         51.0 |     541.89 |         48.4 |
-| i32 512x512x100        |     256.24 |        102.3 |     276.76 |         94.7 |
+| f32 256x256            |       0.97 |         67.5 |       0.09 |        720.2 |
+| f64 256x256            |       1.14 |         57.4 |       0.16 |        405.7 |
+| i32 256x256            |       0.23 |        282.8 |       0.09 |        762.9 |
+| f32 1024x1024          |      11.91 |         88.0 |       3.25 |        322.7 |
+| f64 1024x1024          |      26.34 |         39.8 |       7.57 |        138.4 |
+| i32 1024x1024          |       5.86 |        178.8 |       3.00 |        349.1 |
+| f32 4096x4096          |     215.25 |         77.9 |     163.37 |        102.7 |
+| f64 4096x4096          |     341.56 |         49.1 |     264.91 |         63.3 |
+| i32 4096x4096          |     169.70 |         98.9 |     131.06 |        128.0 |
+| f32 512x512x100        |     268.45 |         97.7 |     208.48 |        125.7 |
+| f64 512x512x100        |     533.96 |         49.1 |     418.13 |         62.7 |
+| i32 512x512x100        |     267.53 |         98.0 |     204.36 |        128.3 |
 
 ### fitsio (cfitsio)
 
@@ -67,12 +67,11 @@ Measured on Linux 6.8, AMD/Intel (your numbers will vary).
 
 ### Analysis
 
-cfitsio is **2-3x faster** for writes and **3-7x faster** for reads, depending on data type and size.
+cfitsio is **2-3x faster** for writes and **~3x faster** for reads at large sizes. For small images (256x256) the read gap has nearly closed.
 
-The primary bottleneck in fitsio-pure is the **compat layer re-parsing the entire FITS structure on every operation** (`parse_fits()` is called per read/write). For the core byte-serialization path, fitsio-pure is competitive with cfitsio since both are doing the same big-endian byte swaps. The overhead comes from:
+Recent optimizations to fitsio-pure:
+- **HDU metadata caching** -- `FitsFile` now caches parsed headers in a `RefCell`, avoiding re-parsing on repeated reads
+- **Bulk endian conversion via bytemuck** -- `pod_collect_to_vec` + in-place byte swaps replace element-by-element conversion loops
+- **Reduced allocations** -- read path avoids intermediate buffer copies
 
-1. **Header re-parsing** -- the compat API re-parses all headers from raw bytes on each call
-2. **Full-file read on open** -- `FitsFile::open()` reads the entire file into memory via `std::fs::read()`
-3. **Full-file rewrite on write** -- each write rebuilds the entire byte buffer
-
-These are architectural choices in the compat layer, not fundamental limitations. A stateful API that caches parsed headers and uses in-place writes would close the gap significantly.
+The remaining write overhead comes from full-buffer rebuilds on each write. The remaining read gap at large sizes is dominated by I/O and memory bandwidth rather than parsing.
