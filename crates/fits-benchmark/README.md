@@ -2,16 +2,21 @@
 
 Comparative I/O benchmark between **fitsio-pure** (pure Rust) and **fitsio** (cfitsio C wrapper).
 
+Three backends are benchmarked:
+- **fitsio-pure (core)** -- direct use of `parse_fits`, `read_image_data`, `serialize_image_*`
+- **fitsio-pure (compat)** -- the drop-in `fitsio`-compatible API (`FitsFile`, `ReadImage`, `WriteImage`)
+- **fitsio (cfitsio)** -- the C library wrapper (requires `libcfitsio-dev`)
+
 ## Running
 
 ```sh
-# Pure Rust only
+# Pure Rust only (core + compat)
 cargo run -p fits-benchmark --features pure --no-default-features --release
 
 # cfitsio only (requires libcfitsio-dev)
 cargo run -p fits-benchmark --features cfitsio --no-default-features --release
 
-# Both side-by-side
+# All three side-by-side
 cargo run -p fits-benchmark --features pure,cfitsio --no-default-features --release
 ```
 
@@ -31,22 +36,39 @@ average wall-clock time per operation and throughput in megapixels/second.
 
 Measured on Linux 6.8, AMD/Intel (your numbers will vary).
 
-### fitsio-pure
+### fitsio-pure (core)
 
 | Test                   |   Write ms |   Write MP/s |    Read ms |    Read MP/s |
 |------------------------|------------|--------------|------------|--------------|
-| f32 256x256            |       0.97 |         67.5 |       0.09 |        720.2 |
-| f64 256x256            |       1.14 |         57.4 |       0.16 |        405.7 |
-| i32 256x256            |       0.23 |        282.8 |       0.09 |        762.9 |
-| f32 1024x1024          |      11.91 |         88.0 |       3.25 |        322.7 |
-| f64 1024x1024          |      26.34 |         39.8 |       7.57 |        138.4 |
-| i32 1024x1024          |       5.86 |        178.8 |       3.00 |        349.1 |
-| f32 4096x4096          |     215.25 |         77.9 |     163.37 |        102.7 |
-| f64 4096x4096          |     341.56 |         49.1 |     264.91 |         63.3 |
-| i32 4096x4096          |     169.70 |         98.9 |     131.06 |        128.0 |
-| f32 512x512x100        |     268.45 |         97.7 |     208.48 |        125.7 |
-| f64 512x512x100        |     533.96 |         49.1 |     418.13 |         62.7 |
-| i32 512x512x100        |     267.53 |         98.0 |     204.36 |        128.3 |
+| f32 256x256            |       0.22 |        293.5 |       0.09 |        767.3 |
+| f64 256x256            |       0.43 |        151.4 |       0.14 |        463.9 |
+| i32 256x256            |       0.22 |        304.7 |       0.08 |        828.1 |
+| f32 1024x1024          |       5.45 |        192.2 |       2.12 |        493.9 |
+| f64 1024x1024          |      11.87 |         88.3 |       6.17 |        169.9 |
+| i32 1024x1024          |       5.29 |        198.2 |       2.15 |        487.8 |
+| f32 4096x4096          |     173.54 |         96.7 |     127.80 |        131.3 |
+| f64 4096x4096          |     326.38 |         51.4 |     192.89 |         87.0 |
+| i32 4096x4096          |     145.72 |        115.1 |      94.98 |        176.6 |
+| f32 512x512x100        |     215.96 |        121.4 |     151.17 |        173.4 |
+| f64 512x512x100        |     450.63 |         58.2 |     286.47 |         91.5 |
+| i32 512x512x100        |     209.16 |        125.3 |     147.84 |        177.3 |
+
+### fitsio-pure (compat)
+
+| Test                   |   Write ms |   Write MP/s |    Read ms |    Read MP/s |
+|------------------------|------------|--------------|------------|--------------|
+| f32 256x256            |       0.24 |        273.0 |       0.08 |        773.8 |
+| f64 256x256            |       0.46 |        143.8 |       0.14 |        479.6 |
+| i32 256x256            |       0.23 |        279.7 |       0.08 |        848.9 |
+| f32 1024x1024          |       5.21 |        201.1 |       2.31 |        454.3 |
+| f64 1024x1024          |      23.34 |         44.9 |       5.27 |        199.0 |
+| i32 1024x1024          |       4.96 |        211.5 |       2.24 |        468.6 |
+| f32 4096x4096          |     174.26 |         96.3 |     142.04 |        118.1 |
+| f64 4096x4096          |     348.93 |         48.1 |     275.64 |         60.9 |
+| i32 4096x4096          |     176.75 |         94.9 |     143.53 |        116.9 |
+| f32 512x512x100        |     283.68 |         92.4 |     224.58 |        116.7 |
+| f64 512x512x100        |     547.06 |         47.9 |     421.40 |         62.2 |
+| i32 512x512x100        |     273.78 |         95.8 |     212.52 |        123.4 |
 
 ### fitsio (cfitsio)
 
@@ -67,11 +89,10 @@ Measured on Linux 6.8, AMD/Intel (your numbers will vary).
 
 ### Analysis
 
-cfitsio is **2-3x faster** for writes and **~3x faster** for reads at large sizes. For small images (256x256) the read gap has nearly closed.
+The core API and compat layer have similar performance for small images. At larger sizes the compat layer adds overhead from the `extract_from_image_data` type-dispatch step and `ImageData` enum wrapping/unwrapping.
 
-Recent optimizations to fitsio-pure:
-- **HDU metadata caching** -- `FitsFile` now caches parsed headers in a `RefCell`, avoiding re-parsing on repeated reads
-- **Bulk endian conversion via bytemuck** -- `pod_collect_to_vec` + in-place byte swaps replace element-by-element conversion loops
-- **Reduced allocations** -- read path avoids intermediate buffer copies
+Compared to cfitsio, the core API is **~0.5x** for reads and **~0.4-0.7x** for writes at 1M+ pixel sizes. The compat layer is slightly slower than core due to the extra abstraction. For small images (256x256) all three backends read at similar speed.
 
-The remaining write overhead comes from full-buffer rebuilds on each write. The remaining read gap at large sizes is dominated by I/O and memory bandwidth rather than parsing.
+The remaining gap vs cfitsio is due to:
+- **Memory copying** -- fitsio-pure reads the file into `Vec<u8>`, then copies into an aligned `Vec<T>` for endian swapping. cfitsio reads directly into the caller's buffer.
+- **Write rebuilding** -- fitsio-pure serializes to a new buffer and writes the whole file. cfitsio seeks and writes in-place.

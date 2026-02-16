@@ -174,20 +174,20 @@ cargo run --features cli --bin fitsconv -- --help
 
 The goal of this library is **broad compatibility and portability**, not maximum I/O throughput. It is a drop-in replacement for `fitsio` that works everywhere Rust compiles -- including WebAssembly, cross-compiled targets, and environments without a C toolchain.
 
-That said, performance is reasonable for most workloads. Compared to `fitsio` (cfitsio C wrapper):
+That said, performance is reasonable for most workloads. Throughput relative to `fitsio` (cfitsio C wrapper):
 
-| Test | Reads | Writes |
-|------|------:|-------:|
-| f32 1024x1024 | 0.33x | 0.30x |
-| f64 1024x1024 | 0.37x | 0.27x |
-| i32 1024x1024 | 0.34x | 0.62x |
-| f32 4096x4096 | 0.33x | 0.28x |
-| f64 4096x4096 | 0.39x | 0.33x |
-| i32 4096x4096 | 0.41x | 0.35x |
+| Test | Core reads | Core writes | Compat reads | Compat writes |
+|------|----------:|----------:|-----------:|------------:|
+| f32 1024x1024 | 0.50x | 0.66x | 0.46x | 0.69x |
+| f64 1024x1024 | 0.45x | 0.60x | 0.53x | 0.31x |
+| i32 1024x1024 | 0.48x | 0.69x | 0.46x | 0.73x |
+| f32 4096x4096 | 0.42x | 0.35x | 0.37x | 0.35x |
+| f64 4096x4096 | 0.54x | 0.35x | 0.38x | 0.33x |
+| i32 4096x4096 | 0.57x | 0.41x | 0.38x | 0.34x |
 
-cfitsio is faster because it operates on open file descriptors with in-place seeks and writes. fitsio-pure holds the file in memory and rebuilds the buffer on writes. For small images (256x256) reads are at parity.
+**Core** = direct use of `parse_fits` / `read_image_data` / `serialize_image_*`. **Compat** = the drop-in `fitsio`-compatible API. The compat layer adds overhead from type dispatch and buffer management; the core API is closer to cfitsio, especially for reads. For small images (256x256) both APIs read at near-cfitsio speed.
 
-Run benchmarks yourself: `cargo run -p fits-benchmark --features pure,cfitsio --no-default-features --release`. Full results in [`crates/fits-benchmark/README.md`](crates/fits-benchmark/README.md).
+Run benchmarks yourself: `cargo run -p fits-benchmark --features pure --no-default-features --release`. Full results in [`crates/fits-benchmark/README.md`](crates/fits-benchmark/README.md).
 
 ## Reference Materials
 

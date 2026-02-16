@@ -85,6 +85,108 @@ mod pure_backend {
 }
 
 // ---------------------------------------------------------------------------
+// fitsio-pure core backend (no compat layer)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "pure")]
+mod pure_core_backend {
+    use super::*;
+    use fitsio_pure::extension::{build_extension_header, ExtensionType};
+    use fitsio_pure::hdu::parse_fits;
+    use fitsio_pure::header::{serialize_header, Card};
+    use fitsio_pure::image::{read_image_data, ImageData};
+    use fitsio_pure::primary::build_primary_header;
+    use fitsio_pure::value::Value;
+
+    pub struct PureCoreBackend;
+
+    fn make_keyword(name: &str) -> [u8; 8] {
+        let mut kw = [b' '; 8];
+        let bytes = name.as_bytes();
+        let len = bytes.len().min(8);
+        kw[..len].copy_from_slice(&bytes[..len]);
+        kw
+    }
+
+    fn write_image_file(path: &Path, shape: &[usize], bitpix: i64, data_bytes: &[u8]) {
+        // Build primary HDU (empty)
+        let primary_cards = build_primary_header(8, &[]).unwrap();
+        let primary_header = serialize_header(&primary_cards);
+
+        // Build extension image HDU header
+        let mut ext_cards =
+            build_extension_header(ExtensionType::Image, bitpix, shape, 0, 1).unwrap();
+        ext_cards.push(Card {
+            keyword: make_keyword("EXTNAME"),
+            value: Some(Value::String("DATA".to_string())),
+            comment: None,
+        });
+        let ext_header = serialize_header(&ext_cards);
+
+        let padded_data_len = fitsio_pure::block::padded_byte_len(data_bytes.len());
+        let total = primary_header.len() + ext_header.len() + padded_data_len;
+        let mut buf = Vec::with_capacity(total);
+        buf.extend_from_slice(&primary_header);
+        buf.extend_from_slice(&ext_header);
+        buf.extend_from_slice(data_bytes);
+        buf.resize(total, 0);
+
+        std::fs::write(path, &buf).unwrap();
+    }
+
+    impl FitsBackend for PureCoreBackend {
+        fn name() -> &'static str {
+            "fitsio-pure (core)"
+        }
+
+        fn write_f32_image(path: &Path, shape: &[usize], data: &[f32]) {
+            let bytes = fitsio_pure::image::serialize_image_f32(data);
+            write_image_file(path, shape, -32, &bytes);
+        }
+
+        fn write_f64_image(path: &Path, shape: &[usize], data: &[f64]) {
+            let bytes = fitsio_pure::image::serialize_image_f64(data);
+            write_image_file(path, shape, -64, &bytes);
+        }
+
+        fn write_i32_image(path: &Path, shape: &[usize], data: &[i32]) {
+            let bytes = fitsio_pure::image::serialize_image_i32(data);
+            write_image_file(path, shape, 32, &bytes);
+        }
+
+        fn read_f32_image(path: &Path) -> Vec<f32> {
+            let data = std::fs::read(path).unwrap();
+            let parsed = parse_fits(&data).unwrap();
+            let hdu = &parsed.hdus[1];
+            match read_image_data(&data, hdu).unwrap() {
+                ImageData::F32(v) => v,
+                _ => panic!("expected f32"),
+            }
+        }
+
+        fn read_f64_image(path: &Path) -> Vec<f64> {
+            let data = std::fs::read(path).unwrap();
+            let parsed = parse_fits(&data).unwrap();
+            let hdu = &parsed.hdus[1];
+            match read_image_data(&data, hdu).unwrap() {
+                ImageData::F64(v) => v,
+                _ => panic!("expected f64"),
+            }
+        }
+
+        fn read_i32_image(path: &Path) -> Vec<i32> {
+            let data = std::fs::read(path).unwrap();
+            let parsed = parse_fits(&data).unwrap();
+            let hdu = &parsed.hdus[1];
+            match read_image_data(&data, hdu).unwrap() {
+                ImageData::I32(v) => v,
+                _ => panic!("expected i32"),
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // fitsio (cfitsio) backend
 // ---------------------------------------------------------------------------
 
@@ -309,6 +411,13 @@ fn main() {
     println!("Measuring write and read throughput for large image arrays.");
     println!("Each test writes/reads the array multiple times and reports the average.");
     println!("MP/s = megapixels per second.\n");
+
+    #[cfg(feature = "pure")]
+    {
+        use pure_core_backend::PureCoreBackend;
+        let results = run_benchmarks::<PureCoreBackend>(&dir);
+        print_results(PureCoreBackend::name(), &results);
+    }
 
     #[cfg(feature = "pure")]
     {
