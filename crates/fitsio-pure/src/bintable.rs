@@ -650,7 +650,7 @@ pub fn serialize_binary_table_hdu(
     naxis2: usize,
 ) -> Result<Vec<u8>> {
     let cards = build_binary_table_cards(columns, naxis2, 0)?;
-    let header_bytes = serialize_header(&cards);
+    let header_bytes = serialize_header(&cards)?;
     let data_bytes = serialize_binary_table(columns, col_data, naxis2)?;
 
     let mut result = Vec::with_capacity(header_bytes.len() + data_bytes.len());
@@ -819,7 +819,7 @@ mod tests {
     }
 
     fn build_bintable_hdu(header_cards: &[Card], raw_data: &[u8]) -> Vec<u8> {
-        let header = serialize_header(header_cards);
+        let header = serialize_header(header_cards).unwrap();
         let padded_data = padded_byte_len(raw_data.len());
         let mut result = Vec::with_capacity(header.len() + padded_data);
         result.extend_from_slice(&header);
@@ -868,7 +868,7 @@ mod tests {
             card_val("BITPIX", Value::Integer(8)),
             card_val("NAXIS", Value::Integer(0)),
         ];
-        let primary_header = serialize_header(&primary_cards);
+        let primary_header = serialize_header(&primary_cards).unwrap();
 
         let mut full = Vec::new();
         full.extend_from_slice(&primary_header);
@@ -1471,7 +1471,7 @@ mod tests {
 
         let data_bytes = serialize_binary_table(&columns, &original, naxis2).unwrap();
         let cards = build_binary_table_cards(&columns, naxis2, 0).unwrap();
-        let header_bytes = serialize_header(&cards);
+        let header_bytes = serialize_header(&cards).unwrap();
 
         let mut fits = Vec::new();
         // Prepend a primary HDU
@@ -1480,7 +1480,7 @@ mod tests {
             card_val("BITPIX", Value::Integer(8)),
             card_val("NAXIS", Value::Integer(0)),
         ];
-        let primary_header = serialize_header(&primary_cards);
+        let primary_header = serialize_header(&primary_cards).unwrap();
         fits.extend_from_slice(&primary_header);
         fits.extend_from_slice(&header_bytes);
         fits.extend_from_slice(&data_bytes);
@@ -1505,7 +1505,7 @@ mod tests {
 
         let data_bytes = serialize_binary_table(&columns, &original, naxis2).unwrap();
         let cards = build_binary_table_cards(&columns, naxis2, 0).unwrap();
-        let header_bytes = serialize_header(&cards);
+        let header_bytes = serialize_header(&cards).unwrap();
 
         let mut fits = Vec::new();
         let primary_cards = vec![
@@ -1513,7 +1513,7 @@ mod tests {
             card_val("BITPIX", Value::Integer(8)),
             card_val("NAXIS", Value::Integer(0)),
         ];
-        fits.extend_from_slice(&serialize_header(&primary_cards));
+        fits.extend_from_slice(&serialize_header(&primary_cards).unwrap());
         fits.extend_from_slice(&header_bytes);
         fits.extend_from_slice(&data_bytes);
 
@@ -1536,7 +1536,7 @@ mod tests {
 
         let data_bytes = serialize_binary_table(&columns, &original, naxis2).unwrap();
         let cards = build_binary_table_cards(&columns, naxis2, 0).unwrap();
-        let header_bytes = serialize_header(&cards);
+        let header_bytes = serialize_header(&cards).unwrap();
 
         let mut fits = Vec::new();
         let primary_cards = vec![
@@ -1544,7 +1544,7 @@ mod tests {
             card_val("BITPIX", Value::Integer(8)),
             card_val("NAXIS", Value::Integer(0)),
         ];
-        fits.extend_from_slice(&serialize_header(&primary_cards));
+        fits.extend_from_slice(&serialize_header(&primary_cards).unwrap());
         fits.extend_from_slice(&header_bytes);
         fits.extend_from_slice(&data_bytes);
 
@@ -1591,7 +1591,7 @@ mod tests {
 
         let data_bytes = serialize_binary_table(&columns, &col_data, naxis2).unwrap();
         let cards = build_binary_table_cards(&columns, naxis2, 0).unwrap();
-        let header_bytes = serialize_header(&cards);
+        let header_bytes = serialize_header(&cards).unwrap();
 
         let mut fits = Vec::new();
         let primary_cards = vec![
@@ -1599,7 +1599,7 @@ mod tests {
             card_val("BITPIX", Value::Integer(8)),
             card_val("NAXIS", Value::Integer(0)),
         ];
-        fits.extend_from_slice(&serialize_header(&primary_cards));
+        fits.extend_from_slice(&serialize_header(&primary_cards).unwrap());
         fits.extend_from_slice(&header_bytes);
         fits.extend_from_slice(&data_bytes);
 
@@ -1641,7 +1641,7 @@ mod tests {
 
         let data_bytes = serialize_binary_table(&columns, &original, naxis2).unwrap();
         let cards = build_binary_table_cards(&columns, naxis2, 0).unwrap();
-        let header_bytes = serialize_header(&cards);
+        let header_bytes = serialize_header(&cards).unwrap();
 
         let mut fits = Vec::new();
         let primary_cards = vec![
@@ -1649,7 +1649,7 @@ mod tests {
             card_val("BITPIX", Value::Integer(8)),
             card_val("NAXIS", Value::Integer(0)),
         ];
-        fits.extend_from_slice(&serialize_header(&primary_cards));
+        fits.extend_from_slice(&serialize_header(&primary_cards).unwrap());
         fits.extend_from_slice(&header_bytes);
         fits.extend_from_slice(&data_bytes);
 
@@ -1672,7 +1672,7 @@ mod tests {
 
         let data_bytes = serialize_binary_table(&columns, &original, naxis2).unwrap();
         let cards = build_binary_table_cards(&columns, naxis2, 0).unwrap();
-        let header_bytes = serialize_header(&cards);
+        let header_bytes = serialize_header(&cards).unwrap();
 
         let mut fits = Vec::new();
         let primary_cards = vec![
@@ -1680,7 +1680,7 @@ mod tests {
             card_val("BITPIX", Value::Integer(8)),
             card_val("NAXIS", Value::Integer(0)),
         ];
-        fits.extend_from_slice(&serialize_header(&primary_cards));
+        fits.extend_from_slice(&serialize_header(&primary_cards).unwrap());
         fits.extend_from_slice(&header_bytes);
         fits.extend_from_slice(&data_bytes);
 
@@ -1703,7 +1703,7 @@ mod tests {
 
         let data_bytes = serialize_binary_table(&columns, &original, naxis2).unwrap();
         let cards = build_binary_table_cards(&columns, naxis2, 0).unwrap();
-        let header_bytes = serialize_header(&cards);
+        let header_bytes = serialize_header(&cards).unwrap();
 
         let mut fits = Vec::new();
         let primary_cards = vec![
@@ -1711,7 +1711,7 @@ mod tests {
             card_val("BITPIX", Value::Integer(8)),
             card_val("NAXIS", Value::Integer(0)),
         ];
-        fits.extend_from_slice(&serialize_header(&primary_cards));
+        fits.extend_from_slice(&serialize_header(&primary_cards).unwrap());
         fits.extend_from_slice(&header_bytes);
         fits.extend_from_slice(&data_bytes);
 
@@ -1734,7 +1734,7 @@ mod tests {
 
         let data_bytes = serialize_binary_table(&columns, &original, naxis2).unwrap();
         let cards = build_binary_table_cards(&columns, naxis2, 0).unwrap();
-        let header_bytes = serialize_header(&cards);
+        let header_bytes = serialize_header(&cards).unwrap();
 
         let mut fits = Vec::new();
         let primary_cards = vec![
@@ -1742,7 +1742,7 @@ mod tests {
             card_val("BITPIX", Value::Integer(8)),
             card_val("NAXIS", Value::Integer(0)),
         ];
-        fits.extend_from_slice(&serialize_header(&primary_cards));
+        fits.extend_from_slice(&serialize_header(&primary_cards).unwrap());
         fits.extend_from_slice(&header_bytes);
         fits.extend_from_slice(&data_bytes);
 
@@ -1768,7 +1768,7 @@ mod tests {
 
         let data_bytes = serialize_binary_table(&columns, &original, naxis2).unwrap();
         let cards = build_binary_table_cards(&columns, naxis2, 0).unwrap();
-        let header_bytes = serialize_header(&cards);
+        let header_bytes = serialize_header(&cards).unwrap();
 
         let mut fits = Vec::new();
         let primary_cards = vec![
@@ -1776,7 +1776,7 @@ mod tests {
             card_val("BITPIX", Value::Integer(8)),
             card_val("NAXIS", Value::Integer(0)),
         ];
-        fits.extend_from_slice(&serialize_header(&primary_cards));
+        fits.extend_from_slice(&serialize_header(&primary_cards).unwrap());
         fits.extend_from_slice(&header_bytes);
         fits.extend_from_slice(&data_bytes);
 
@@ -1802,7 +1802,7 @@ mod tests {
 
         let data_bytes = serialize_binary_table(&columns, &original, naxis2).unwrap();
         let cards = build_binary_table_cards(&columns, naxis2, 0).unwrap();
-        let header_bytes = serialize_header(&cards);
+        let header_bytes = serialize_header(&cards).unwrap();
 
         let mut fits = Vec::new();
         let primary_cards = vec![
@@ -1810,7 +1810,7 @@ mod tests {
             card_val("BITPIX", Value::Integer(8)),
             card_val("NAXIS", Value::Integer(0)),
         ];
-        fits.extend_from_slice(&serialize_header(&primary_cards));
+        fits.extend_from_slice(&serialize_header(&primary_cards).unwrap());
         fits.extend_from_slice(&header_bytes);
         fits.extend_from_slice(&data_bytes);
 
@@ -1868,7 +1868,7 @@ mod tests {
             card_val("BITPIX", Value::Integer(8)),
             card_val("NAXIS", Value::Integer(0)),
         ];
-        fits.extend_from_slice(&serialize_header(&primary_cards));
+        fits.extend_from_slice(&serialize_header(&primary_cards).unwrap());
         fits.extend_from_slice(&hdu_bytes);
 
         let parsed = crate::hdu::parse_fits(&fits).unwrap();

@@ -304,11 +304,45 @@ pub fn format_end_card() -> [u8; CARD_SIZE] {
     buf
 }
 
+/// Detect the HDU type from the cards in a header.
+///
+/// Looks for `SIMPLE` or `XTENSION` anywhere in the card list (not just
+/// position 0) so that misordered headers are still detected and rejected
+/// by the subsequent validation step.
+///
+/// Returns `None` if neither keyword is present.
+fn detect_hdu_type(cards: &[Card]) -> Option<HduType> {
+    if find_keyword(cards, &KW_SIMPLE).is_some() {
+        return Some(HduType::Primary);
+    }
+    if let Some(xt) = find_keyword(cards, &KW_XTENSION) {
+        match &xt.value {
+            Some(Value::String(s)) => match s.trim() {
+                "IMAGE" => Some(HduType::Image),
+                "TABLE" => Some(HduType::AsciiTable),
+                "BINTABLE" => Some(HduType::BinaryTable),
+                _ => None,
+            },
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
 /// Serialize a sequence of header cards into complete FITS header blocks.
+///
+/// Validates that mandatory keywords are present and correctly ordered
+/// per the FITS standard before serializing. Returns an error if the
+/// header does not conform.
 ///
 /// Appends the END card and pads the final block with blank cards.
 /// The returned length is always a multiple of [`BLOCK_SIZE`].
-pub fn serialize_header(cards: &[Card]) -> Vec<u8> {
+pub fn serialize_header(cards: &[Card]) -> Result<Vec<u8>> {
+    if let Some(hdu_type) = detect_hdu_type(cards) {
+        validate_required_keywords(hdu_type, cards)?;
+    }
+
     let total_cards = cards.len() + 1; // +1 for END
     let total_blocks = total_cards.div_ceil(CARDS_PER_BLOCK);
     let total_bytes = total_blocks * BLOCK_SIZE;
@@ -325,7 +359,7 @@ pub fn serialize_header(cards: &[Card]) -> Vec<u8> {
     let end_card = format_end_card();
     buf[end_offset..end_offset + CARD_SIZE].copy_from_slice(&end_card);
 
-    buf
+    Ok(buf)
 }
 
 // ── Validation ──
@@ -781,45 +815,55 @@ mod write_tests {
         }
     }
 
+    fn minimal_primary_cards() -> Vec<Card> {
+        vec![
+            Card {
+                keyword: make_keyword("SIMPLE"),
+                value: Some(Value::Logical(true)),
+                comment: None,
+            },
+            Card {
+                keyword: make_keyword("BITPIX"),
+                value: Some(Value::Integer(8)),
+                comment: None,
+            },
+            Card {
+                keyword: make_keyword("NAXIS"),
+                value: Some(Value::Integer(0)),
+                comment: None,
+            },
+        ]
+    }
+
     #[test]
     fn serialize_header_block_aligned() {
-        let cards = vec![Card {
-            keyword: make_keyword("SIMPLE"),
-            value: Some(Value::Logical(true)),
-            comment: None,
-        }];
-        let header = serialize_header(&cards);
+        let cards = minimal_primary_cards();
+        let header = serialize_header(&cards).unwrap();
         assert_eq!(header.len() % BLOCK_SIZE, 0);
         assert_eq!(header.len(), BLOCK_SIZE);
     }
 
     #[test]
     fn serialize_header_contains_end() {
-        let cards = vec![Card {
-            keyword: make_keyword("SIMPLE"),
-            value: Some(Value::Logical(true)),
-            comment: None,
-        }];
-        let header = serialize_header(&cards);
-        assert_eq!(&header[80..83], b"END");
+        let cards = minimal_primary_cards();
+        let header = serialize_header(&cards).unwrap();
+        let end_offset = cards.len() * CARD_SIZE;
+        assert_eq!(&header[end_offset..end_offset + 3], b"END");
     }
 
     #[test]
     fn serialize_header_padding_is_spaces() {
-        let cards = vec![Card {
-            keyword: make_keyword("SIMPLE"),
-            value: Some(Value::Logical(true)),
-            comment: None,
-        }];
-        let header = serialize_header(&cards);
-        for &b in &header[160..] {
+        let cards = minimal_primary_cards();
+        let header = serialize_header(&cards).unwrap();
+        let after_end = (cards.len() + 1) * CARD_SIZE;
+        for &b in &header[after_end..] {
             assert_eq!(b, b' ');
         }
     }
 
     #[test]
     fn serialize_header_empty_cards() {
-        let header = serialize_header(&[]);
+        let header = serialize_header(&[]).unwrap();
         assert_eq!(header.len(), BLOCK_SIZE);
         assert_eq!(&header[0..3], b"END");
     }
@@ -833,7 +877,7 @@ mod write_tests {
                 comment: None,
             })
             .collect();
-        assert_eq!(serialize_header(&cards).len(), BLOCK_SIZE);
+        assert_eq!(serialize_header(&cards).unwrap().len(), BLOCK_SIZE);
     }
 
     #[test]
@@ -845,7 +889,7 @@ mod write_tests {
                 comment: None,
             })
             .collect();
-        assert_eq!(serialize_header(&cards).len(), 2 * BLOCK_SIZE);
+        assert_eq!(serialize_header(&cards).unwrap().len(), 2 * BLOCK_SIZE);
     }
 
     #[test]
@@ -941,7 +985,7 @@ mod write_tests {
                 comment: None,
             },
         ];
-        let header = serialize_header(&cards);
+        let header = serialize_header(&cards).unwrap();
         let parsed = parse_header_blocks(&header).unwrap();
 
         assert_eq!(parsed.len(), 4); // 3 cards + END
@@ -1225,5 +1269,83 @@ mod validate_tests {
         let a = HduType::Primary;
         let b = a;
         assert_eq!(a, b);
+    }
+
+    // ── serialize_header validation tests ──
+
+    #[test]
+    fn serialize_rejects_misordered_primary() {
+        let cards = vec![
+            card(b"BITPIX", Some(Value::Integer(8))),
+            card(b"SIMPLE", Some(Value::Logical(true))),
+            card(b"NAXIS", Some(Value::Integer(0))),
+        ];
+        assert!(serialize_header(&cards).is_err());
+    }
+
+    #[test]
+    fn serialize_rejects_missing_bitpix() {
+        let cards = vec![
+            card(b"SIMPLE", Some(Value::Logical(true))),
+            card(b"NAXIS", Some(Value::Integer(0))),
+        ];
+        assert!(serialize_header(&cards).is_err());
+    }
+
+    #[test]
+    fn serialize_accepts_valid_primary() {
+        let cards = vec![
+            card(b"SIMPLE", Some(Value::Logical(true))),
+            card(b"BITPIX", Some(Value::Integer(8))),
+            card(b"NAXIS", Some(Value::Integer(0))),
+        ];
+        assert!(serialize_header(&cards).is_ok());
+    }
+
+    #[test]
+    fn serialize_rejects_misordered_extension() {
+        let cards = vec![
+            card(b"BITPIX", Some(Value::Integer(8))),
+            card(b"XTENSION", Some(Value::String(String::from("IMAGE")))),
+            card(b"NAXIS", Some(Value::Integer(0))),
+            card(b"PCOUNT", Some(Value::Integer(0))),
+            card(b"GCOUNT", Some(Value::Integer(1))),
+        ];
+        assert!(serialize_header(&cards).is_err());
+    }
+
+    #[test]
+    fn serialize_rejects_bintable_missing_tfields() {
+        let cards = vec![
+            card(b"XTENSION", Some(Value::String(String::from("BINTABLE")))),
+            card(b"BITPIX", Some(Value::Integer(8))),
+            card(b"NAXIS", Some(Value::Integer(2))),
+            card(b"NAXIS1", Some(Value::Integer(16))),
+            card(b"NAXIS2", Some(Value::Integer(10))),
+            card(b"PCOUNT", Some(Value::Integer(0))),
+            card(b"GCOUNT", Some(Value::Integer(1))),
+        ];
+        assert!(serialize_header(&cards).is_err());
+    }
+
+    #[test]
+    fn serialize_accepts_valid_bintable() {
+        let cards = vec![
+            card(b"XTENSION", Some(Value::String(String::from("BINTABLE")))),
+            card(b"BITPIX", Some(Value::Integer(8))),
+            card(b"NAXIS", Some(Value::Integer(2))),
+            card(b"NAXIS1", Some(Value::Integer(16))),
+            card(b"NAXIS2", Some(Value::Integer(10))),
+            card(b"PCOUNT", Some(Value::Integer(0))),
+            card(b"GCOUNT", Some(Value::Integer(1))),
+            card(b"TFIELDS", Some(Value::Integer(2))),
+        ];
+        assert!(serialize_header(&cards).is_ok());
+    }
+
+    #[test]
+    fn serialize_skips_validation_for_unknown_first_keyword() {
+        let cards = vec![card(b"FOOBAR", Some(Value::Integer(42)))];
+        assert!(serialize_header(&cards).is_ok());
     }
 }

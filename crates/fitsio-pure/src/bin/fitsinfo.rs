@@ -287,7 +287,7 @@ mod tests {
     }
 
     fn build_fits_bytes(header_cards: &[Card], data_bytes: usize) -> Vec<u8> {
-        let header = serialize_header(header_cards);
+        let header = serialize_header(header_cards).unwrap();
         let padded_data = padded_byte_len(data_bytes);
         let mut result = Vec::with_capacity(header.len() + padded_data);
         result.extend_from_slice(&header);
@@ -328,8 +328,8 @@ mod tests {
         let primary_cards = primary_header_naxis0();
         let ext_cards = image_extension_header(-32, &[512, 512], Some("SCI"));
 
-        let primary_header = serialize_header(&primary_cards);
-        let ext_header = serialize_header(&ext_cards);
+        let primary_header = serialize_header(&primary_cards).unwrap();
+        let ext_header = serialize_header(&ext_cards).unwrap();
         let ext_data_bytes = 512 * 512 * 4;
         let ext_data_padded = padded_byte_len(ext_data_bytes);
 
@@ -353,8 +353,8 @@ mod tests {
         let primary_cards = primary_header_naxis0();
         let ext_cards = bintable_extension_header(40, 10000, 1234, 5, Some("EVENTS"));
 
-        let primary_header = serialize_header(&primary_cards);
-        let ext_header = serialize_header(&ext_cards);
+        let primary_header = serialize_header(&primary_cards).unwrap();
+        let ext_header = serialize_header(&ext_cards).unwrap();
         let ext_data_bytes = 40 * 10000 + 1234;
         let ext_data_padded = padded_byte_len(ext_data_bytes);
 
@@ -379,8 +379,8 @@ mod tests {
         let primary_cards = primary_header_naxis0();
         let ext_cards = bintable_extension_header(24, 100, 0, 3, None);
 
-        let primary_header = serialize_header(&primary_cards);
-        let ext_header = serialize_header(&ext_cards);
+        let primary_header = serialize_header(&primary_cards).unwrap();
+        let ext_header = serialize_header(&ext_cards).unwrap();
         let ext_data_bytes = 24 * 100;
         let ext_data_padded = padded_byte_len(ext_data_bytes);
 

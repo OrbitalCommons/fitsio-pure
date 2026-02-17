@@ -502,7 +502,7 @@ mod tests {
     }
 
     fn build_fits_bytes(header_cards: &[Card], data_bytes: usize) -> Vec<u8> {
-        let header = serialize_header(header_cards);
+        let header = serialize_header(header_cards).unwrap();
         let padded_data = padded_byte_len(data_bytes);
         let mut result = Vec::with_capacity(header.len() + padded_data);
         result.extend_from_slice(&header);
@@ -579,8 +579,8 @@ mod tests {
         let primary_cards = primary_header_naxis0();
         let ext_cards = image_extension_header(16, &[64, 64], Some("SCI"));
 
-        let primary_header = serialize_header(&primary_cards);
-        let ext_header = serialize_header(&ext_cards);
+        let primary_header = serialize_header(&primary_cards).unwrap();
+        let ext_header = serialize_header(&ext_cards).unwrap();
         let ext_data_bytes = 64 * 64 * 2;
         let ext_data_padded = padded_byte_len(ext_data_bytes);
 
@@ -619,11 +619,11 @@ mod tests {
         let ext1_cards = image_extension_header(-32, &[32, 32], Some("SCI"));
         let ext2_cards = image_extension_header(16, &[10, 10], Some("ERR"));
 
-        let primary_header = serialize_header(&primary_cards);
-        let ext1_header = serialize_header(&ext1_cards);
+        let primary_header = serialize_header(&primary_cards).unwrap();
+        let ext1_header = serialize_header(&ext1_cards).unwrap();
         let ext1_data_bytes = 32 * 32 * 4;
         let ext1_data_padded = padded_byte_len(ext1_data_bytes);
-        let ext2_header = serialize_header(&ext2_cards);
+        let ext2_header = serialize_header(&ext2_cards).unwrap();
         let ext2_data_bytes = 10 * 10 * 2;
         let ext2_data_padded = padded_byte_len(ext2_data_bytes);
 
@@ -661,12 +661,12 @@ mod tests {
     #[test]
     fn correct_byte_offsets() {
         let primary_cards = primary_header_image(8, &[100]);
-        let primary_header = serialize_header(&primary_cards);
+        let primary_header = serialize_header(&primary_cards).unwrap();
         let primary_data_bytes = 100;
         let primary_data_padded = padded_byte_len(primary_data_bytes);
 
         let ext_cards = image_extension_header(-64, &[50], None);
-        let ext_header = serialize_header(&ext_cards);
+        let ext_header = serialize_header(&ext_cards).unwrap();
         let ext_data_bytes = 50 * 8;
         let ext_data_padded = padded_byte_len(ext_data_bytes);
 
@@ -746,7 +746,7 @@ mod tests {
     #[test]
     fn error_on_truncated_data() {
         let cards = primary_header_image(16, &[100, 200]);
-        let header = serialize_header(&cards);
+        let header = serialize_header(&cards).unwrap();
         let mut data = Vec::new();
         data.extend_from_slice(&header);
         data.resize(header.len() + BLOCK_SIZE, 0u8);
@@ -760,8 +760,8 @@ mod tests {
         let ext_cards = image_extension_header(8, &[10], None);
 
         let mut data = Vec::new();
-        data.extend_from_slice(&serialize_header(&primary_cards));
-        data.extend_from_slice(&serialize_header(&ext_cards));
+        data.extend_from_slice(&serialize_header(&primary_cards).unwrap());
+        data.extend_from_slice(&serialize_header(&ext_cards).unwrap());
         data.resize(data.len() + padded_byte_len(10), 0u8);
 
         let fits = parse_fits(&data).unwrap();
@@ -782,8 +782,8 @@ mod tests {
         let primary_cards = primary_header_naxis0();
         let ext_cards = bintable_extension_header(24, 100, 0, 3, Some("EVENTS"));
 
-        let primary_header = serialize_header(&primary_cards);
-        let ext_header = serialize_header(&ext_cards);
+        let primary_header = serialize_header(&primary_cards).unwrap();
+        let ext_header = serialize_header(&ext_cards).unwrap();
         let ext_data_bytes = 24 * 100;
         let ext_data_padded = padded_byte_len(ext_data_bytes);
 
@@ -824,10 +824,10 @@ mod tests {
         let ext3 = image_extension_header(-32, &[30], Some("C"));
 
         let mut data = Vec::new();
-        data.extend_from_slice(&serialize_header(&primary_cards));
+        data.extend_from_slice(&serialize_header(&primary_cards).unwrap());
 
         for (ext_cards, dim, bpp) in [(&ext1, 10usize, 1usize), (&ext2, 20, 2), (&ext3, 30, 4)] {
-            data.extend_from_slice(&serialize_header(ext_cards));
+            data.extend_from_slice(&serialize_header(ext_cards).unwrap());
             let db = dim * bpp;
             let padded = padded_byte_len(db);
             data.resize(data.len() + padded, 0u8);

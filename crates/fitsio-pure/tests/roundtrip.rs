@@ -45,7 +45,7 @@ fn card(keyword: &str, value: Value) -> Card {
 /// Build a minimal primary HDU with NAXIS=0 (no data).
 fn empty_primary_hdu() -> Vec<u8> {
     let cards = build_primary_header(8, &[]).unwrap();
-    serialize_header(&cards)
+    serialize_header(&cards).unwrap()
 }
 
 /// Build an image extension HDU (header + data) with the given EXTNAME.
@@ -59,7 +59,7 @@ fn build_image_extension(
     if let Some(name) = extname {
         cards.push(card("EXTNAME", Value::String(String::from(name))));
     }
-    let header_bytes = serialize_header(&cards);
+    let header_bytes = serialize_header(&cards).unwrap();
     let data_bytes = serialize_image(data);
     let mut hdu = Vec::with_capacity(header_bytes.len() + data_bytes.len());
     hdu.extend_from_slice(&header_bytes);
@@ -311,7 +311,7 @@ fn roundtrip_bscale_bzero() {
     cards.push(card("BSCALE", Value::Float(bscale)));
     cards.push(card("BZERO", Value::Float(bzero)));
 
-    let header_bytes = serialize_header(&cards);
+    let header_bytes = serialize_header(&cards).unwrap();
     let data_bytes = serialize_image(&ImageData::I16(pixels));
 
     let mut fits_bytes = Vec::new();
@@ -344,7 +344,7 @@ fn roundtrip_unsigned_16bit_via_bzero() {
     cards.push(card("BSCALE", Value::Float(1.0)));
     cards.push(card("BZERO", Value::Float(32768.0)));
 
-    let header_bytes = serialize_header(&cards);
+    let header_bytes = serialize_header(&cards).unwrap();
     let data_bytes = serialize_image(&ImageData::I16(pixels));
 
     let mut fits_bytes = Vec::new();
@@ -403,7 +403,7 @@ fn roundtrip_binary_table_multi_type() {
 
     // Serialize
     let cards = build_binary_table_cards(&columns, naxis2, 0).unwrap();
-    let header_bytes = serialize_header(&cards);
+    let header_bytes = serialize_header(&cards).unwrap();
     let data_bytes = serialize_binary_table(&columns, &col_data, naxis2).unwrap();
 
     // Build full FITS
@@ -578,7 +578,7 @@ fn roundtrip_ascii_table() {
     let naxis2 = 3;
 
     let cards = build_ascii_table_cards(&columns, naxis2).unwrap();
-    let header_bytes = serialize_header(&cards);
+    let header_bytes = serialize_header(&cards).unwrap();
     let data_bytes = serialize_ascii_table(&columns, &col_data, naxis1).unwrap();
 
     // Build FITS with primary + ASCII table extension
@@ -651,7 +651,7 @@ fn roundtrip_ascii_table_double_column() {
     let naxis2 = 2;
 
     let cards = build_ascii_table_cards(&columns, naxis2).unwrap();
-    let header_bytes = serialize_header(&cards);
+    let header_bytes = serialize_header(&cards).unwrap();
     let data_bytes = serialize_ascii_table(&columns, &col_data, naxis1).unwrap();
 
     let mut fits_bytes = empty_primary_hdu();

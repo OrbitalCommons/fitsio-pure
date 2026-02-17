@@ -253,7 +253,7 @@ pub fn serialize_image(data: &ImageData) -> Vec<u8> {
 /// Build a complete image HDU (header + data) as a byte vector.
 pub fn build_image_hdu(bitpix: i64, naxes: &[usize], data: &ImageData) -> Result<Vec<u8>> {
     let cards = build_primary_header(bitpix, naxes)?;
-    let header_bytes = serialize_header(&cards);
+    let header_bytes = serialize_header(&cards)?;
     let data_bytes = serialize_image(data);
 
     let mut hdu = Vec::with_capacity(header_bytes.len() + data_bytes.len());
@@ -515,7 +515,7 @@ mod tests {
 
     /// Build a FITS byte buffer from header cards and raw data bytes.
     fn build_fits(header_cards: &[Card], data: &[u8]) -> Vec<u8> {
-        let header = serialize_header(header_cards);
+        let header = serialize_header(header_cards).unwrap();
         let padded_data_len = padded_byte_len(data.len());
         let mut result = Vec::with_capacity(header.len() + padded_data_len);
         result.extend_from_slice(&header);

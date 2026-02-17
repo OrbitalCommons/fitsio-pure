@@ -130,7 +130,7 @@ fn rebuild_fits_data(file: &mut FitsFile, fits_data: &crate::hdu::FitsData) -> R
 
     for (i, hdu) in fits_data.hdus.iter().enumerate() {
         let cards_without_end: Vec<_> = hdu.cards.iter().filter(|c| !c.is_end()).cloned().collect();
-        let header_bytes = crate::header::serialize_header(&cards_without_end);
+        let header_bytes = crate::header::serialize_header(&cards_without_end)?;
         new_data.extend_from_slice(&header_bytes);
 
         if hdu.data_len > 0 {
