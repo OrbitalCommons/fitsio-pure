@@ -171,7 +171,7 @@ impl FitsFile {
         };
         cards.push(extname_card);
 
-        let header_bytes = crate::header::serialize_header(&cards);
+        let header_bytes = crate::header::serialize_header(&cards)?;
 
         let data_bytes = desc.dimensions.iter().copied().product::<usize>()
             * ((bitpix.unsigned_abs() as usize) / 8);
@@ -201,7 +201,7 @@ impl FitsFile {
         };
         cards.push(extname_card);
 
-        let header_bytes = crate::header::serialize_header(&cards);
+        let header_bytes = crate::header::serialize_header(&cards)?;
         self.data.extend_from_slice(&header_bytes);
 
         self.invalidate_cache();
@@ -265,7 +265,7 @@ impl NewFitsFile {
         }
 
         let cards = crate::primary::build_primary_header(8, &[])?;
-        let header_bytes = crate::header::serialize_header(&cards);
+        let header_bytes = crate::header::serialize_header(&cards)?;
 
         std::fs::write(&self.path, &header_bytes)?;
 

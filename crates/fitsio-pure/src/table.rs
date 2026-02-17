@@ -640,7 +640,7 @@ mod tests {
     }
 
     fn build_hdu(cards: Vec<Card>, data: &[u8]) -> (Vec<u8>, Hdu) {
-        let header_bytes = serialize_header(&cards);
+        let header_bytes = serialize_header(&cards).unwrap();
         let data_padded_len = padded_byte_len(data.len());
         let mut fits_data = Vec::with_capacity(header_bytes.len() + data_padded_len);
         fits_data.extend_from_slice(&header_bytes);
@@ -1034,7 +1034,7 @@ mod tests {
         let cards = build_ascii_table_cards(&cols, naxis2).unwrap();
         let serialized = serialize_ascii_table(&cols, &data, naxis1).unwrap();
 
-        let header_bytes = serialize_header(&cards);
+        let header_bytes = serialize_header(&cards).unwrap();
         let mut fits_data = Vec::new();
         fits_data.extend_from_slice(&header_bytes);
         fits_data.extend_from_slice(&serialized);
@@ -1074,7 +1074,7 @@ mod tests {
         let cards = build_ascii_table_cards(&cols, naxis2).unwrap();
         let serialized = serialize_ascii_table(&cols, &data, naxis1).unwrap();
 
-        let header_bytes = serialize_header(&cards);
+        let header_bytes = serialize_header(&cards).unwrap();
         let mut fits_data = Vec::new();
         fits_data.extend_from_slice(&header_bytes);
         fits_data.extend_from_slice(&serialized);
@@ -1114,7 +1114,7 @@ mod tests {
         let cards = build_ascii_table_cards(&cols, naxis2).unwrap();
         let serialized = serialize_ascii_table(&cols, &data, naxis1).unwrap();
 
-        let header_bytes = serialize_header(&cards);
+        let header_bytes = serialize_header(&cards).unwrap();
         let mut fits_data = Vec::new();
         fits_data.extend_from_slice(&header_bytes);
         fits_data.extend_from_slice(&serialized);
@@ -1172,7 +1172,7 @@ mod tests {
         let cards = build_ascii_table_cards(&cols, naxis2).unwrap();
         let serialized = serialize_ascii_table(&cols, &data, naxis1).unwrap();
 
-        let header_bytes = serialize_header(&cards);
+        let header_bytes = serialize_header(&cards).unwrap();
         let mut fits_data = Vec::new();
         fits_data.extend_from_slice(&header_bytes);
         fits_data.extend_from_slice(&serialized);

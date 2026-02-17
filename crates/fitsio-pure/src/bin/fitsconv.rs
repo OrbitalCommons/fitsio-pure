@@ -152,7 +152,8 @@ fn extract_hdu(file_data: &[u8], fits: &FitsData, hdu_index: usize) -> Result<Ve
     })?;
 
     if hdu_index == 0 {
-        let header_bytes = serialize_header(&hdu.cards);
+        let header_bytes = serialize_header(&hdu.cards)
+            .map_err(|e| format!("Failed to serialize header: {}", e))?;
         let data_padded = padded_byte_len(hdu.data_len);
         let mut output = Vec::with_capacity(header_bytes.len() + data_padded);
         output.extend_from_slice(&header_bytes);
@@ -168,10 +169,12 @@ fn extract_hdu(file_data: &[u8], fits: &FitsData, hdu_index: usize) -> Result<Ve
 
     let primary_cards = build_primary_header(8, &[])
         .map_err(|e| format!("Failed to build primary header: {}", e))?;
-    let primary_header = serialize_header(&primary_cards);
+    let primary_header = serialize_header(&primary_cards)
+        .map_err(|e| format!("Failed to serialize header: {}", e))?;
     output.extend_from_slice(&primary_header);
 
-    let ext_header = serialize_header(&hdu.cards);
+    let ext_header =
+        serialize_header(&hdu.cards).map_err(|e| format!("Failed to serialize header: {}", e))?;
     output.extend_from_slice(&ext_header);
 
     if hdu.data_len > 0 {
@@ -330,7 +333,7 @@ mod tests {
     }
 
     fn build_fits_bytes(header_cards: &[Card], data_bytes: usize) -> Vec<u8> {
-        let header = serialize_header(header_cards);
+        let header = serialize_header(header_cards).unwrap();
         let padded_data = padded_byte_len(data_bytes);
         let mut result = Vec::with_capacity(header.len() + padded_data);
         result.extend_from_slice(&header);
@@ -343,11 +346,11 @@ mod tests {
         let ext1_cards = image_extension_header(-32, &[32, 32], Some("SCI"));
         let ext2_cards = bintable_extension_header(24, 100, 0, 3, Some("EVENTS"));
 
-        let primary_header = serialize_header(&primary_cards);
-        let ext1_header = serialize_header(&ext1_cards);
+        let primary_header = serialize_header(&primary_cards).unwrap();
+        let ext1_header = serialize_header(&ext1_cards).unwrap();
         let ext1_data_bytes = 32 * 32 * 4;
         let ext1_data_padded = padded_byte_len(ext1_data_bytes);
-        let ext2_header = serialize_header(&ext2_cards);
+        let ext2_header = serialize_header(&ext2_cards).unwrap();
         let ext2_data_bytes = 24 * 100;
         let ext2_data_padded = padded_byte_len(ext2_data_bytes);
 
