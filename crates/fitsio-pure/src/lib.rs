@@ -4,6 +4,7 @@ extern crate alloc;
 
 pub mod bintable;
 pub mod block;
+pub mod checksum;
 pub mod endian;
 pub mod error;
 pub mod extension;
