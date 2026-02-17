@@ -13,6 +13,7 @@ pub mod image;
 pub mod io;
 pub mod primary;
 pub mod table;
+pub mod tiled;
 pub mod value;
 
 pub use block::{BLOCK_SIZE, CARDS_PER_BLOCK, CARD_SIZE};

@@ -12,7 +12,7 @@
 | **Binary tables** | ✅ Read + write | ✅ Read + write | ⚠️ Read only |
 | **ASCII tables** | ✅ Read + write | ✅ Read + write | ⚠️ Raw bytes |
 | **Random groups** | ⚠️ Read | ✅ Read + write | ❌ |
-| **Tile compression** | ⚠️ Parsed as table | ✅ Transparent | ⚠️ GZIP/RICE |
+| **Tile compression** | ✅ RICE_1/GZIP_1 read | ✅ Transparent | ⚠️ GZIP/RICE |
 | **Variable-length arrays** | ❌ | ✅ | ❌ |
 | **BSCALE/BZERO** | ⚠️ Read | ✅ Read + write | ❌ |
 | **Header keywords** | ✅ Read + write | ✅ Read + write | ⚠️ Read only |

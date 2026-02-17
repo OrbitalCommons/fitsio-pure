@@ -579,6 +579,151 @@ fn meter_sim_extreme_aspect_ratios() {
 }
 
 // ---------------------------------------------------------------------------
+// Tile-compressed images
+// ---------------------------------------------------------------------------
+
+#[test]
+fn compressed_rice_m13() {
+    let (bytes, fits) = match load("nasa-samples/m13_rice.fits") {
+        Some(v) => v,
+        None => return,
+    };
+
+    assert_eq!(fits.len(), 2);
+    match &fits.get(1).unwrap().info {
+        HduInfo::CompressedImage {
+            zbitpix,
+            znaxes,
+            zcmptype,
+            ..
+        } => {
+            assert_eq!(*zbitpix, 16);
+            assert_eq!(znaxes, &[300, 300]);
+            assert!(zcmptype.contains("RICE"), "Expected RICE, got {zcmptype}");
+        }
+        other => panic!("Expected CompressedImage, got {:?}", other),
+    }
+
+    let hdu = fits.get(1).unwrap();
+    let img = read_image_data(&bytes, hdu).unwrap();
+    match img {
+        ImageData::I16(v) => assert_eq!(v.len(), 90000),
+        other => panic!("Expected I16, got {:?}", other),
+    }
+}
+
+#[test]
+fn compressed_gzip_m13() {
+    let (bytes, fits) = match load("nasa-samples/m13_gzip.fits") {
+        Some(v) => v,
+        None => return,
+    };
+
+    assert_eq!(fits.len(), 2);
+    match &fits.get(1).unwrap().info {
+        HduInfo::CompressedImage {
+            zbitpix,
+            znaxes,
+            zcmptype,
+            ..
+        } => {
+            assert_eq!(*zbitpix, 16);
+            assert_eq!(znaxes, &[300, 300]);
+            assert!(zcmptype.contains("GZIP"), "Expected GZIP, got {zcmptype}");
+        }
+        other => panic!("Expected CompressedImage, got {:?}", other),
+    }
+
+    let hdu = fits.get(1).unwrap();
+    let img = read_image_data(&bytes, hdu).unwrap();
+    match img {
+        ImageData::I16(v) => assert_eq!(v.len(), 90000),
+        other => panic!("Expected I16, got {:?}", other),
+    }
+}
+
+#[test]
+fn compressed_rice_vs_gzip_identical_pixels() {
+    let (rice_bytes, rice_fits) = match load("nasa-samples/m13_rice.fits") {
+        Some(v) => v,
+        None => return,
+    };
+    let (gzip_bytes, gzip_fits) = match load("nasa-samples/m13_gzip.fits") {
+        Some(v) => v,
+        None => return,
+    };
+
+    let rice_img = read_image_data(&rice_bytes, rice_fits.get(1).unwrap()).unwrap();
+    let gzip_img = read_image_data(&gzip_bytes, gzip_fits.get(1).unwrap()).unwrap();
+
+    match (&rice_img, &gzip_img) {
+        (ImageData::I16(r), ImageData::I16(g)) => {
+            assert_eq!(r.len(), g.len());
+            assert_eq!(r, g, "Rice and GZIP should produce identical pixels");
+        }
+        _ => panic!("Expected I16 from both"),
+    }
+}
+
+#[test]
+fn compressed_rice_comp_fits() {
+    let (bytes, fits) = match load("fitsio-pure-fixtures/comp.fits") {
+        Some(v) => v,
+        None => return,
+    };
+
+    assert_eq!(fits.len(), 2);
+    match &fits.get(1).unwrap().info {
+        HduInfo::CompressedImage {
+            zbitpix, znaxes, ..
+        } => {
+            assert_eq!(*zbitpix, 16);
+            assert_eq!(znaxes, &[440, 300]);
+        }
+        other => panic!("Expected CompressedImage, got {:?}", other),
+    }
+
+    let hdu = fits.get(1).unwrap();
+    let img = read_image_data(&bytes, hdu).unwrap();
+    match img {
+        ImageData::I16(v) => assert_eq!(v.len(), 132000),
+        other => panic!("Expected I16, got {:?}", other),
+    }
+}
+
+#[test]
+fn compressed_rice_float_quantized() {
+    let (bytes, fits) = match load("nasa-samples/m13real_rice.fits") {
+        Some(v) => v,
+        None => return,
+    };
+
+    assert_eq!(fits.len(), 2);
+    match &fits.get(1).unwrap().info {
+        HduInfo::CompressedImage {
+            zbitpix, znaxes, ..
+        } => {
+            assert_eq!(*zbitpix, -32);
+            assert_eq!(znaxes, &[300, 300]);
+        }
+        other => panic!("Expected CompressedImage, got {:?}", other),
+    }
+
+    let hdu = fits.get(1).unwrap();
+    let img = read_image_data(&bytes, hdu).unwrap();
+    match img {
+        ImageData::F32(v) => {
+            assert_eq!(v.len(), 90000);
+            assert!(
+                v.iter().all(|x| x.is_finite()),
+                "All float pixels should be finite"
+            );
+        }
+        other => panic!("Expected F32, got {:?}", other),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // HEALPix tile (hipsgen)
 // ---------------------------------------------------------------------------
 

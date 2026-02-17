@@ -34,6 +34,18 @@ pub enum HduInfo {
         pcount: usize,
         gcount: usize,
     },
+    CompressedImage {
+        zbitpix: i64,
+        znaxes: Vec<usize>,
+        zcmptype: String,
+        ztile: Vec<usize>,
+        blocksize: usize,
+        rice_bytepix: usize,
+        naxis1: usize,
+        naxis2: usize,
+        pcount: usize,
+        tfields: usize,
+    },
 }
 
 /// A single Header Data Unit parsed from a FITS byte stream.
@@ -271,6 +283,53 @@ fn parse_hdu_info(cards: &[Card], is_primary: bool) -> Result<HduInfo> {
                 .ok_or(Error::MissingKeyword("PCOUNT"))? as usize;
             let tfields = card_integer_value(cards, "TFIELDS")
                 .ok_or(Error::MissingKeyword("TFIELDS"))? as usize;
+
+            if card_logical_value(cards, "ZIMAGE") == Some(true) {
+                let zbitpix =
+                    card_integer_value(cards, "ZBITPIX").ok_or(Error::MissingKeyword("ZBITPIX"))?;
+                let znaxis = card_integer_value(cards, "ZNAXIS")
+                    .ok_or(Error::MissingKeyword("ZNAXIS"))? as usize;
+                let mut znaxes = Vec::with_capacity(znaxis);
+                for i in 1..=znaxis {
+                    let kw = alloc::format!("ZNAXIS{}", i);
+                    let dim = card_integer_value(cards, &kw)
+                        .ok_or(Error::MissingKeyword("ZNAXISn"))?
+                        as usize;
+                    znaxes.push(dim);
+                }
+                let zcmptype = card_string_value(cards, "ZCMPTYPE")
+                    .ok_or(Error::MissingKeyword("ZCMPTYPE"))?;
+                let mut ztile = Vec::with_capacity(znaxis);
+                for i in 1..=znaxis {
+                    let kw = alloc::format!("ZTILE{}", i);
+                    let default = if i == 1 && !znaxes.is_empty() {
+                        znaxes[0]
+                    } else {
+                        1
+                    };
+                    let val = card_integer_value(cards, &kw).unwrap_or(default as i64) as usize;
+                    ztile.push(val);
+                }
+                let mut blocksize = card_integer_value(cards, "ZVAL1").unwrap_or(32) as usize;
+                let mut rice_bytepix = card_integer_value(cards, "ZVAL2").unwrap_or(4) as usize;
+                // cfitsio compatibility: if blocksize < 16 and bytepix > 8, values are swapped
+                if blocksize < 16 && rice_bytepix > 8 {
+                    core::mem::swap(&mut blocksize, &mut rice_bytepix);
+                }
+                return Ok(HduInfo::CompressedImage {
+                    zbitpix,
+                    znaxes,
+                    zcmptype,
+                    ztile,
+                    blocksize,
+                    rice_bytepix,
+                    naxis1,
+                    naxis2,
+                    pcount,
+                    tfields,
+                });
+            }
+
             Ok(HduInfo::BinaryTable {
                 naxis1,
                 naxis2,

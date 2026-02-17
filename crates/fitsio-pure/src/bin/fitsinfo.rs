@@ -91,6 +91,30 @@ fn format_hdu(index: usize, hdu: &Hdu) -> String {
             out.push_str(&format!("  GCOUNT: {}\n", gcount));
             out.push_str(&format!("  Data size: {} bytes\n", hdu.data_len));
         }
+        HduInfo::CompressedImage {
+            zbitpix,
+            znaxes,
+            zcmptype,
+            ztile,
+            naxis2,
+            pcount,
+            ..
+        } => {
+            let extname = card_string_value(&hdu.cards, "EXTNAME");
+            let ext_label = match extname {
+                Some(name) => format!(" (EXTNAME: {})", name),
+                None => String::new(),
+            };
+            out.push_str(&format!("HDU {}: Compressed Image{}\n", index, ext_label));
+            out.push_str(&format!("  ZBITPIX: {}\n", zbitpix));
+            out.push_str(&format!("  Dimensions: {:?}\n", znaxes));
+            out.push_str(&format!("  Compression: {}\n", zcmptype));
+            out.push_str(&format!("  Tile size: {:?}\n", ztile));
+            out.push_str(&format!("  Tiles: {}\n", naxis2));
+            if *pcount > 0 {
+                out.push_str(&format!("  Heap size: {} bytes\n", pcount));
+            }
+        }
     }
     out
 }

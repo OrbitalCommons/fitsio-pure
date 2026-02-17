@@ -89,6 +89,15 @@ impl FitsHdu {
                     image_type,
                 })
             }
+            crate::hdu::HduInfo::CompressedImage {
+                zbitpix, znaxes, ..
+            } => {
+                let image_type = super::images::ImageType::from_bitpix(*zbitpix)?;
+                Ok(HduInfo::ImageInfo {
+                    shape: znaxes.clone(),
+                    image_type,
+                })
+            }
         }
     }
 }
