@@ -82,6 +82,13 @@ impl FitsHdu {
                 column_count: *tfields,
                 row_count: *naxis2,
             }),
+            crate::hdu::HduInfo::RandomGroups { bitpix, naxes, .. } => {
+                let image_type = super::images::ImageType::from_bitpix(*bitpix)?;
+                Ok(HduInfo::ImageInfo {
+                    shape: naxes.clone(),
+                    image_type,
+                })
+            }
         }
     }
 }
