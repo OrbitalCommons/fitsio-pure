@@ -15,6 +15,10 @@ pub enum Error {
     InvalidValue,
     /// A required keyword was not found in the header.
     MissingKeyword(&'static str),
+    /// Unsupported or unknown tile compression algorithm.
+    UnsupportedCompression,
+    /// Error during tile decompression (Rice/GZIP).
+    DecompressionError,
     /// An I/O error from the standard library.
     #[cfg(feature = "std")]
     Io(std::io::Error),
@@ -33,6 +37,8 @@ impl core::fmt::Display for Error {
             Error::UnsupportedExtension => write!(f, "unsupported XTENSION type"),
             Error::InvalidValue => write!(f, "invalid header value"),
             Error::MissingKeyword(kw) => write!(f, "missing required keyword: {kw}"),
+            Error::UnsupportedCompression => write!(f, "unsupported compression algorithm"),
+            Error::DecompressionError => write!(f, "decompression error"),
             #[cfg(feature = "std")]
             Error::Io(e) => write!(f, "I/O error: {e}"),
         }

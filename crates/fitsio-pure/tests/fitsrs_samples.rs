@@ -88,6 +88,14 @@ fn validate_fitsrs_corpus() {
                         } => {
                             format!("RandomGroups(bitpix={bitpix}, naxes={naxes:?}, pcount={pcount}, gcount={gcount})")
                         }
+                        fitsio_pure::hdu::HduInfo::CompressedImage {
+                            zbitpix,
+                            znaxes,
+                            zcmptype,
+                            ..
+                        } => {
+                            format!("CompressedImage(zbitpix={zbitpix}, znaxes={znaxes:?}, {zcmptype})")
+                        }
                     })
                     .collect();
                 results.push((

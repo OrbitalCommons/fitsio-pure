@@ -50,7 +50,7 @@ See **[docs/compat-guide.md](docs/compat-guide.md)** for migration instructions,
 | **Binary tables** | ✅ Read + write | ✅ Read + write | ⚠️ Read only |
 | **ASCII tables** | ✅ Read + write | ✅ Read + write | ⚠️ Raw bytes |
 | **Random groups** | ⚠️ Read | ✅ Read + write | ❌ |
-| **Tile compression** | ⚠️ Parsed as table | ✅ Transparent | ⚠️ GZIP/RICE |
+| **Tile compression** | ✅ RICE_1/GZIP_1 read | ✅ Transparent | ⚠️ GZIP/RICE |
 | **Header keywords** | ✅ Read + write | ✅ Read + write | ⚠️ Read only |
 | **ndarray** | ✅ | ✅ | ❌ |
 
@@ -81,6 +81,7 @@ CI runs against a curated corpus of 63 real-world FITS files from the [`fits-tes
 - Primary images across all BITPIX types (8/16/32/64-bit integer, 32/64-bit float)
 - Multi-extension files (up to 9 HDUs) from HST, EUVE, and other missions
 - Binary and ASCII table extensions
+- Tile-compressed images (RICE_1 and GZIP_1, including quantized floats)
 - Random groups format (UVFITS)
 - 3D cubes and 4D+ hypercubes
 - Unsigned 16-bit images via BZERO=32768

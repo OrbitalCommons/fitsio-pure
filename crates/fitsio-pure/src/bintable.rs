@@ -39,6 +39,10 @@ pub enum BinaryColumnType {
     ComplexDouble,
     /// A -- ASCII character.
     Ascii,
+    /// P -- 32-bit variable-length array descriptor (8 bytes: count + heap offset).
+    VarArrayP,
+    /// Q -- 64-bit variable-length array descriptor (16 bytes: count + heap offset).
+    VarArrayQ,
 }
 
 /// Describes one column in a binary table.
@@ -87,16 +91,54 @@ pub fn binary_type_byte_size(col_type: &BinaryColumnType) -> usize {
         BinaryColumnType::ComplexFloat => 8,
         BinaryColumnType::ComplexDouble => 16,
         BinaryColumnType::Ascii => 1,
+        BinaryColumnType::VarArrayP => 8,
+        BinaryColumnType::VarArrayQ => 16,
     }
 }
 
-/// Parse a TFORMn value like "1J", "10E", "20A", "1024X".
+/// Parse a TFORMn value like "1J", "10E", "20A", "1024X", "1PB(200)", "1QJ".
 ///
 /// Returns the repeat count and the column type.
 pub fn parse_tform_binary(s: &str) -> Result<(usize, BinaryColumnType)> {
     let s = s.trim();
     if s.is_empty() {
         return Err(Error::InvalidValue);
+    }
+
+    // Strip optional (maxlen) suffix for variable-length arrays.
+    let s = if let Some(paren) = s.find('(') {
+        &s[..paren]
+    } else {
+        s
+    };
+
+    // Check for P/Q variable-length array descriptors: rPt or rQt
+    // where r is repeat count, P/Q is the descriptor type, t is element type code.
+    if s.len() >= 2 {
+        let bytes = s.as_bytes();
+        let last = bytes[s.len() - 1];
+        let second_last = bytes[s.len() - 2];
+        if second_last == b'P' || second_last == b'Q' {
+            // Validate the element type code (last char) is a known type
+            match last {
+                b'L' | b'X' | b'B' | b'I' | b'J' | b'K' | b'E' | b'D' | b'C' | b'M' | b'A' => {}
+                _ => return Err(Error::InvalidValue),
+            }
+            let repeat_str = &s[..s.len() - 2];
+            let repeat = if repeat_str.is_empty() {
+                1
+            } else {
+                repeat_str
+                    .parse::<usize>()
+                    .map_err(|_| Error::InvalidValue)?
+            };
+            let col_type = if second_last == b'P' {
+                BinaryColumnType::VarArrayP
+            } else {
+                BinaryColumnType::VarArrayQ
+            };
+            return Ok((repeat, col_type));
+        }
     }
 
     // Find the last character, which is the type code.
@@ -133,6 +175,9 @@ pub fn parse_tform_binary(s: &str) -> Result<(usize, BinaryColumnType)> {
 fn compute_byte_width(repeat: usize, col_type: &BinaryColumnType) -> usize {
     match col_type {
         BinaryColumnType::Bit => repeat.div_ceil(8),
+        // VarArray descriptors have a fixed size regardless of repeat count
+        BinaryColumnType::VarArrayP => 8 * repeat,
+        BinaryColumnType::VarArrayQ => 16 * repeat,
         _ => repeat * binary_type_byte_size(col_type),
     }
 }
@@ -250,6 +295,7 @@ fn read_column_cells(
     col_offset: usize,
 ) -> Result<BinaryColumnData> {
     match col.col_type {
+        BinaryColumnType::VarArrayP | BinaryColumnType::VarArrayQ => Err(Error::InvalidValue),
         BinaryColumnType::Logical => {
             let mut values = Vec::with_capacity(naxis2 * col.repeat);
             for row in 0..naxis2 {
@@ -515,6 +561,8 @@ fn tform_string(repeat: usize, col_type: &BinaryColumnType) -> String {
         BinaryColumnType::ComplexFloat => 'C',
         BinaryColumnType::ComplexDouble => 'M',
         BinaryColumnType::Ascii => 'A',
+        BinaryColumnType::VarArrayP => 'P',
+        BinaryColumnType::VarArrayQ => 'Q',
     };
     alloc::format!("{}{}", repeat, ch)
 }

@@ -37,6 +37,7 @@ pub fn image_dimensions(hdu: &Hdu) -> Result<Vec<usize>> {
     match &hdu.info {
         HduInfo::Primary { naxes, .. } => Ok(naxes.clone()),
         HduInfo::Image { naxes, .. } => Ok(naxes.clone()),
+        HduInfo::CompressedImage { znaxes, .. } => Ok(znaxes.clone()),
         _ => Err(Error::InvalidHeader),
     }
 }
@@ -46,6 +47,7 @@ pub fn image_dimensions(hdu: &Hdu) -> Result<Vec<usize>> {
 fn hdu_bitpix(hdu: &Hdu) -> Result<i64> {
     match &hdu.info {
         HduInfo::Primary { bitpix, .. } | HduInfo::Image { bitpix, .. } => Ok(*bitpix),
+        HduInfo::CompressedImage { zbitpix, .. } => Ok(*zbitpix),
         _ => Err(Error::InvalidHeader),
     }
 }
@@ -55,6 +57,9 @@ fn hdu_bitpix(hdu: &Hdu) -> Result<i64> {
 /// Converts big-endian on-disk bytes to native-endian typed arrays.
 /// Returns an `ImageData` enum variant matching the BITPIX type.
 pub fn read_image_data(fits_data: &[u8], hdu: &Hdu) -> Result<ImageData> {
+    if matches!(&hdu.info, HduInfo::CompressedImage { .. }) {
+        return crate::tiled::read_tiled_image(fits_data, hdu);
+    }
     let bitpix = hdu_bitpix(hdu)?;
     let data_len = hdu.data_len;
 
@@ -273,6 +278,9 @@ fn hdu_bitpix_naxes(hdu: &Hdu) -> Result<(i64, &[usize])> {
         HduInfo::Primary { bitpix, naxes } | HduInfo::Image { bitpix, naxes } => {
             Ok((*bitpix, naxes))
         }
+        HduInfo::CompressedImage {
+            zbitpix, znaxes, ..
+        } => Ok((*zbitpix, znaxes)),
         _ => Err(Error::InvalidHeader),
     }
 }
