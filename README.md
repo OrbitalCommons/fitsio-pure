@@ -174,6 +174,38 @@ cargo run --features cli --bin fitsconv -- --help
 
 See [`docs/benchmarks.md`](docs/benchmarks.md) for comparative I/O throughput between fitsio-pure and cfitsio (image and binary table column operations). Performance is approaching cfitsio, but the project priorities are safety, correctness, and portability first. PRs to help close the gap are welcome.
 
+## Comparison with other Rust FITS libraries
+
+| | **fitsio-pure** | **fitsio** | **fitsrs** |
+|---|---|---|---|
+| **Pure Rust** | Yes | No | Yes |
+| **External deps** | None | cfitsio + C toolchain | None |
+| **`wasm32` / `no_std`** | Yes / Yes | No / No | No / No |
+| **License** | Apache-2.0 | MIT/Apache-2.0 | MIT/Apache-2.0 |
+| | | | |
+| **Read images** | All BITPIX | All BITPIX | All BITPIX |
+| **Write images** | All BITPIX | All BITPIX | All BITPIX |
+| **Binary tables** | Read + write | Read + write | Read only |
+| **ASCII tables** | Read + write | Read + write | Raw bytes |
+| **Random groups** | Read | Read + write | No |
+| **Tile compression** | Parsed as table | Transparent | GZIP/RICE |
+| **Variable-length arrays** | No | Yes | No |
+| **BSCALE/BZERO** | Read | Read + write | No |
+| **Header keywords** | Read + write | Read + write | Read only |
+| **Async I/O** | No | No | Yes |
+| **ndarray** | Yes | Yes | No |
+| **cfitsio compat API** | Yes | — | No |
+| | | | |
+| **Image read speed** | 0.3–1x | 1x | — |
+| **Image write speed** | 0.3–1x | 1x | — |
+| **Column read speed** | 0.3–1.5x | 1x | — |
+| **Column write speed** | 0.1–1x | 1x | — |
+| | | | |
+| **crates.io downloads** | 66 | 112K | 21K |
+| **Repository** | [OrbitalCommons](https://github.com/OrbitalCommons/fitsio-pure) | [simonrw](https://github.com/simonrw/rust-fitsio) | [cds-astro](https://github.com/cds-astro/fitsrs) |
+
+Speeds are relative to fitsio/cfitsio (1x = baseline). Ranges span small to large data sizes — fitsio-pure matches cfitsio on small arrays and is ~3x slower on large images. Column writes at scale are the widest gap (~10x at 1M rows). See [`docs/benchmarks.md`](docs/benchmarks.md) for full numbers.
+
 ## Reference Materials
 
 - [FITS Standard 3.0 Specification](https://fits.gsfc.nasa.gov/standard30/fits_standard30aa.pdf) -- The official IAU FITS format definition
@@ -182,13 +214,15 @@ See [`docs/benchmarks.md`](docs/benchmarks.md) for comparative I/O throughput be
 
 ## Testing and Validation
 
-This project uses a combination of synthetic round-trip tests and validation against real-world astronomical data.
+CI runs against a curated corpus of 63 real-world FITS files from the [`fits-test-cases`](https://github.com/OrbitalCommons/fits-test-cases) repository, covering:
 
-### Validation Approach
-To ensure correctness, we validate `fitsio-pure` against official sample files and `astropy.io.fits`.
-1.  **Resources:** See [FITS_RESOURCES.md](FITS_RESOURCES.md) for a list of data sources (NASA, Astropy, LSST).
-2.  **Automated Fetching:** Use `scripts/fetch_samples.sh` to download test files.
-3.  **Cross-Validation:** Use `scripts/validate_metadata.py` to generate ground-truth metadata from `astropy` for comparison.
-4.  **Reporting:** Discovered gaps are documented in [VALIDATION_REPORT.md](VALIDATION_REPORT.md).
+- Primary images across all BITPIX types (8/16/32/64-bit integer, 32/64-bit float)
+- Multi-extension files (up to 9 HDUs) from HST, EUVE, and other missions
+- Binary and ASCII table extensions
+- Random groups format (UVFITS)
+- 3D cubes and 4D+ hypercubes
+- Unsigned 16-bit images via BZERO=32768
+- HEALPix tiles
+- Synthetic test patterns (gradients, checkerboards, mixed types, extreme aspect ratios)
 
-For more details on the current status, see the [Validation Report](VALIDATION_REPORT.md).
+In addition to corpus validation, the test suite includes in-memory round-trip tests for all supported data types and structures, ensuring `wasm32` compatibility without filesystem access.
