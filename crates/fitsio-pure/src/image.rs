@@ -150,6 +150,73 @@ pub fn extract_bscale_bzero(cards: &[Card]) -> (f64, f64) {
     (bscale, bzero)
 }
 
+/// Extract the BLANK keyword value from header cards.
+///
+/// The BLANK keyword defines the integer value used to represent undefined
+/// pixels in images with positive BITPIX (8, 16, 32, 64). Returns `None`
+/// if the keyword is not present.
+pub fn extract_blank(cards: &[Card]) -> Option<i64> {
+    find_integer_keyword(cards, "BLANK")
+}
+
+/// Find an integer-valued keyword in the card list.
+fn find_integer_keyword(cards: &[Card], keyword: &str) -> Option<i64> {
+    cards.iter().find_map(|c| {
+        if c.keyword_str() == keyword {
+            match &c.value {
+                Some(Value::Integer(n)) => Some(*n),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    })
+}
+
+/// Create a boolean mask indicating which pixels are undefined (BLANK).
+///
+/// Returns a `Vec<bool>` with the same length as the pixel array, where
+/// `true` means the pixel is undefined. For floating-point types, NaN
+/// pixels are marked as undefined regardless of the BLANK keyword.
+///
+/// Returns `None` if the image data is empty or no BLANK/NaN values exist.
+pub fn blank_mask(data: &ImageData, blank: Option<i64>) -> Option<Vec<bool>> {
+    let mask: Vec<bool> = match data {
+        ImageData::U8(v) => match blank {
+            Some(b) => {
+                let bv = b as u8;
+                v.iter().map(|&p| p == bv).collect()
+            }
+            None => return None,
+        },
+        ImageData::I16(v) => match blank {
+            Some(b) => {
+                let bv = b as i16;
+                v.iter().map(|&p| p == bv).collect()
+            }
+            None => return None,
+        },
+        ImageData::I32(v) => match blank {
+            Some(b) => {
+                let bv = b as i32;
+                v.iter().map(|&p| p == bv).collect()
+            }
+            None => return None,
+        },
+        ImageData::I64(v) => match blank {
+            Some(b) => v.iter().map(|&p| p == b).collect(),
+            None => return None,
+        },
+        ImageData::F32(v) => v.iter().map(|p| p.is_nan()).collect(),
+        ImageData::F64(v) => v.iter().map(|p| p.is_nan()).collect(),
+    };
+    if mask.iter().any(|&b| b) {
+        Some(mask)
+    } else {
+        None
+    }
+}
+
 /// Find a float-valued keyword in the card list, accepting both Float and
 /// Integer values (integers are promoted to f64).
 fn find_float_keyword(cards: &[Card], keyword: &str) -> Option<f64> {
@@ -170,10 +237,20 @@ fn find_float_keyword(cards: &[Card], keyword: &str) -> Option<f64> {
 ///
 /// Reads raw pixel data from the HDU, extracts BSCALE and BZERO from the
 /// header cards, and returns calibrated physical values as `Vec<f64>`.
+/// Pixels matching the BLANK keyword value are set to NaN.
 pub fn read_image_physical(fits_data: &[u8], hdu: &Hdu) -> Result<Vec<f64>> {
     let raw = read_image_data(fits_data, hdu)?;
     let (bscale, bzero) = extract_bscale_bzero(&hdu.cards);
-    Ok(apply_bscale_bzero(&raw, bscale, bzero))
+    let blank = extract_blank(&hdu.cards);
+    let mut physical = apply_bscale_bzero(&raw, bscale, bzero);
+    if let Some(mask) = blank_mask(&raw, blank) {
+        for (val, is_blank) in physical.iter_mut().zip(mask.iter()) {
+            if *is_blank {
+                *val = f64::NAN;
+            }
+        }
+    }
+    Ok(physical)
 }
 
 // ---- Image write functions ----
@@ -1168,5 +1245,76 @@ mod tests {
             ImageData::I16(v) => assert!(v.is_empty()),
             other => panic!("Expected I16, got {:?}", other),
         }
+    }
+
+    // ---- BLANK keyword ----
+
+    #[test]
+    fn extract_blank_present() {
+        let cards = vec![
+            card("SIMPLE", Value::Logical(true)),
+            card("BITPIX", Value::Integer(16)),
+            card("NAXIS", Value::Integer(1)),
+            card("NAXIS1", Value::Integer(4)),
+            card("BLANK", Value::Integer(-32768)),
+        ];
+        assert_eq!(extract_blank(&cards), Some(-32768));
+    }
+
+    #[test]
+    fn extract_blank_absent() {
+        let cards = vec![
+            card("SIMPLE", Value::Logical(true)),
+            card("BITPIX", Value::Integer(16)),
+            card("NAXIS", Value::Integer(0)),
+        ];
+        assert_eq!(extract_blank(&cards), None);
+    }
+
+    #[test]
+    fn blank_mask_i16() {
+        let data = ImageData::I16(vec![1, -32768, 3, -32768]);
+        let mask = blank_mask(&data, Some(-32768));
+        assert_eq!(mask, Some(vec![false, true, false, true]));
+    }
+
+    #[test]
+    fn blank_mask_no_blank_keyword() {
+        let data = ImageData::I16(vec![1, 2, 3]);
+        assert!(blank_mask(&data, None).is_none());
+    }
+
+    #[test]
+    fn blank_mask_no_matches() {
+        let data = ImageData::I16(vec![1, 2, 3]);
+        assert!(blank_mask(&data, Some(-32768)).is_none());
+    }
+
+    #[test]
+    fn blank_mask_f32_nan() {
+        let data = ImageData::F32(vec![1.0, f32::NAN, 3.0]);
+        let mask = blank_mask(&data, None);
+        assert_eq!(mask, Some(vec![false, true, false]));
+    }
+
+    #[test]
+    fn read_physical_with_blank() {
+        let blank_val: i16 = -32768;
+        let values: [i16; 4] = [100, blank_val, 200, blank_val];
+        let mut raw = vec![0u8; 8];
+        for (i, &v) in values.iter().enumerate() {
+            write_i16_be(&mut raw[i * 2..], v);
+        }
+
+        let mut cards = primary_header_image(16, &[4]);
+        cards.push(card("BLANK", Value::Integer(blank_val as i64)));
+        let fits = build_fits(&cards, &raw);
+        let hdu = parse_primary(&fits);
+
+        let physical = read_image_physical(&fits, &hdu).unwrap();
+        assert_eq!(physical[0], 100.0);
+        assert!(physical[1].is_nan());
+        assert_eq!(physical[2], 200.0);
+        assert!(physical[3].is_nan());
     }
 }

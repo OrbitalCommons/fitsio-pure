@@ -1,6 +1,7 @@
 //! FITS header card parsing, writing, and validation.
 
 use alloc::string::String;
+use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::str;
@@ -161,6 +162,8 @@ fn extract_comment_from_empty_value(field: &str) -> Option<String> {
     None
 }
 
+const KW_CONTINUE: [u8; 8] = *b"CONTINUE";
+
 /// Parse consecutive 2880-byte header blocks until the END card is found.
 ///
 /// The input data does not need to be an exact multiple of [`BLOCK_SIZE`].
@@ -168,6 +171,11 @@ fn extract_comment_from_empty_value(field: &str) -> Option<String> {
 /// than a full block are ignored.  This allows parsing headers from files
 /// whose total size is not block-aligned (e.g. HiPS tiles that omit
 /// trailing padding).
+///
+/// String values that use the CONTINUE long-string convention (HEASARC)
+/// are automatically concatenated: when a string value ends with `&` and
+/// is followed by one or more `CONTINUE` keyword cards, the values are
+/// merged into a single `Value::String`.
 pub fn parse_header_blocks(data: &[u8]) -> Result<Vec<Card>> {
     if data.len() < BLOCK_SIZE {
         return Err(Error::UnexpectedEof);
@@ -189,12 +197,119 @@ pub fn parse_header_blocks(data: &[u8]) -> Result<Vec<Card>> {
             cards.push(card);
 
             if is_end {
+                merge_continue_cards(&mut cards);
                 return Ok(cards);
             }
         }
     }
 
     Err(Error::UnexpectedEof)
+}
+
+/// Merge CONTINUE cards into the preceding card's string value.
+///
+/// A string ending with `&` followed by one or more CONTINUE cards forms
+/// a single long string. The `&` markers and CONTINUE cards are removed;
+/// the preceding card's value receives the concatenated string.
+fn merge_continue_cards(cards: &mut Vec<Card>) {
+    let mut i = 0;
+    while i < cards.len() {
+        let has_continuation = match &cards[i].value {
+            Some(Value::String(s)) => s.ends_with('&'),
+            _ => false,
+        };
+        if !has_continuation {
+            i += 1;
+            continue;
+        }
+
+        // Strip trailing '&' from the base string.
+        let mut combined = match &cards[i].value {
+            Some(Value::String(s)) => {
+                let mut s = s.clone();
+                s.pop(); // remove '&'
+                s
+            }
+            _ => unreachable!(),
+        };
+
+        // Absorb subsequent CONTINUE cards.
+        let mut j = i + 1;
+        while j < cards.len() && cards[j].keyword == KW_CONTINUE {
+            // CONTINUE cards store their string in the comment field
+            // (no `= ` indicator), or sometimes use a value field.
+            let cont_str = extract_continue_string(&cards[j]);
+            let ends_with_amp = cont_str.ends_with('&');
+            if ends_with_amp {
+                combined.push_str(&cont_str[..cont_str.len() - 1]);
+            } else {
+                combined.push_str(&cont_str);
+            }
+            j += 1;
+            if !ends_with_amp {
+                break;
+            }
+        }
+
+        // Update the base card with the merged string.
+        cards[i].value = Some(Value::String(combined));
+        // Remove the consumed CONTINUE cards.
+        cards.drain(i + 1..j);
+        i += 1;
+    }
+}
+
+/// Extract the string payload from a CONTINUE card.
+///
+/// CONTINUE cards may carry their value in two forms:
+/// 1. As a quoted string in bytes 8..80 (no `= ` indicator but starts with
+///    optional spaces then `'`).
+/// 2. As a regular value field if the card was parsed with a value.
+fn extract_continue_string(card: &Card) -> String {
+    // If the parser found a value (some files use `= ` on CONTINUE), use it.
+    if let Some(Value::String(s)) = &card.value {
+        return s.clone();
+    }
+    // Otherwise the string lives in the comment field (raw text after keyword).
+    // Try to parse it as a quoted string.
+    if let Some(text) = &card.comment {
+        let trimmed = text.trim_start();
+        if trimmed.starts_with('\'') {
+            if let Some(s) = parse_continue_quoted(trimmed) {
+                return s;
+            }
+        }
+        return trimmed.to_string();
+    }
+    String::new()
+}
+
+/// Parse a quoted string from CONTINUE card text (bytes 8..80 as a &str).
+fn parse_continue_quoted(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    if bytes.is_empty() || bytes[0] != b'\'' {
+        return None;
+    }
+    let mut value = String::new();
+    let mut i = 1;
+    let len = bytes.len();
+    loop {
+        if i >= len {
+            break;
+        }
+        if bytes[i] == b'\'' {
+            if i + 1 < len && bytes[i + 1] == b'\'' {
+                value.push('\'');
+                i += 2;
+            } else {
+                break;
+            }
+        } else {
+            value.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    Some(value.trim_end().to_string())
 }
 
 /// Return the number of bytes consumed by the header (always a multiple of BLOCK_SIZE).
@@ -733,6 +848,90 @@ mod parse_tests {
         let cards = [make_card("SIMPLE  =                    T")];
         let block = make_header_block(&cards);
         assert!(header_byte_len(&block).is_err());
+    }
+
+    // ---- CONTINUE long-string convention ----
+
+    #[test]
+    fn continue_single_continuation() {
+        let cards = [
+            make_card("SIMPLE  =                    T"),
+            make_card("BITPIX  =                    8"),
+            make_card("NAXIS   =                    0"),
+            make_card("LONGSTR = 'Hello &'"),
+            make_card("CONTINUE  'World'"),
+            make_card("END"),
+        ];
+        let block = make_header_block(&cards);
+        let parsed = parse_header_blocks(&block).unwrap();
+        let long = parsed
+            .iter()
+            .find(|c| c.keyword_str() == "LONGSTR")
+            .unwrap();
+        assert_eq!(long.value, Some(Value::String(String::from("Hello World"))));
+        assert!(parsed.iter().all(|c| c.keyword != KW_CONTINUE));
+    }
+
+    #[test]
+    fn continue_multi_chain() {
+        let cards = [
+            make_card("SIMPLE  =                    T"),
+            make_card("BITPIX  =                    8"),
+            make_card("NAXIS   =                    0"),
+            make_card("LONGSTR = 'part1&'"),
+            make_card("CONTINUE  'part2&'"),
+            make_card("CONTINUE  'part3'"),
+            make_card("END"),
+        ];
+        let block = make_header_block(&cards);
+        let parsed = parse_header_blocks(&block).unwrap();
+        let long = parsed
+            .iter()
+            .find(|c| c.keyword_str() == "LONGSTR")
+            .unwrap();
+        assert_eq!(
+            long.value,
+            Some(Value::String(String::from("part1part2part3")))
+        );
+        assert!(parsed.iter().all(|c| c.keyword != KW_CONTINUE));
+    }
+
+    #[test]
+    fn continue_no_ampersand_no_merge() {
+        let cards = [
+            make_card("SIMPLE  =                    T"),
+            make_card("BITPIX  =                    8"),
+            make_card("NAXIS   =                    0"),
+            make_card("MYKEY   = 'no ampersand'"),
+            make_card("CONTINUE  'should stay'"),
+            make_card("END"),
+        ];
+        let block = make_header_block(&cards);
+        let parsed = parse_header_blocks(&block).unwrap();
+        let mykey = parsed.iter().find(|c| c.keyword_str() == "MYKEY").unwrap();
+        assert_eq!(
+            mykey.value,
+            Some(Value::String(String::from("no ampersand")))
+        );
+        // CONTINUE card remains because preceding string lacked '&'
+        assert!(parsed.iter().any(|c| c.keyword == KW_CONTINUE));
+    }
+
+    #[test]
+    fn continue_integer_value_not_merged() {
+        let cards = [
+            make_card("SIMPLE  =                    T"),
+            make_card("BITPIX  =                    8"),
+            make_card("NAXIS   =                    0"),
+            make_card("INTKEY  =                   42"),
+            make_card("CONTINUE  'ignored'"),
+            make_card("END"),
+        ];
+        let block = make_header_block(&cards);
+        let parsed = parse_header_blocks(&block).unwrap();
+        let intkey = parsed.iter().find(|c| c.keyword_str() == "INTKEY").unwrap();
+        assert_eq!(intkey.value, Some(Value::Integer(42)));
+        assert!(parsed.iter().any(|c| c.keyword == KW_CONTINUE));
     }
 }
 
