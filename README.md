@@ -182,13 +182,15 @@ See [`docs/benchmarks.md`](docs/benchmarks.md) for comparative I/O throughput be
 
 ## Testing and Validation
 
-This project uses a combination of synthetic round-trip tests and validation against real-world astronomical data.
+CI runs against a curated corpus of 63 real-world FITS files from the [`fits-test-cases`](https://github.com/OrbitalCommons/fits-test-cases) repository, covering:
 
-### Validation Approach
-To ensure correctness, we validate `fitsio-pure` against official sample files and `astropy.io.fits`.
-1.  **Resources:** See [FITS_RESOURCES.md](FITS_RESOURCES.md) for a list of data sources (NASA, Astropy, LSST).
-2.  **Automated Fetching:** Use `scripts/fetch_samples.sh` to download test files.
-3.  **Cross-Validation:** Use `scripts/validate_metadata.py` to generate ground-truth metadata from `astropy` for comparison.
-4.  **Reporting:** Discovered gaps are documented in [VALIDATION_REPORT.md](VALIDATION_REPORT.md).
+- Primary images across all BITPIX types (8/16/32/64-bit integer, 32/64-bit float)
+- Multi-extension files (up to 9 HDUs) from HST, EUVE, and other missions
+- Binary and ASCII table extensions
+- Random groups format (UVFITS)
+- 3D cubes and 4D+ hypercubes
+- Unsigned 16-bit images via BZERO=32768
+- HEALPix tiles
+- Synthetic test patterns (gradients, checkerboards, mixed types, extreme aspect ratios)
 
-For more details on the current status, see the [Validation Report](VALIDATION_REPORT.md).
+In addition to corpus validation, the test suite includes in-memory round-trip tests for all supported data types and structures, ensuring `wasm32` compatibility without filesystem access.
