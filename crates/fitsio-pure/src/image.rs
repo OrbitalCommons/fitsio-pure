@@ -351,32 +351,42 @@ pub fn reverse_bscale_bzero(
     bitpix: i64,
 ) -> Result<ImageData> {
     let inv = |v: f64| (v - bzero) / bscale;
+    let round_clamp = |v: f64, lo: f64, hi: f64| -> f64 {
+        let r = libm::round(v);
+        if r < lo {
+            lo
+        } else if r > hi {
+            hi
+        } else {
+            r
+        }
+    };
     match bitpix {
         8 => {
             let pixels: Vec<u8> = physical
                 .iter()
-                .map(|&v| inv(v).round().clamp(0.0, 255.0) as u8)
+                .map(|&v| round_clamp(inv(v), 0.0, 255.0) as u8)
                 .collect();
             Ok(ImageData::U8(pixels))
         }
         16 => {
             let pixels: Vec<i16> = physical
                 .iter()
-                .map(|&v| inv(v).round().clamp(i16::MIN as f64, i16::MAX as f64) as i16)
+                .map(|&v| round_clamp(inv(v), i16::MIN as f64, i16::MAX as f64) as i16)
                 .collect();
             Ok(ImageData::I16(pixels))
         }
         32 => {
             let pixels: Vec<i32> = physical
                 .iter()
-                .map(|&v| inv(v).round().clamp(i32::MIN as f64, i32::MAX as f64) as i32)
+                .map(|&v| round_clamp(inv(v), i32::MIN as f64, i32::MAX as f64) as i32)
                 .collect();
             Ok(ImageData::I32(pixels))
         }
         64 => {
             let pixels: Vec<i64> = physical
                 .iter()
-                .map(|&v| inv(v).round().clamp(i64::MIN as f64, i64::MAX as f64) as i64)
+                .map(|&v| round_clamp(inv(v), i64::MIN as f64, i64::MAX as f64) as i64)
                 .collect();
             Ok(ImageData::I64(pixels))
         }

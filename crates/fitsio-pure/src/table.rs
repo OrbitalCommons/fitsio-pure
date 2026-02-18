@@ -352,6 +352,36 @@ pub fn serialize_ascii_table(
     Ok(buf)
 }
 
+/// Build and serialize a complete ASCII table HDU (header + data).
+///
+/// Returns the combined header and data bytes, each padded to block boundaries.
+pub fn serialize_ascii_table_hdu(
+    columns: &[AsciiColumnDescriptor],
+    col_data: &[AsciiColumnData],
+) -> Result<Vec<u8>> {
+    let naxis1: usize = columns
+        .iter()
+        .map(|c| c.tbcol + c.format.width())
+        .max()
+        .unwrap_or(0);
+
+    let naxis2 = match col_data.first() {
+        Some(AsciiColumnData::Character(v)) => v.len(),
+        Some(AsciiColumnData::Integer(v)) => v.len(),
+        Some(AsciiColumnData::Float(v)) => v.len(),
+        None => 0,
+    };
+
+    let cards = build_ascii_table_cards(columns, naxis2)?;
+    let header_bytes = crate::header::serialize_header(&cards)?;
+    let data_bytes = serialize_ascii_table(columns, col_data, naxis1)?;
+
+    let mut result = Vec::with_capacity(header_bytes.len() + data_bytes.len());
+    result.extend_from_slice(&header_bytes);
+    result.extend_from_slice(&data_bytes);
+    Ok(result)
+}
+
 // ── Internal Helpers ──
 
 fn ascii_table_dims(hdu: &Hdu) -> Result<(usize, usize, usize)> {
@@ -1304,5 +1334,76 @@ mod tests {
             cards: vec![],
         };
         assert!(read_ascii_column(&[], &hdu, 0).is_err());
+    }
+
+    // ---- serialize_ascii_table_hdu ----
+
+    #[test]
+    fn serialize_hdu_produces_valid_fits() {
+        let cols = vec![
+            AsciiColumnDescriptor {
+                name: Some(String::from("NAME")),
+                format: AsciiColumnFormat::Character(8),
+                tbcol: 0,
+            },
+            AsciiColumnDescriptor {
+                name: Some(String::from("COUNT")),
+                format: AsciiColumnFormat::Integer(6),
+                tbcol: 8,
+            },
+        ];
+        let data = vec![
+            AsciiColumnData::Character(vec![String::from("Vega"), String::from("Sirius")]),
+            AsciiColumnData::Integer(vec![100, 200]),
+        ];
+
+        let hdu_bytes = serialize_ascii_table_hdu(&cols, &data).unwrap();
+        assert_eq!(hdu_bytes.len() % crate::block::BLOCK_SIZE, 0);
+
+        // Build a full FITS with a primary HDU and parse it
+        let primary_cards = vec![
+            mk_card("SIMPLE", Value::Logical(true)),
+            mk_card("BITPIX", Value::Integer(8)),
+            mk_card("NAXIS", Value::Integer(0)),
+        ];
+        let primary_header = serialize_header(&primary_cards).unwrap();
+
+        let mut fits = Vec::new();
+        fits.extend_from_slice(&primary_header);
+        fits.extend_from_slice(&hdu_bytes);
+
+        let parsed = crate::hdu::parse_fits(&fits).unwrap();
+        assert_eq!(parsed.len(), 2);
+
+        let hdu = parsed.get(1).unwrap();
+        match &hdu.info {
+            HduInfo::AsciiTable {
+                naxis1,
+                naxis2,
+                tfields,
+            } => {
+                assert_eq!(*naxis1, 14); // 8 + 6
+                assert_eq!(*naxis2, 2);
+                assert_eq!(*tfields, 2);
+            }
+            other => panic!("Expected AsciiTable, got {:?}", other),
+        }
+
+        let col0 = read_ascii_column(&fits, hdu, 0).unwrap();
+        match col0 {
+            AsciiColumnData::Character(vals) => {
+                assert_eq!(vals[0], "Vega");
+                assert_eq!(vals[1], "Sirius");
+            }
+            other => panic!("Expected Character, got {:?}", other),
+        }
+
+        let col1 = read_ascii_column(&fits, hdu, 1).unwrap();
+        match col1 {
+            AsciiColumnData::Integer(vals) => {
+                assert_eq!(vals, vec![100, 200]);
+            }
+            other => panic!("Expected Integer, got {:?}", other),
+        }
     }
 }

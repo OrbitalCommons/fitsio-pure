@@ -210,6 +210,30 @@ impl FitsFile {
         Ok(FitsHdu { hdu_index: idx })
     }
 
+    /// Create a new ASCII table extension HDU.
+    pub fn create_ascii_table(
+        &mut self,
+        extname: &str,
+        columns: &[crate::table::AsciiColumnDescriptor],
+    ) -> Result<FitsHdu> {
+        let mut cards = crate::table::build_ascii_table_cards(columns, 0)?;
+
+        let extname_card = crate::header::Card {
+            keyword: make_keyword("EXTNAME"),
+            value: Some(crate::value::Value::String(extname.to_string())),
+            comment: None,
+        };
+        cards.push(extname_card);
+
+        let header_bytes = crate::header::serialize_header(&cards)?;
+        self.data.extend_from_slice(&header_bytes);
+
+        self.invalidate_cache();
+        let fits_data = self.parsed()?;
+        let idx = fits_data.len() - 1;
+        Ok(FitsHdu { hdu_index: idx })
+    }
+
     /// Return a reference to the in-memory FITS bytes.
     pub fn data(&self) -> &[u8] {
         &self.data
