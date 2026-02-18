@@ -125,6 +125,126 @@ pub fn read_image_data(fits_data: &[u8], hdu: &Hdu) -> Result<ImageData> {
     }
 }
 
+/// Read image pixel data into a pre-allocated `f32` buffer.
+///
+/// The buffer must have exactly the right number of elements for the image.
+/// Data is converted from the on-disk BITPIX type to f32.
+pub fn read_image_data_into_f32(fits_data: &[u8], hdu: &Hdu, buf: &mut [f32]) -> Result<()> {
+    let bitpix = hdu_bitpix(hdu)?;
+    let bpp = bytes_per_pixel(bitpix)?;
+    let data_len = hdu.data_len;
+    let npixels = if bpp > 0 { data_len / bpp } else { 0 };
+
+    if buf.len() != npixels {
+        return Err(Error::InvalidValue);
+    }
+
+    if npixels == 0 {
+        return Ok(());
+    }
+
+    let end = hdu.data_start + data_len;
+    if end > fits_data.len() {
+        return Err(Error::UnexpectedEof);
+    }
+    let raw = &fits_data[hdu.data_start..end];
+
+    match bitpix {
+        8 => {
+            for (i, &b) in raw.iter().enumerate() {
+                buf[i] = b as f32;
+            }
+        }
+        16 => {
+            for i in 0..npixels {
+                buf[i] = crate::endian::read_i16_be(&raw[i * 2..]) as f32;
+            }
+        }
+        32 => {
+            for i in 0..npixels {
+                buf[i] = crate::endian::read_i32_be(&raw[i * 4..]) as f32;
+            }
+        }
+        64 => {
+            for i in 0..npixels {
+                buf[i] = crate::endian::read_i64_be(&raw[i * 8..]) as f32;
+            }
+        }
+        -32 => {
+            for i in 0..npixels {
+                buf[i] = crate::endian::read_f32_be(&raw[i * 4..]);
+            }
+        }
+        -64 => {
+            for i in 0..npixels {
+                buf[i] = crate::endian::read_f64_be(&raw[i * 8..]) as f32;
+            }
+        }
+        other => return Err(Error::InvalidBitpix(other)),
+    }
+    Ok(())
+}
+
+/// Read image pixel data into a pre-allocated `f64` buffer.
+///
+/// The buffer must have exactly the right number of elements for the image.
+/// Data is converted from the on-disk BITPIX type to f64.
+pub fn read_image_data_into_f64(fits_data: &[u8], hdu: &Hdu, buf: &mut [f64]) -> Result<()> {
+    let bitpix = hdu_bitpix(hdu)?;
+    let bpp = bytes_per_pixel(bitpix)?;
+    let data_len = hdu.data_len;
+    let npixels = if bpp > 0 { data_len / bpp } else { 0 };
+
+    if buf.len() != npixels {
+        return Err(Error::InvalidValue);
+    }
+
+    if npixels == 0 {
+        return Ok(());
+    }
+
+    let end = hdu.data_start + data_len;
+    if end > fits_data.len() {
+        return Err(Error::UnexpectedEof);
+    }
+    let raw = &fits_data[hdu.data_start..end];
+
+    match bitpix {
+        8 => {
+            for (i, &b) in raw.iter().enumerate() {
+                buf[i] = b as f64;
+            }
+        }
+        16 => {
+            for i in 0..npixels {
+                buf[i] = crate::endian::read_i16_be(&raw[i * 2..]) as f64;
+            }
+        }
+        32 => {
+            for i in 0..npixels {
+                buf[i] = crate::endian::read_i32_be(&raw[i * 4..]) as f64;
+            }
+        }
+        64 => {
+            for i in 0..npixels {
+                buf[i] = crate::endian::read_i64_be(&raw[i * 8..]) as f64;
+            }
+        }
+        -32 => {
+            for i in 0..npixels {
+                buf[i] = crate::endian::read_f32_be(&raw[i * 4..]) as f64;
+            }
+        }
+        -64 => {
+            for i in 0..npixels {
+                buf[i] = crate::endian::read_f64_be(&raw[i * 8..]);
+            }
+        }
+        other => return Err(Error::InvalidBitpix(other)),
+    }
+    Ok(())
+}
+
 /// Apply BSCALE/BZERO calibration to raw image data.
 ///
 /// Computes `physical = bzero + bscale * pixel` for every pixel and returns
@@ -1485,5 +1605,42 @@ mod tests {
         // Should not have BSCALE/BZERO cards
         let has_bscale = hdu.cards.iter().any(|c| c.keyword_str() == "BSCALE");
         assert!(!has_bscale);
+    }
+
+    // ---- read_image_data_into ----
+
+    #[test]
+    fn read_into_f32_from_f32_image() {
+        let pixels: Vec<f32> = vec![1.0, 2.5, 3.125];
+        let fits = build_image_hdu(-32, &[3], &ImageData::F32(pixels.clone())).unwrap();
+        let parsed = crate::hdu::parse_fits(&fits).unwrap();
+        let hdu = parsed.primary();
+
+        let mut buf = vec![0.0f32; 3];
+        read_image_data_into_f32(&fits, hdu, &mut buf).unwrap();
+        assert_eq!(buf, pixels);
+    }
+
+    #[test]
+    fn read_into_f64_from_i16_image() {
+        let pixels: Vec<i16> = vec![100, -200, 300];
+        let fits = build_image_hdu(16, &[3], &ImageData::I16(pixels)).unwrap();
+        let parsed = crate::hdu::parse_fits(&fits).unwrap();
+        let hdu = parsed.primary();
+
+        let mut buf = vec![0.0f64; 3];
+        read_image_data_into_f64(&fits, hdu, &mut buf).unwrap();
+        assert_eq!(buf, vec![100.0, -200.0, 300.0]);
+    }
+
+    #[test]
+    fn read_into_wrong_size_errors() {
+        let pixels: Vec<f32> = vec![1.0, 2.0, 3.0];
+        let fits = build_image_hdu(-32, &[3], &ImageData::F32(pixels)).unwrap();
+        let parsed = crate::hdu::parse_fits(&fits).unwrap();
+        let hdu = parsed.primary();
+
+        let mut buf = vec![0.0f32; 2]; // wrong size
+        assert!(read_image_data_into_f32(&fits, hdu, &mut buf).is_err());
     }
 }

@@ -79,6 +79,31 @@ pub trait ReadImage: Sized {
     ) -> Result<Vec<Self>>;
 }
 
+/// Trait for types that support zero-allocation image reads into a caller buffer.
+pub trait ReadImageIntoBuffer: Sized {
+    fn read_image_into_buffer(file: &FitsFile, hdu: &FitsHdu, buf: &mut [Self]) -> Result<()>;
+}
+
+impl ReadImageIntoBuffer for f32 {
+    fn read_image_into_buffer(file: &FitsFile, hdu: &FitsHdu, buf: &mut [Self]) -> Result<()> {
+        let idx = validate_hdu_index(file, hdu)?;
+        let parsed = file.parsed()?;
+        let core_hdu = &parsed.hdus[idx];
+        crate::image::read_image_data_into_f32(file.data(), core_hdu, buf)?;
+        Ok(())
+    }
+}
+
+impl ReadImageIntoBuffer for f64 {
+    fn read_image_into_buffer(file: &FitsFile, hdu: &FitsHdu, buf: &mut [Self]) -> Result<()> {
+        let idx = validate_hdu_index(file, hdu)?;
+        let parsed = file.parsed()?;
+        let core_hdu = &parsed.hdus[idx];
+        crate::image::read_image_data_into_f64(file.data(), core_hdu, buf)?;
+        Ok(())
+    }
+}
+
 /// Trait for types that can write image pixel data to a FITS file.
 pub trait WriteImage {
     fn write_image(file: &mut FitsFile, hdu: &FitsHdu, data: &[Self]) -> Result<()>
@@ -363,5 +388,80 @@ mod tests {
 
         let read_back = u8::read_image(&f, &hdu).unwrap();
         assert_eq!(read_back, pixels);
+    }
+
+    #[test]
+    fn read_image_into_buffer_f32() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("img.fits");
+        let mut f = FitsFile::create(&path).open().unwrap();
+
+        let desc = ImageDescription {
+            data_type: ImageType::Float,
+            dimensions: vec![4],
+        };
+        let hdu = f.create_image("SCI", &desc).unwrap();
+        let pixels: Vec<f32> = vec![1.0, 2.5, 3.125, 4.75];
+        f32::write_image(&mut f, &hdu, &pixels).unwrap();
+
+        let mut buf = vec![0.0f32; 4];
+        f32::read_image_into_buffer(&f, &hdu, &mut buf).unwrap();
+        assert_eq!(buf, pixels);
+    }
+
+    #[test]
+    fn read_image_into_buffer_f64() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("img.fits");
+        let mut f = FitsFile::create(&path).open().unwrap();
+
+        let desc = ImageDescription {
+            data_type: ImageType::Double,
+            dimensions: vec![3],
+        };
+        let hdu = f.create_image("DATA", &desc).unwrap();
+        let pixels: Vec<f64> = vec![1.5, -2.625, 0.0];
+        f64::write_image(&mut f, &hdu, &pixels).unwrap();
+
+        let mut buf = vec![0.0f64; 3];
+        f64::read_image_into_buffer(&f, &hdu, &mut buf).unwrap();
+        assert_eq!(buf, pixels);
+    }
+
+    #[test]
+    fn read_image_into_buffer_wrong_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("img.fits");
+        let mut f = FitsFile::create(&path).open().unwrap();
+
+        let desc = ImageDescription {
+            data_type: ImageType::Float,
+            dimensions: vec![4],
+        };
+        let hdu = f.create_image("SCI", &desc).unwrap();
+        let pixels: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
+        f32::write_image(&mut f, &hdu, &pixels).unwrap();
+
+        let mut buf = vec![0.0f32; 3]; // wrong size
+        assert!(f32::read_image_into_buffer(&f, &hdu, &mut buf).is_err());
+    }
+
+    #[test]
+    fn read_image_into_buffer_cross_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("img.fits");
+        let mut f = FitsFile::create(&path).open().unwrap();
+
+        let desc = ImageDescription {
+            data_type: ImageType::Short,
+            dimensions: vec![3],
+        };
+        let hdu = f.create_image("SCI", &desc).unwrap();
+        let pixels: Vec<i16> = vec![100, 200, 300];
+        i16::write_image(&mut f, &hdu, &pixels).unwrap();
+
+        let mut buf = vec![0.0f32; 3];
+        f32::read_image_into_buffer(&f, &hdu, &mut buf).unwrap();
+        assert_eq!(buf, vec![100.0, 200.0, 300.0]);
     }
 }
