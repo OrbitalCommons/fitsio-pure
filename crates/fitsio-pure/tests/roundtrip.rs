@@ -228,12 +228,14 @@ fn roundtrip_multi_extension() {
             repeat: 1,
             col_type: BinaryColumnType::Int,
             byte_width: 4,
+            tdim: None,
         },
         BinaryColumnDescriptor {
             name: Some(String::from("FLUX")),
             repeat: 1,
             col_type: BinaryColumnType::Double,
             byte_width: 8,
+            tdim: None,
         },
     ];
     let bt_col_data = vec![
@@ -369,24 +371,28 @@ fn roundtrip_binary_table_multi_type() {
             repeat: 1,
             col_type: BinaryColumnType::Int,
             byte_width: 4,
+            tdim: None,
         },
         BinaryColumnDescriptor {
             name: Some(String::from("NAME")),
             repeat: 12,
             col_type: BinaryColumnType::Ascii,
             byte_width: 12,
+            tdim: None,
         },
         BinaryColumnDescriptor {
             name: Some(String::from("RA")),
             repeat: 1,
             col_type: BinaryColumnType::Double,
             byte_width: 8,
+            tdim: None,
         },
         BinaryColumnDescriptor {
             name: Some(String::from("ACTIVE")),
             repeat: 1,
             col_type: BinaryColumnType::Logical,
             byte_width: 1,
+            tdim: None,
         },
     ];
     let naxis2 = 3;
@@ -456,12 +462,14 @@ fn roundtrip_binary_table_complex_columns() {
             repeat: 1,
             col_type: BinaryColumnType::ComplexFloat,
             byte_width: 8,
+            tdim: None,
         },
         BinaryColumnDescriptor {
             name: Some(String::from("CD")),
             repeat: 1,
             col_type: BinaryColumnType::ComplexDouble,
             byte_width: 16,
+            tdim: None,
         },
     ];
     let naxis2 = 2;
@@ -499,18 +507,21 @@ fn roundtrip_binary_table_byte_short_long() {
             repeat: 4,
             col_type: BinaryColumnType::Byte,
             byte_width: 4,
+            tdim: None,
         },
         BinaryColumnDescriptor {
             name: None,
             repeat: 1,
             col_type: BinaryColumnType::Short,
             byte_width: 2,
+            tdim: None,
         },
         BinaryColumnDescriptor {
             name: None,
             repeat: 1,
             col_type: BinaryColumnType::Long,
             byte_width: 8,
+            tdim: None,
         },
     ];
     let naxis2 = 2;
@@ -777,6 +788,7 @@ fn binary_table_serialized_data_is_block_padded() {
         repeat: 1,
         col_type: BinaryColumnType::Int,
         byte_width: 4,
+        tdim: None,
     }];
     let col_data = vec![BinaryColumnData::Int(vec![1, 2, 3])];
     let data_bytes = serialize_binary_table(&columns, &col_data, 3).unwrap();
@@ -813,6 +825,7 @@ fn roundtrip_four_extension_file() {
         repeat: 1,
         col_type: BinaryColumnType::Float,
         byte_width: 4,
+        tdim: None,
     }];
     let bt_data = vec![BinaryColumnData::Float(vec![1.5, 2.5])];
     let bt_ext = serialize_binary_table_hdu(&bt_cols, &bt_data, 2).unwrap();

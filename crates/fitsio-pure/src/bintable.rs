@@ -56,6 +56,11 @@ pub struct BinaryColumnDescriptor {
     pub col_type: BinaryColumnType,
     /// Total bytes this column occupies per row.
     pub byte_width: usize,
+    /// Multi-dimensional shape from TDIMn, if present.
+    ///
+    /// For example, `TDIMn = '(10,20)'` produces `Some(vec![10, 20])`.
+    /// The product of dimensions should equal `repeat`.
+    pub tdim: Option<Vec<usize>>,
 }
 
 /// Column data extracted from a binary table.
@@ -203,6 +208,30 @@ fn card_string_value(cards: &[Card], keyword: &str) -> Option<String> {
     })
 }
 
+/// Parse a TDIMn value like `(10,20)` or `(3,4,5)` into a vector of dimensions.
+///
+/// The FITS standard specifies TDIMn as a character string enclosed in
+/// parentheses with comma-separated integer dimensions. Leading/trailing
+/// whitespace and spaces around values are tolerated.
+///
+/// Returns `None` if the string is empty or cannot be parsed.
+pub fn parse_tdim(s: &str) -> Option<Vec<usize>> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let s = s.strip_prefix('(')?.strip_suffix(')')?;
+    let dims: Option<Vec<usize>> = s
+        .split(',')
+        .map(|part| part.trim().parse::<usize>().ok())
+        .collect();
+    let dims = dims?;
+    if dims.is_empty() {
+        return None;
+    }
+    Some(dims)
+}
+
 /// Extract binary table column descriptors from header cards.
 pub fn parse_binary_table_columns(
     cards: &[Card],
@@ -219,6 +248,9 @@ pub fn parse_binary_table_columns(
         let ttype_key = alloc::format!("TTYPE{}", i);
         let name = card_string_value(cards, &ttype_key);
 
+        let tdim_key = alloc::format!("TDIM{}", i);
+        let tdim = card_string_value(cards, &tdim_key).and_then(|s| parse_tdim(&s));
+
         let byte_width = compute_byte_width(repeat, &col_type);
 
         columns.push(BinaryColumnDescriptor {
@@ -226,6 +258,7 @@ pub fn parse_binary_table_columns(
             repeat,
             col_type,
             byte_width,
+            tdim,
         });
     }
 
@@ -604,6 +637,13 @@ pub fn build_binary_table_cards(
         if let Some(ref name) = col.name {
             let ttype_kw = alloc::format!("TTYPE{}", n);
             cards.push(make_card(&ttype_kw, Value::String(name.clone())));
+        }
+
+        if let Some(ref dims) = col.tdim {
+            let tdim_kw = alloc::format!("TDIM{}", n);
+            let dim_strs: Vec<String> = dims.iter().map(|d| alloc::format!("{}", d)).collect();
+            let tdim_val = alloc::format!("({})", dim_strs.join(","));
+            cards.push(make_card(&tdim_kw, Value::String(tdim_val)));
         }
     }
 
@@ -1379,12 +1419,14 @@ mod tests {
                 repeat: 1,
                 col_type: BinaryColumnType::Int,
                 byte_width: 4,
+                tdim: None,
             },
             BinaryColumnDescriptor {
                 name: Some(String::from("VAL")),
                 repeat: 1,
                 col_type: BinaryColumnType::Double,
                 byte_width: 8,
+                tdim: None,
             },
         ];
 
@@ -1427,6 +1469,7 @@ mod tests {
             repeat: 1,
             col_type: BinaryColumnType::Int,
             byte_width: 4,
+            tdim: None,
         }];
         let col_data = vec![BinaryColumnData::Int(vec![1, 2, 3])];
 
@@ -1451,6 +1494,7 @@ mod tests {
             repeat: 1,
             col_type: BinaryColumnType::Int,
             byte_width: 4,
+            tdim: None,
         }];
         let col_data: Vec<BinaryColumnData> = vec![];
         assert!(serialize_binary_table(&columns, &col_data, 1).is_err());
@@ -1465,6 +1509,7 @@ mod tests {
             repeat: 1,
             col_type: BinaryColumnType::Int,
             byte_width: 4,
+            tdim: None,
         }];
         let original = vec![BinaryColumnData::Int(vec![10, 20, 30])];
         let naxis2 = 3;
@@ -1499,6 +1544,7 @@ mod tests {
             repeat: 1,
             col_type: BinaryColumnType::Float,
             byte_width: 4,
+            tdim: None,
         }];
         let original = vec![BinaryColumnData::Float(vec![1.5, -2.5, 0.0])];
         let naxis2 = 3;
@@ -1530,6 +1576,7 @@ mod tests {
             repeat: 1,
             col_type: BinaryColumnType::Double,
             byte_width: 8,
+            tdim: None,
         }];
         let original = vec![BinaryColumnData::Double(vec![3.125, -2.625])];
         let naxis2 = 2;
@@ -1568,18 +1615,21 @@ mod tests {
                 repeat: 1,
                 col_type: BinaryColumnType::Int,
                 byte_width: 4,
+                tdim: None,
             },
             BinaryColumnDescriptor {
                 name: Some(String::from("NAME")),
                 repeat: 10,
                 col_type: BinaryColumnType::Ascii,
                 byte_width: 10,
+                tdim: None,
             },
             BinaryColumnDescriptor {
                 name: Some(String::from("VALUE")),
                 repeat: 1,
                 col_type: BinaryColumnType::Double,
                 byte_width: 8,
+                tdim: None,
             },
         ];
         let col_data = vec![
@@ -1635,6 +1685,7 @@ mod tests {
             repeat: 1,
             col_type: BinaryColumnType::Logical,
             byte_width: 1,
+            tdim: None,
         }];
         let original = vec![BinaryColumnData::Logical(vec![true, false, true])];
         let naxis2 = 3;
@@ -1666,6 +1717,7 @@ mod tests {
             repeat: 1,
             col_type: BinaryColumnType::Short,
             byte_width: 2,
+            tdim: None,
         }];
         let original = vec![BinaryColumnData::Short(vec![100, -200])];
         let naxis2 = 2;
@@ -1697,6 +1749,7 @@ mod tests {
             repeat: 1,
             col_type: BinaryColumnType::Long,
             byte_width: 8,
+            tdim: None,
         }];
         let original = vec![BinaryColumnData::Long(vec![i64::MAX, i64::MIN])];
         let naxis2 = 2;
@@ -1728,6 +1781,7 @@ mod tests {
             repeat: 3,
             col_type: BinaryColumnType::Byte,
             byte_width: 3,
+            tdim: None,
         }];
         let original = vec![BinaryColumnData::Byte(vec![10, 20, 30, 40, 50, 60])];
         let naxis2 = 2;
@@ -1759,6 +1813,7 @@ mod tests {
             repeat: 1,
             col_type: BinaryColumnType::ComplexFloat,
             byte_width: 8,
+            tdim: None,
         }];
         let original = vec![BinaryColumnData::ComplexFloat(vec![
             (1.0, 2.0),
@@ -1796,6 +1851,7 @@ mod tests {
             repeat: 1,
             col_type: BinaryColumnType::ComplexDouble,
             byte_width: 16,
+            tdim: None,
         }];
         let original = vec![BinaryColumnData::ComplexDouble(vec![(1.5, -2.5)])];
         let naxis2 = 1;
@@ -1843,12 +1899,14 @@ mod tests {
                 repeat: 1,
                 col_type: BinaryColumnType::Int,
                 byte_width: 4,
+                tdim: None,
             },
             BinaryColumnDescriptor {
                 name: Some(String::from("Y")),
                 repeat: 1,
                 col_type: BinaryColumnType::Double,
                 byte_width: 8,
+                tdim: None,
             },
         ];
         let col_data = vec![
@@ -1886,5 +1944,73 @@ mod tests {
             }
             other => panic!("Expected Double, got {:?}", other),
         }
+    }
+
+    // --- TDIMn parsing ---
+
+    #[test]
+    fn parse_tdim_2d() {
+        assert_eq!(parse_tdim("(10,20)"), Some(vec![10, 20]));
+    }
+
+    #[test]
+    fn parse_tdim_3d() {
+        assert_eq!(parse_tdim("(3,4,5)"), Some(vec![3, 4, 5]));
+    }
+
+    #[test]
+    fn parse_tdim_1d() {
+        assert_eq!(parse_tdim("(100)"), Some(vec![100]));
+    }
+
+    #[test]
+    fn parse_tdim_whitespace() {
+        assert_eq!(parse_tdim("  ( 10 , 20 )  "), Some(vec![10, 20]));
+    }
+
+    #[test]
+    fn parse_tdim_empty() {
+        assert_eq!(parse_tdim(""), None);
+    }
+
+    #[test]
+    fn parse_tdim_no_parens() {
+        assert_eq!(parse_tdim("10,20"), None);
+    }
+
+    #[test]
+    fn parse_tdim_bad_value() {
+        assert_eq!(parse_tdim("(10,abc)"), None);
+    }
+
+    #[test]
+    fn tdim_roundtrip_via_header() {
+        let columns = vec![BinaryColumnDescriptor {
+            name: Some(String::from("IMG")),
+            repeat: 200,
+            col_type: BinaryColumnType::Float,
+            byte_width: 800,
+            tdim: Some(vec![10, 20]),
+        }];
+
+        let cards = build_binary_table_cards(&columns, 1, 0).unwrap();
+
+        // Verify TDIM1 card was emitted
+        let tdim_card = cards.iter().find(|c| c.keyword_str() == "TDIM1").unwrap();
+        assert_eq!(
+            tdim_card.value,
+            Some(Value::String(String::from("(10,20)")))
+        );
+
+        // Parse it back
+        let parsed_cols = parse_binary_table_columns(&cards, 1).unwrap();
+        assert_eq!(parsed_cols[0].tdim, Some(vec![10, 20]));
+    }
+
+    #[test]
+    fn tdim_absent_yields_none() {
+        let cards = make_bintable_header(4, 1, 1, &["1J"], &[Some("X")]);
+        let parsed_cols = parse_binary_table_columns(&cards, 1).unwrap();
+        assert_eq!(parsed_cols[0].tdim, None);
     }
 }
