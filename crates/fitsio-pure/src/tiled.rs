@@ -65,8 +65,8 @@ fn parse_column_layout(cards: &[Card], tfields: usize) -> Result<ColumnInfo> {
         let (repeat, col_type) = crate::bintable::parse_tform_binary(&tform)?;
         let width = match col_type {
             crate::bintable::BinaryColumnType::Bit => repeat.div_ceil(8),
-            crate::bintable::BinaryColumnType::VarArrayP => 8 * repeat,
-            crate::bintable::BinaryColumnType::VarArrayQ => 16 * repeat,
+            crate::bintable::BinaryColumnType::VarArrayP(_) => 8 * repeat,
+            crate::bintable::BinaryColumnType::VarArrayQ(_) => 16 * repeat,
             _ => repeat * crate::bintable::binary_type_byte_size(&col_type),
         };
         offset += width;

@@ -40,9 +40,11 @@ pub enum BinaryColumnType {
     /// A -- ASCII character.
     Ascii,
     /// P -- 32-bit variable-length array descriptor (8 bytes: count + heap offset).
-    VarArrayP,
+    /// The `char` is the element type code (e.g. `'J'` for i32).
+    VarArrayP(char),
     /// Q -- 64-bit variable-length array descriptor (16 bytes: count + heap offset).
-    VarArrayQ,
+    /// The `char` is the element type code (e.g. `'E'` for f32).
+    VarArrayQ(char),
 }
 
 /// Describes one column in a binary table.
@@ -77,6 +79,13 @@ pub enum BinaryColumnData {
     ComplexDouble(Vec<(f64, f64)>),
     Ascii(Vec<String>),
     Bit(Vec<Vec<u8>>),
+    /// Variable-length array column: one inner Vec per row.
+    VarByte(Vec<Vec<u8>>),
+    VarShort(Vec<Vec<i16>>),
+    VarInt(Vec<Vec<i32>>),
+    VarLong(Vec<Vec<i64>>),
+    VarFloat(Vec<Vec<f32>>),
+    VarDouble(Vec<Vec<f64>>),
 }
 
 /// Return the number of bytes per single element for a column type.
@@ -96,8 +105,8 @@ pub fn binary_type_byte_size(col_type: &BinaryColumnType) -> usize {
         BinaryColumnType::ComplexFloat => 8,
         BinaryColumnType::ComplexDouble => 16,
         BinaryColumnType::Ascii => 1,
-        BinaryColumnType::VarArrayP => 8,
-        BinaryColumnType::VarArrayQ => 16,
+        BinaryColumnType::VarArrayP(_) => 8,
+        BinaryColumnType::VarArrayQ(_) => 16,
     }
 }
 
@@ -137,10 +146,11 @@ pub fn parse_tform_binary(s: &str) -> Result<(usize, BinaryColumnType)> {
                     .parse::<usize>()
                     .map_err(|_| Error::InvalidValue)?
             };
+            let elem_char = last as char;
             let col_type = if second_last == b'P' {
-                BinaryColumnType::VarArrayP
+                BinaryColumnType::VarArrayP(elem_char)
             } else {
-                BinaryColumnType::VarArrayQ
+                BinaryColumnType::VarArrayQ(elem_char)
             };
             return Ok((repeat, col_type));
         }
@@ -181,8 +191,8 @@ fn compute_byte_width(repeat: usize, col_type: &BinaryColumnType) -> usize {
     match col_type {
         BinaryColumnType::Bit => repeat.div_ceil(8),
         // VarArray descriptors have a fixed size regardless of repeat count
-        BinaryColumnType::VarArrayP => 8 * repeat,
-        BinaryColumnType::VarArrayQ => 16 * repeat,
+        BinaryColumnType::VarArrayP(_) => 8 * repeat,
+        BinaryColumnType::VarArrayQ(_) => 16 * repeat,
         _ => repeat * binary_type_byte_size(col_type),
     }
 }
@@ -244,6 +254,19 @@ pub fn parse_tdim(s: &str) -> Option<Vec<usize>> {
         return None;
     }
     Some(dims)
+}
+
+fn card_int_value(cards: &[Card], keyword: &str) -> Option<i64> {
+    cards.iter().find_map(|c| {
+        if c.keyword_str() == keyword {
+            match &c.value {
+                Some(Value::Integer(v)) => Some(*v),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    })
 }
 
 /// Extract binary table column descriptors from header cards.
@@ -342,7 +365,7 @@ fn read_column_cells(
     col_offset: usize,
 ) -> Result<BinaryColumnData> {
     match col.col_type {
-        BinaryColumnType::VarArrayP | BinaryColumnType::VarArrayQ => Err(Error::InvalidValue),
+        BinaryColumnType::VarArrayP(_) | BinaryColumnType::VarArrayQ(_) => Err(Error::InvalidValue),
         BinaryColumnType::Logical => {
             let mut values = Vec::with_capacity(naxis2 * col.repeat);
             for row in 0..naxis2 {
@@ -533,7 +556,13 @@ pub fn apply_column_scaling(data: &BinaryColumnData, tscal: f64, tzero: f64) -> 
         BinaryColumnData::ComplexFloat(_)
         | BinaryColumnData::ComplexDouble(_)
         | BinaryColumnData::Ascii(_)
-        | BinaryColumnData::Bit(_) => Vec::new(),
+        | BinaryColumnData::Bit(_)
+        | BinaryColumnData::VarByte(_)
+        | BinaryColumnData::VarShort(_)
+        | BinaryColumnData::VarInt(_)
+        | BinaryColumnData::VarLong(_)
+        | BinaryColumnData::VarFloat(_)
+        | BinaryColumnData::VarDouble(_) => Vec::new(),
     }
 }
 
@@ -549,6 +578,211 @@ pub fn read_binary_column_physical(
     let raw = read_binary_column(fits_data, hdu, col_index)?;
     let (tscal, tzero) = extract_column_scaling(&hdu.cards, col_index + 1);
     Ok(apply_column_scaling(&raw, tscal, tzero))
+}
+/// Read a 32-bit P-descriptor: (element_count, heap_byte_offset).
+fn read_p_descriptor(data: &[u8]) -> (usize, usize) {
+    let count = read_i32_be(data) as u32 as usize;
+    let offset = read_i32_be(&data[4..]) as u32 as usize;
+    (count, offset)
+}
+
+/// Read a 64-bit Q-descriptor: (element_count, heap_byte_offset).
+fn read_q_descriptor(data: &[u8]) -> (usize, usize) {
+    let count = read_i64_be(data) as u64 as usize;
+    let offset = read_i64_be(&data[8..]) as u64 as usize;
+    (count, offset)
+}
+
+/// Read a variable-length array column from all rows of a binary table HDU.
+///
+/// The column must have a `VarArrayP` or `VarArrayQ` type.  Each row stores a
+/// P/Q descriptor in the main table that points to `count` elements in the heap
+/// area (which begins at `NAXIS1*NAXIS2 + THEAP` bytes after data_start).
+pub fn read_binary_column_vla(
+    fits_data: &[u8],
+    hdu: &Hdu,
+    col_index: usize,
+) -> Result<BinaryColumnData> {
+    let (naxis1, naxis2, pcount) = match &hdu.info {
+        HduInfo::BinaryTable {
+            naxis1,
+            naxis2,
+            pcount,
+            ..
+        } => (*naxis1, *naxis2, *pcount),
+        _ => return Err(Error::InvalidHeader),
+    };
+
+    let columns = parse_binary_table_columns(
+        &hdu.cards,
+        match &hdu.info {
+            HduInfo::BinaryTable { tfields, .. } => *tfields,
+            _ => return Err(Error::InvalidHeader),
+        },
+    )?;
+
+    if col_index >= columns.len() {
+        return Err(Error::InvalidValue);
+    }
+
+    let offsets = column_offsets(&columns);
+    let col = &columns[col_index];
+    let col_offset = offsets[col_index];
+    let data_start = hdu.data_start;
+
+    let (elem_type, is_q) = match col.col_type {
+        BinaryColumnType::VarArrayP(c) => (c, false),
+        BinaryColumnType::VarArrayQ(c) => (c, true),
+        _ => return Err(Error::InvalidValue),
+    };
+
+    // THEAP: byte offset from start of main data to start of heap.
+    // Default is NAXIS1 * NAXIS2 (heap starts right after the main table).
+    let theap = card_int_value(&hdu.cards, "THEAP")
+        .map(|v| v as usize)
+        .unwrap_or(naxis1 * naxis2);
+    let heap_start = data_start + theap;
+
+    // Verify heap is within bounds.
+    if heap_start + pcount > fits_data.len() {
+        return Err(Error::UnexpectedEof);
+    }
+
+    // Element byte size
+    let elem_size = match elem_type {
+        'B' | 'L' | 'A' => 1,
+        'I' => 2,
+        'J' | 'E' => 4,
+        'K' | 'D' => 8,
+        _ => return Err(Error::InvalidValue),
+    };
+
+    match elem_type {
+        'B' => {
+            let mut rows = Vec::with_capacity(naxis2);
+            for row in 0..naxis2 {
+                let desc_pos = data_start + row * naxis1 + col_offset;
+                let (count, offset) = if is_q {
+                    read_q_descriptor(&fits_data[desc_pos..])
+                } else {
+                    read_p_descriptor(&fits_data[desc_pos..])
+                };
+                let start = heap_start + offset;
+                let end = start + count * elem_size;
+                if end > fits_data.len() {
+                    return Err(Error::UnexpectedEof);
+                }
+                rows.push(fits_data[start..end].to_vec());
+            }
+            Ok(BinaryColumnData::VarByte(rows))
+        }
+        'I' => {
+            let mut rows = Vec::with_capacity(naxis2);
+            for row in 0..naxis2 {
+                let desc_pos = data_start + row * naxis1 + col_offset;
+                let (count, offset) = if is_q {
+                    read_q_descriptor(&fits_data[desc_pos..])
+                } else {
+                    read_p_descriptor(&fits_data[desc_pos..])
+                };
+                let start = heap_start + offset;
+                if start + count * elem_size > fits_data.len() {
+                    return Err(Error::UnexpectedEof);
+                }
+                let mut vals = Vec::with_capacity(count);
+                for i in 0..count {
+                    vals.push(read_i16_be(&fits_data[start + i * 2..]));
+                }
+                rows.push(vals);
+            }
+            Ok(BinaryColumnData::VarShort(rows))
+        }
+        'J' => {
+            let mut rows = Vec::with_capacity(naxis2);
+            for row in 0..naxis2 {
+                let desc_pos = data_start + row * naxis1 + col_offset;
+                let (count, offset) = if is_q {
+                    read_q_descriptor(&fits_data[desc_pos..])
+                } else {
+                    read_p_descriptor(&fits_data[desc_pos..])
+                };
+                let start = heap_start + offset;
+                if start + count * elem_size > fits_data.len() {
+                    return Err(Error::UnexpectedEof);
+                }
+                let mut vals = Vec::with_capacity(count);
+                for i in 0..count {
+                    vals.push(read_i32_be(&fits_data[start + i * 4..]));
+                }
+                rows.push(vals);
+            }
+            Ok(BinaryColumnData::VarInt(rows))
+        }
+        'K' => {
+            let mut rows = Vec::with_capacity(naxis2);
+            for row in 0..naxis2 {
+                let desc_pos = data_start + row * naxis1 + col_offset;
+                let (count, offset) = if is_q {
+                    read_q_descriptor(&fits_data[desc_pos..])
+                } else {
+                    read_p_descriptor(&fits_data[desc_pos..])
+                };
+                let start = heap_start + offset;
+                if start + count * elem_size > fits_data.len() {
+                    return Err(Error::UnexpectedEof);
+                }
+                let mut vals = Vec::with_capacity(count);
+                for i in 0..count {
+                    vals.push(read_i64_be(&fits_data[start + i * 8..]));
+                }
+                rows.push(vals);
+            }
+            Ok(BinaryColumnData::VarLong(rows))
+        }
+        'E' => {
+            let mut rows = Vec::with_capacity(naxis2);
+            for row in 0..naxis2 {
+                let desc_pos = data_start + row * naxis1 + col_offset;
+                let (count, offset) = if is_q {
+                    read_q_descriptor(&fits_data[desc_pos..])
+                } else {
+                    read_p_descriptor(&fits_data[desc_pos..])
+                };
+                let start = heap_start + offset;
+                if start + count * elem_size > fits_data.len() {
+                    return Err(Error::UnexpectedEof);
+                }
+                let mut vals = Vec::with_capacity(count);
+                for i in 0..count {
+                    vals.push(read_f32_be(&fits_data[start + i * 4..]));
+                }
+                rows.push(vals);
+            }
+            Ok(BinaryColumnData::VarFloat(rows))
+        }
+        'D' => {
+            let mut rows = Vec::with_capacity(naxis2);
+            for row in 0..naxis2 {
+                let desc_pos = data_start + row * naxis1 + col_offset;
+                let (count, offset) = if is_q {
+                    read_q_descriptor(&fits_data[desc_pos..])
+                } else {
+                    read_p_descriptor(&fits_data[desc_pos..])
+                };
+                let start = heap_start + offset;
+                if start + count * elem_size > fits_data.len() {
+                    return Err(Error::UnexpectedEof);
+                }
+                let mut vals = Vec::with_capacity(count);
+                for i in 0..count {
+                    vals.push(read_f64_be(&fits_data[start + i * 8..]));
+                }
+                rows.push(vals);
+            }
+            Ok(BinaryColumnData::VarDouble(rows))
+        }
+        _ => Err(Error::InvalidValue),
+    }
 }
 
 /// Serialize a single cell (one column, one row) to big-endian bytes.
@@ -656,8 +890,12 @@ fn tform_string(repeat: usize, col_type: &BinaryColumnType) -> String {
         BinaryColumnType::ComplexFloat => 'C',
         BinaryColumnType::ComplexDouble => 'M',
         BinaryColumnType::Ascii => 'A',
-        BinaryColumnType::VarArrayP => 'P',
-        BinaryColumnType::VarArrayQ => 'Q',
+        BinaryColumnType::VarArrayP(elem) => {
+            return alloc::format!("{}P{}", repeat, elem);
+        }
+        BinaryColumnType::VarArrayQ(elem) => {
+            return alloc::format!("{}Q{}", repeat, elem);
+        }
     };
     alloc::format!("{}{}", repeat, ch)
 }
@@ -2162,5 +2400,308 @@ mod tests {
 
         let physical = read_binary_column_physical(&full_fits, &hdu, 0).unwrap();
         assert_eq!(physical, vec![100.0, 200.0]);
+    }
+    // --- TFORM P/Q parsing ---
+
+    #[test]
+    fn parse_tform_vararray_p_int() {
+        let (repeat, col_type) = parse_tform_binary("1PJ").unwrap();
+        assert_eq!(repeat, 1);
+        assert_eq!(col_type, BinaryColumnType::VarArrayP('J'));
+    }
+
+    #[test]
+    fn parse_tform_vararray_q_double() {
+        let (repeat, col_type) = parse_tform_binary("1QD").unwrap();
+        assert_eq!(repeat, 1);
+        assert_eq!(col_type, BinaryColumnType::VarArrayQ('D'));
+    }
+
+    #[test]
+    fn parse_tform_vararray_p_with_maxlen() {
+        let (repeat, col_type) = parse_tform_binary("1PB(200)").unwrap();
+        assert_eq!(repeat, 1);
+        assert_eq!(col_type, BinaryColumnType::VarArrayP('B'));
+    }
+
+    #[test]
+    fn parse_tform_vararray_p_float() {
+        let (repeat, col_type) = parse_tform_binary("1PE(1000)").unwrap();
+        assert_eq!(repeat, 1);
+        assert_eq!(col_type, BinaryColumnType::VarArrayP('E'));
+    }
+
+    #[test]
+    fn parse_tform_vararray_q_with_maxlen() {
+        let (repeat, col_type) = parse_tform_binary("1QJ(500)").unwrap();
+        assert_eq!(repeat, 1);
+        assert_eq!(col_type, BinaryColumnType::VarArrayQ('J'));
+    }
+
+    #[test]
+    fn parse_tform_vararray_invalid_elem() {
+        assert!(parse_tform_binary("1PZ").is_err());
+    }
+
+    #[test]
+    fn tform_string_vararray_p() {
+        assert_eq!(tform_string(1, &BinaryColumnType::VarArrayP('J')), "1PJ");
+    }
+
+    #[test]
+    fn tform_string_vararray_q() {
+        assert_eq!(tform_string(1, &BinaryColumnType::VarArrayQ('E')), "1QE");
+    }
+
+    #[test]
+    fn byte_size_vararray() {
+        assert_eq!(binary_type_byte_size(&BinaryColumnType::VarArrayP('J')), 8);
+        assert_eq!(binary_type_byte_size(&BinaryColumnType::VarArrayQ('D')), 16);
+    }
+
+    #[test]
+    fn byte_width_vararray() {
+        assert_eq!(compute_byte_width(1, &BinaryColumnType::VarArrayP('J')), 8);
+        assert_eq!(compute_byte_width(1, &BinaryColumnType::VarArrayQ('D')), 16);
+    }
+
+    // --- VLA reading ---
+
+    /// Build a FITS binary table with a VarArrayP column and heap data.
+    /// Returns the full FITS bytes.
+    fn build_vla_fits(
+        naxis2: usize,
+        tform: &str,
+        descriptors: &[(i32, i32)], // (count, offset) per row
+        heap: &[u8],
+    ) -> Vec<u8> {
+        let desc_size = 8; // P-descriptor: 2 x i32
+        let naxis1 = desc_size;
+        let pcount = heap.len();
+
+        let header_cards = vec![
+            card_val("XTENSION", Value::String(String::from("BINTABLE"))),
+            card_val("BITPIX", Value::Integer(8)),
+            card_val("NAXIS", Value::Integer(2)),
+            card_val("NAXIS1", Value::Integer(naxis1 as i64)),
+            card_val("NAXIS2", Value::Integer(naxis2 as i64)),
+            card_val("PCOUNT", Value::Integer(pcount as i64)),
+            card_val("GCOUNT", Value::Integer(1)),
+            card_val("TFIELDS", Value::Integer(1)),
+            card_val("TFORM1", Value::String(String::from(tform))),
+        ];
+
+        let header = serialize_header(&header_cards).unwrap();
+
+        // Main table data: P-descriptors
+        let main_data_len = naxis1 * naxis2;
+        let total_data = main_data_len + pcount;
+        let padded = padded_byte_len(total_data);
+
+        let mut data = vec![0u8; padded];
+        for (i, (count, offset)) in descriptors.iter().enumerate() {
+            let pos = i * naxis1;
+            write_i32_be(&mut data[pos..], *count);
+            write_i32_be(&mut data[pos + 4..], *offset);
+        }
+        // Write heap after main table
+        data[main_data_len..main_data_len + heap.len()].copy_from_slice(heap);
+
+        // Build full FITS
+        let primary_cards = vec![
+            card_val("SIMPLE", Value::Logical(true)),
+            card_val("BITPIX", Value::Integer(8)),
+            card_val("NAXIS", Value::Integer(0)),
+        ];
+        let primary_header = serialize_header(&primary_cards).unwrap();
+
+        let mut fits = Vec::new();
+        fits.extend_from_slice(&primary_header);
+        fits.extend_from_slice(&header);
+        fits.extend_from_slice(&data);
+        fits
+    }
+
+    #[test]
+    fn read_vla_byte_column() {
+        // 2 rows: row 0 has 3 bytes, row 1 has 2 bytes
+        let heap = vec![10u8, 20, 30, 40, 50];
+        let descriptors = vec![
+            (3, 0), // 3 bytes at offset 0
+            (2, 3), // 2 bytes at offset 3
+        ];
+        let fits = build_vla_fits(2, "1PB", &descriptors, &heap);
+
+        let parsed = crate::hdu::parse_fits(&fits).unwrap();
+        let hdu = parsed.get(1).unwrap();
+
+        let col = read_binary_column_vla(&fits, hdu, 0).unwrap();
+        match col {
+            BinaryColumnData::VarByte(rows) => {
+                assert_eq!(rows.len(), 2);
+                assert_eq!(rows[0], vec![10, 20, 30]);
+                assert_eq!(rows[1], vec![40, 50]);
+            }
+            other => panic!("Expected VarByte, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn read_vla_int_column() {
+        // 2 rows: row 0 has 2 ints, row 1 has 1 int
+        let mut heap = vec![0u8; 12]; // 3 ints total
+        write_i32_be(&mut heap[0..], 100);
+        write_i32_be(&mut heap[4..], 200);
+        write_i32_be(&mut heap[8..], 300);
+        let descriptors = vec![
+            (2, 0), // 2 ints at offset 0
+            (1, 8), // 1 int at offset 8
+        ];
+        let fits = build_vla_fits(2, "1PJ", &descriptors, &heap);
+
+        let parsed = crate::hdu::parse_fits(&fits).unwrap();
+        let hdu = parsed.get(1).unwrap();
+
+        let col = read_binary_column_vla(&fits, hdu, 0).unwrap();
+        match col {
+            BinaryColumnData::VarInt(rows) => {
+                assert_eq!(rows.len(), 2);
+                assert_eq!(rows[0], vec![100, 200]);
+                assert_eq!(rows[1], vec![300]);
+            }
+            other => panic!("Expected VarInt, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn read_vla_float_column() {
+        let mut heap = vec![0u8; 12]; // 3 floats
+        write_f32_be(&mut heap[0..], 1.5);
+        write_f32_be(&mut heap[4..], -2.5);
+        write_f32_be(&mut heap[8..], 3.0);
+        let descriptors = vec![
+            (2, 0), // 2 floats at offset 0
+            (1, 8), // 1 float at offset 8
+        ];
+        let fits = build_vla_fits(2, "1PE", &descriptors, &heap);
+
+        let parsed = crate::hdu::parse_fits(&fits).unwrap();
+        let hdu = parsed.get(1).unwrap();
+
+        let col = read_binary_column_vla(&fits, hdu, 0).unwrap();
+        match col {
+            BinaryColumnData::VarFloat(rows) => {
+                assert_eq!(rows.len(), 2);
+                assert!((rows[0][0] - 1.5).abs() < 1e-6);
+                assert!((rows[0][1] - (-2.5)).abs() < 1e-6);
+                assert!((rows[1][0] - 3.0).abs() < 1e-6);
+            }
+            other => panic!("Expected VarFloat, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn read_vla_double_column() {
+        let mut heap = vec![0u8; 16]; // 2 doubles
+        write_f64_be(&mut heap[0..], 3.125);
+        write_f64_be(&mut heap[8..], -2.625);
+        let descriptors = vec![(1, 0), (1, 8)];
+        let fits = build_vla_fits(2, "1PD", &descriptors, &heap);
+
+        let parsed = crate::hdu::parse_fits(&fits).unwrap();
+        let hdu = parsed.get(1).unwrap();
+
+        let col = read_binary_column_vla(&fits, hdu, 0).unwrap();
+        match col {
+            BinaryColumnData::VarDouble(rows) => {
+                assert_eq!(rows.len(), 2);
+                assert!((rows[0][0] - 3.125).abs() < 1e-10);
+                assert!((rows[1][0] - (-2.625)).abs() < 1e-10);
+            }
+            other => panic!("Expected VarDouble, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn read_vla_short_column() {
+        let mut heap = vec![0u8; 6]; // 3 shorts
+        write_i16_be(&mut heap[0..], 1000);
+        write_i16_be(&mut heap[2..], -2000);
+        write_i16_be(&mut heap[4..], 3000);
+        let descriptors = vec![(2, 0), (1, 4)];
+        let fits = build_vla_fits(2, "1PI", &descriptors, &heap);
+
+        let parsed = crate::hdu::parse_fits(&fits).unwrap();
+        let hdu = parsed.get(1).unwrap();
+
+        let col = read_binary_column_vla(&fits, hdu, 0).unwrap();
+        match col {
+            BinaryColumnData::VarShort(rows) => {
+                assert_eq!(rows.len(), 2);
+                assert_eq!(rows[0], vec![1000, -2000]);
+                assert_eq!(rows[1], vec![3000]);
+            }
+            other => panic!("Expected VarShort, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn read_vla_long_column() {
+        let mut heap = vec![0u8; 16]; // 2 longs
+        write_i64_be(&mut heap[0..], i64::MAX);
+        write_i64_be(&mut heap[8..], i64::MIN);
+        let descriptors = vec![(1, 0), (1, 8)];
+        let fits = build_vla_fits(2, "1PK", &descriptors, &heap);
+
+        let parsed = crate::hdu::parse_fits(&fits).unwrap();
+        let hdu = parsed.get(1).unwrap();
+
+        let col = read_binary_column_vla(&fits, hdu, 0).unwrap();
+        match col {
+            BinaryColumnData::VarLong(rows) => {
+                assert_eq!(rows.len(), 2);
+                assert_eq!(rows[0], vec![i64::MAX]);
+                assert_eq!(rows[1], vec![i64::MIN]);
+            }
+            other => panic!("Expected VarLong, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn read_vla_empty_row() {
+        // Row with count=0 should return empty vec
+        let heap = vec![10u8, 20, 30];
+        let descriptors = vec![
+            (0, 0), // empty
+            (3, 0), // 3 bytes at offset 0
+        ];
+        let fits = build_vla_fits(2, "1PB", &descriptors, &heap);
+
+        let parsed = crate::hdu::parse_fits(&fits).unwrap();
+        let hdu = parsed.get(1).unwrap();
+
+        let col = read_binary_column_vla(&fits, hdu, 0).unwrap();
+        match col {
+            BinaryColumnData::VarByte(rows) => {
+                assert_eq!(rows[0], Vec::<u8>::new());
+                assert_eq!(rows[1], vec![10, 20, 30]);
+            }
+            other => panic!("Expected VarByte, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn read_vla_on_fixed_column_errors() {
+        let naxis1 = 4;
+        let naxis2 = 1;
+        let header = make_bintable_header(naxis1, naxis2, 1, &["1J"], &[None]);
+
+        let mut raw_data = vec![0u8; naxis1 * naxis2];
+        write_i32_be(&mut raw_data[0..], 42);
+
+        let fits_data = build_bintable_hdu(&header, &raw_data);
+        let (full_fits, hdu) = parse_test_hdu(&fits_data);
+
+        assert!(read_binary_column_vla(&full_fits, &hdu, 0).is_err());
     }
 }
