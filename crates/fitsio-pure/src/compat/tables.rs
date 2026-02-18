@@ -262,12 +262,14 @@ mod tests {
                 repeat: 1,
                 col_type: crate::bintable::BinaryColumnType::Int,
                 byte_width: 4,
+                tdim: None,
             },
             crate::bintable::BinaryColumnDescriptor {
                 name: Some("VAL".to_string()),
                 repeat: 1,
                 col_type: crate::bintable::BinaryColumnType::Double,
                 byte_width: 8,
+                tdim: None,
             },
         ];
 
@@ -305,6 +307,7 @@ mod tests {
             repeat: 1,
             col_type: crate::bintable::BinaryColumnType::Int,
             byte_width: 4,
+            tdim: None,
         }];
 
         let col_data = vec![crate::bintable::BinaryColumnData::Int(vec![1])];

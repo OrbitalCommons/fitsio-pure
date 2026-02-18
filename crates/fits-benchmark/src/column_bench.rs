@@ -44,6 +44,7 @@ mod pure_backend {
                 repeat: 1,
                 col_type: BinaryColumnType::Float,
                 byte_width: 4,
+                tdim: None,
             }];
             let col_data = vec![BinaryColumnData::Float(data.to_vec())];
             let nrows = data.len();
@@ -62,6 +63,7 @@ mod pure_backend {
                 repeat: 1,
                 col_type: BinaryColumnType::Double,
                 byte_width: 8,
+                tdim: None,
             }];
             let col_data = vec![BinaryColumnData::Double(data.to_vec())];
             let nrows = data.len();
@@ -80,6 +82,7 @@ mod pure_backend {
                 repeat: 1,
                 col_type: BinaryColumnType::Int,
                 byte_width: 4,
+                tdim: None,
             }];
             let col_data = vec![BinaryColumnData::Int(data.to_vec())];
             let nrows = data.len();
@@ -98,6 +101,7 @@ mod pure_backend {
                 repeat: 1,
                 col_type: BinaryColumnType::Long,
                 byte_width: 8,
+                tdim: None,
             }];
             let col_data = vec![BinaryColumnData::Long(data.to_vec())];
             let nrows = data.len();
