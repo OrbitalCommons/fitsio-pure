@@ -195,6 +195,20 @@ fn make_keyword(name: &str) -> [u8; 8] {
     k
 }
 
+fn card_float_value(cards: &[Card], keyword: &str) -> Option<f64> {
+    cards.iter().find_map(|c| {
+        if c.keyword_str() == keyword {
+            match &c.value {
+                Some(Value::Float(f)) => Some(*f),
+                Some(Value::Integer(n)) => Some(*n as f64),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    })
+}
+
 fn card_string_value(cards: &[Card], keyword: &str) -> Option<String> {
     cards.iter().find_map(|c| {
         if c.keyword_str() == keyword {
@@ -487,6 +501,54 @@ pub fn read_binary_row(
     }
 
     Ok(result)
+}
+
+/// Extract TSCALn and TZEROn calibration values for a column.
+///
+/// Returns `(tscale, tzero)` where defaults are `(1.0, 0.0)`.
+/// `col_number` is 1-indexed (matching the FITS keyword numbering).
+pub fn extract_column_scaling(cards: &[Card], col_number: usize) -> (f64, f64) {
+    let tscal_kw = alloc::format!("TSCAL{}", col_number);
+    let tzero_kw = alloc::format!("TZERO{}", col_number);
+    let tscal = card_float_value(cards, &tscal_kw).unwrap_or(1.0);
+    let tzero = card_float_value(cards, &tzero_kw).unwrap_or(0.0);
+    (tscal, tzero)
+}
+
+/// Apply TSCALn/TZEROn calibration to column data.
+///
+/// Computes `physical = tzero + tscal * raw` for every element.
+pub fn apply_column_scaling(data: &BinaryColumnData, tscal: f64, tzero: f64) -> Vec<f64> {
+    match data {
+        BinaryColumnData::Byte(v) => v.iter().map(|&x| tzero + tscal * (x as f64)).collect(),
+        BinaryColumnData::Short(v) => v.iter().map(|&x| tzero + tscal * (x as f64)).collect(),
+        BinaryColumnData::Int(v) => v.iter().map(|&x| tzero + tscal * (x as f64)).collect(),
+        BinaryColumnData::Long(v) => v.iter().map(|&x| tzero + tscal * (x as f64)).collect(),
+        BinaryColumnData::Float(v) => v.iter().map(|&x| tzero + tscal * (x as f64)).collect(),
+        BinaryColumnData::Double(v) => v.iter().map(|&x| tzero + tscal * x).collect(),
+        BinaryColumnData::Logical(v) => v
+            .iter()
+            .map(|&x| tzero + tscal * (x as u8 as f64))
+            .collect(),
+        BinaryColumnData::ComplexFloat(_)
+        | BinaryColumnData::ComplexDouble(_)
+        | BinaryColumnData::Ascii(_)
+        | BinaryColumnData::Bit(_) => Vec::new(),
+    }
+}
+
+/// Read a binary table column with TSCALn/TZEROn calibration applied.
+///
+/// Returns calibrated physical values as `Vec<f64>`. The column index
+/// is 0-based; the corresponding FITS keywords use 1-based numbering.
+pub fn read_binary_column_physical(
+    fits_data: &[u8],
+    hdu: &Hdu,
+    col_index: usize,
+) -> Result<Vec<f64>> {
+    let raw = read_binary_column(fits_data, hdu, col_index)?;
+    let (tscal, tzero) = extract_column_scaling(&hdu.cards, col_index + 1);
+    Ok(apply_column_scaling(&raw, tscal, tzero))
 }
 
 /// Serialize a single cell (one column, one row) to big-endian bytes.
@@ -2012,5 +2074,93 @@ mod tests {
         let cards = make_bintable_header(4, 1, 1, &["1J"], &[Some("X")]);
         let parsed_cols = parse_binary_table_columns(&cards, 1).unwrap();
         assert_eq!(parsed_cols[0].tdim, None);
+    }
+
+    // --- TSCALn/TZEROn ---
+
+    #[test]
+    fn extract_scaling_defaults() {
+        let cards = make_bintable_header(4, 1, 1, &["1J"], &[Some("X")]);
+        let (tscal, tzero) = extract_column_scaling(&cards, 1);
+        assert_eq!(tscal, 1.0);
+        assert_eq!(tzero, 0.0);
+    }
+
+    #[test]
+    fn extract_scaling_present() {
+        let mut cards = make_bintable_header(4, 1, 1, &["1J"], &[Some("X")]);
+        cards.push(card_val("TSCAL1", Value::Float(2.5)));
+        cards.push(card_val("TZERO1", Value::Float(100.0)));
+        let (tscal, tzero) = extract_column_scaling(&cards, 1);
+        assert_eq!(tscal, 2.5);
+        assert_eq!(tzero, 100.0);
+    }
+
+    #[test]
+    fn extract_scaling_integer_keywords() {
+        let mut cards = make_bintable_header(4, 1, 1, &["1J"], &[Some("X")]);
+        cards.push(card_val("TSCAL1", Value::Integer(3)));
+        cards.push(card_val("TZERO1", Value::Integer(32768)));
+        let (tscal, tzero) = extract_column_scaling(&cards, 1);
+        assert_eq!(tscal, 3.0);
+        assert_eq!(tzero, 32768.0);
+    }
+
+    #[test]
+    fn apply_scaling_identity() {
+        let data = BinaryColumnData::Int(vec![10, 20, 30]);
+        let result = apply_column_scaling(&data, 1.0, 0.0);
+        assert_eq!(result, vec![10.0, 20.0, 30.0]);
+    }
+
+    #[test]
+    fn apply_scaling_with_offset() {
+        let data = BinaryColumnData::Short(vec![0, 1, 2]);
+        let result = apply_column_scaling(&data, 2.0, 100.0);
+        assert_eq!(result, vec![100.0, 102.0, 104.0]);
+    }
+
+    #[test]
+    fn apply_scaling_unsigned_short() {
+        let data = BinaryColumnData::Short(vec![0, -32768, 32767]);
+        let result = apply_column_scaling(&data, 1.0, 32768.0);
+        assert_eq!(result, vec![32768.0, 0.0, 65535.0]);
+    }
+
+    #[test]
+    fn read_physical_column_with_scaling() {
+        let naxis1 = 4;
+        let naxis2 = 3;
+        let mut header = make_bintable_header(naxis1, naxis2, 1, &["1J"], &[Some("VAL")]);
+        header.push(card_val("TSCAL1", Value::Float(2.0)));
+        header.push(card_val("TZERO1", Value::Float(10.0)));
+
+        let mut raw_data = vec![0u8; naxis1 * naxis2];
+        write_i32_be(&mut raw_data[0..], 1);
+        write_i32_be(&mut raw_data[4..], 2);
+        write_i32_be(&mut raw_data[8..], 3);
+
+        let fits_data = build_bintable_hdu(&header, &raw_data);
+        let (full_fits, hdu) = parse_test_hdu(&fits_data);
+
+        let physical = read_binary_column_physical(&full_fits, &hdu, 0).unwrap();
+        assert_eq!(physical, vec![12.0, 14.0, 16.0]);
+    }
+
+    #[test]
+    fn read_physical_column_no_scaling() {
+        let naxis1 = 4;
+        let naxis2 = 2;
+        let header = make_bintable_header(naxis1, naxis2, 1, &["1J"], &[None]);
+
+        let mut raw_data = vec![0u8; naxis1 * naxis2];
+        write_i32_be(&mut raw_data[0..], 100);
+        write_i32_be(&mut raw_data[4..], 200);
+
+        let fits_data = build_bintable_hdu(&header, &raw_data);
+        let (full_fits, hdu) = parse_test_hdu(&fits_data);
+
+        let physical = read_binary_column_physical(&full_fits, &hdu, 0).unwrap();
+        assert_eq!(physical, vec![100.0, 200.0]);
     }
 }
