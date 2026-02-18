@@ -356,6 +356,62 @@ pub fn read_binary_column(
     read_column_cells(fits_data, data_start, naxis1, naxis2, col, col_offset)
 }
 
+/// Read a single column from a range of rows in a binary table HDU.
+///
+/// `start_row` is 0-indexed and `num_rows` is the count of rows to read.
+pub fn read_binary_column_range(
+    fits_data: &[u8],
+    hdu: &Hdu,
+    col_index: usize,
+    start_row: usize,
+    num_rows: usize,
+) -> Result<BinaryColumnData> {
+    let (naxis1, naxis2, columns) = extract_table_info(fits_data, hdu)?;
+
+    if col_index >= columns.len() {
+        return Err(Error::InvalidValue);
+    }
+    if start_row + num_rows > naxis2 {
+        return Err(Error::InvalidValue);
+    }
+
+    let offsets = column_offsets(&columns);
+    let col = &columns[col_index];
+    let col_offset = offsets[col_index];
+    let row_data_start = hdu.data_start + start_row * naxis1;
+
+    read_column_cells(fits_data, row_data_start, naxis1, num_rows, col, col_offset)
+}
+
+/// Write column data into an existing binary table HDU in-place.
+///
+/// Writes `data` values into column `col_index` for all rows. The data
+/// length must match `naxis2 * repeat` for the column.
+pub fn write_binary_column(
+    fits_data: &mut [u8],
+    hdu: &Hdu,
+    col_index: usize,
+    data: &BinaryColumnData,
+) -> Result<()> {
+    let (naxis1, naxis2, columns) = extract_table_info(fits_data, hdu)?;
+
+    if col_index >= columns.len() {
+        return Err(Error::InvalidValue);
+    }
+
+    let offsets = column_offsets(&columns);
+    let col = &columns[col_index];
+    let col_offset = offsets[col_index];
+    let data_start = hdu.data_start;
+
+    for row in 0..naxis2 {
+        let cell_bytes = serialize_binary_column_value(&col.col_type, col.repeat, data, row)?;
+        let base = data_start + row * naxis1 + col_offset;
+        fits_data[base..base + cell_bytes.len()].copy_from_slice(&cell_bytes);
+    }
+    Ok(())
+}
+
 fn read_column_cells(
     fits_data: &[u8],
     data_start: usize,
@@ -2703,5 +2759,61 @@ mod tests {
         let (full_fits, hdu) = parse_test_hdu(&fits_data);
 
         assert!(read_binary_column_vla(&full_fits, &hdu, 0).is_err());
+    }
+
+    // --- read_binary_column_range ---
+
+    #[test]
+    fn read_column_range_middle() {
+        let naxis1 = 4;
+        let naxis2 = 5;
+        let header = make_bintable_header(naxis1, naxis2, 1, &["1J"], &[Some("X")]);
+
+        let mut raw_data = vec![0u8; naxis1 * naxis2];
+        for i in 0..naxis2 {
+            write_i32_be(&mut raw_data[i * 4..], (i as i32 + 1) * 10);
+        }
+
+        let fits_data = build_bintable_hdu(&header, &raw_data);
+        let (full_fits, hdu) = parse_test_hdu(&fits_data);
+
+        let col = read_binary_column_range(&full_fits, &hdu, 0, 1, 3).unwrap();
+        assert_eq!(col, BinaryColumnData::Int(vec![20, 30, 40]));
+    }
+
+    #[test]
+    fn read_column_range_out_of_bounds() {
+        let naxis1 = 4;
+        let naxis2 = 3;
+        let header = make_bintable_header(naxis1, naxis2, 1, &["1J"], &[None]);
+
+        let raw_data = vec![0u8; naxis1 * naxis2];
+        let fits_data = build_bintable_hdu(&header, &raw_data);
+        let (full_fits, hdu) = parse_test_hdu(&fits_data);
+
+        assert!(read_binary_column_range(&full_fits, &hdu, 0, 2, 3).is_err());
+    }
+
+    // --- write_binary_column ---
+
+    #[test]
+    fn write_column_roundtrip() {
+        let naxis1 = 4;
+        let naxis2 = 3;
+        let header = make_bintable_header(naxis1, naxis2, 1, &["1J"], &[Some("X")]);
+
+        let mut raw_data = vec![0u8; naxis1 * naxis2];
+        for i in 0..naxis2 {
+            write_i32_be(&mut raw_data[i * 4..], 0);
+        }
+
+        let fits_data = build_bintable_hdu(&header, &raw_data);
+        let (mut full_fits, hdu) = parse_test_hdu(&fits_data);
+
+        let new_data = BinaryColumnData::Int(vec![100, 200, 300]);
+        write_binary_column(&mut full_fits, &hdu, 0, &new_data).unwrap();
+
+        let read_back = read_binary_column(&full_fits, &hdu, 0).unwrap();
+        assert_eq!(read_back, new_data);
     }
 }

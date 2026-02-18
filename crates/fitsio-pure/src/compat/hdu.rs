@@ -1,7 +1,7 @@
 use super::errors::{Error, Result};
 use super::fitsfile::FitsFile;
 use super::headers::{ReadsKey, WritesKey};
-use super::tables::ReadsCol;
+use super::tables::{ReadsCol, ReadsColRange, WritesCol};
 
 /// Lightweight handle to one HDU within a FITS file.
 ///
@@ -45,6 +45,27 @@ impl FitsHdu {
     /// Read a column from a binary table HDU.
     pub fn read_col<T: ReadsCol>(&self, file: &FitsFile, name: &str) -> Result<Vec<T>> {
         T::read_col(file, self, name)
+    }
+
+    /// Read a range of rows from a binary table column.
+    pub fn read_col_range<T: ReadsColRange>(
+        &self,
+        file: &FitsFile,
+        name: &str,
+        start_row: usize,
+        num_rows: usize,
+    ) -> Result<Vec<T>> {
+        T::read_col_range(file, self, name, start_row, num_rows)
+    }
+
+    /// Write data to a column in a binary table HDU.
+    pub fn write_col<T: WritesCol>(
+        &self,
+        file: &mut FitsFile,
+        name: &str,
+        data: &[T],
+    ) -> Result<()> {
+        T::write_col(file, self, name, data)
     }
 
     /// Return information about the type and shape of data in this HDU.
