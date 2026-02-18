@@ -339,6 +339,100 @@ pub fn build_image_hdu(bitpix: i64, naxes: &[usize], data: &ImageData) -> Result
     Ok(hdu)
 }
 
+/// Reverse BSCALE/BZERO calibration: convert physical f64 values to raw
+/// integer values using `raw = (physical - bzero) / bscale`.
+///
+/// The target BITPIX determines the output type. Values are rounded to the
+/// nearest integer and clamped to the valid range for the target type.
+pub fn reverse_bscale_bzero(
+    physical: &[f64],
+    bscale: f64,
+    bzero: f64,
+    bitpix: i64,
+) -> Result<ImageData> {
+    let inv = |v: f64| (v - bzero) / bscale;
+    match bitpix {
+        8 => {
+            let pixels: Vec<u8> = physical
+                .iter()
+                .map(|&v| inv(v).round().clamp(0.0, 255.0) as u8)
+                .collect();
+            Ok(ImageData::U8(pixels))
+        }
+        16 => {
+            let pixels: Vec<i16> = physical
+                .iter()
+                .map(|&v| inv(v).round().clamp(i16::MIN as f64, i16::MAX as f64) as i16)
+                .collect();
+            Ok(ImageData::I16(pixels))
+        }
+        32 => {
+            let pixels: Vec<i32> = physical
+                .iter()
+                .map(|&v| inv(v).round().clamp(i32::MIN as f64, i32::MAX as f64) as i32)
+                .collect();
+            Ok(ImageData::I32(pixels))
+        }
+        64 => {
+            let pixels: Vec<i64> = physical
+                .iter()
+                .map(|&v| inv(v).round().clamp(i64::MIN as f64, i64::MAX as f64) as i64)
+                .collect();
+            Ok(ImageData::I64(pixels))
+        }
+        -32 => {
+            let pixels: Vec<f32> = physical.iter().map(|&v| inv(v) as f32).collect();
+            Ok(ImageData::F32(pixels))
+        }
+        -64 => {
+            let pixels: Vec<f64> = physical.iter().map(|&v| inv(v)).collect();
+            Ok(ImageData::F64(pixels))
+        }
+        other => Err(Error::InvalidBitpix(other)),
+    }
+}
+
+/// Build a complete image HDU with BSCALE/BZERO keywords.
+///
+/// Takes physical `f64` values, reverse-applies BSCALE/BZERO to produce raw
+/// pixel data at the specified BITPIX, and includes the calibration keywords
+/// in the header so that readers can recover the physical values.
+pub fn build_image_hdu_with_scaling(
+    bitpix: i64,
+    naxes: &[usize],
+    physical: &[f64],
+    bscale: f64,
+    bzero: f64,
+) -> Result<Vec<u8>> {
+    let raw = reverse_bscale_bzero(physical, bscale, bzero, bitpix)?;
+    let mut cards = build_primary_header(bitpix, naxes)?;
+
+    let is_non_default = bscale != 1.0 || bzero != 0.0;
+    if is_non_default {
+        fn make_card(keyword: &str, value: Value) -> Card {
+            let mut kw = [b' '; 8];
+            let bytes = keyword.as_bytes();
+            let len = bytes.len().min(8);
+            kw[..len].copy_from_slice(&bytes[..len]);
+            Card {
+                keyword: kw,
+                value: Some(value),
+                comment: None,
+            }
+        }
+        cards.push(make_card("BSCALE", Value::Float(bscale)));
+        cards.push(make_card("BZERO", Value::Float(bzero)));
+    }
+
+    let header_bytes = serialize_header(&cards)?;
+    let data_bytes = serialize_image(&raw);
+
+    let mut hdu = Vec::with_capacity(header_bytes.len() + data_bytes.len());
+    hdu.extend_from_slice(&header_bytes);
+    hdu.extend_from_slice(&data_bytes);
+    Ok(hdu)
+}
+
 // ---- Image region/section/row functions ----
 
 /// Returns the number of bytes per pixel for a given BITPIX value.
@@ -1316,5 +1410,70 @@ mod tests {
         assert!(physical[1].is_nan());
         assert_eq!(physical[2], 200.0);
         assert!(physical[3].is_nan());
+    }
+
+    // ---- BSCALE/BZERO write path ----
+
+    #[test]
+    fn reverse_bscale_bzero_i16() {
+        let physical = vec![32768.0, 0.0, 65535.0];
+        let raw = reverse_bscale_bzero(&physical, 1.0, 32768.0, 16).unwrap();
+        assert_eq!(raw, ImageData::I16(vec![0, -32768, 32767]));
+    }
+
+    #[test]
+    fn reverse_bscale_bzero_u8() {
+        let physical = vec![0.0, 127.5, 255.0];
+        let raw = reverse_bscale_bzero(&physical, 1.0, 0.0, 8).unwrap();
+        assert_eq!(raw, ImageData::U8(vec![0, 128, 255]));
+    }
+
+    #[test]
+    fn reverse_bscale_bzero_with_scale() {
+        let physical = vec![100.0, 102.0, 104.0];
+        let raw = reverse_bscale_bzero(&physical, 2.0, 100.0, 16).unwrap();
+        assert_eq!(raw, ImageData::I16(vec![0, 1, 2]));
+    }
+
+    #[test]
+    fn reverse_bscale_bzero_clamps() {
+        let physical = vec![-1.0, 256.0];
+        let raw = reverse_bscale_bzero(&physical, 1.0, 0.0, 8).unwrap();
+        assert_eq!(raw, ImageData::U8(vec![0, 255]));
+    }
+
+    #[test]
+    fn reverse_bscale_bzero_invalid_bitpix() {
+        assert!(reverse_bscale_bzero(&[1.0], 1.0, 0.0, 7).is_err());
+    }
+
+    #[test]
+    fn build_hdu_with_scaling_roundtrip() {
+        let physical = vec![32768.0, 0.0, 65535.0];
+        let hdu_bytes = build_image_hdu_with_scaling(16, &[3], &physical, 1.0, 32768.0).unwrap();
+
+        let fits = hdu_bytes;
+        let parsed = crate::hdu::parse_fits(&fits).unwrap();
+        let hdu = parsed.primary();
+
+        let (bscale, bzero) = extract_bscale_bzero(&hdu.cards);
+        assert_eq!(bscale, 1.0);
+        assert_eq!(bzero, 32768.0);
+
+        let result = read_image_physical(&fits, hdu).unwrap();
+        assert_eq!(result, vec![32768.0, 0.0, 65535.0]);
+    }
+
+    #[test]
+    fn build_hdu_with_scaling_no_keywords_when_default() {
+        let physical = vec![1.0, 2.0, 3.0];
+        let hdu_bytes = build_image_hdu_with_scaling(-64, &[3], &physical, 1.0, 0.0).unwrap();
+
+        let parsed = crate::hdu::parse_fits(&hdu_bytes).unwrap();
+        let hdu = parsed.primary();
+
+        // Should not have BSCALE/BZERO cards
+        let has_bscale = hdu.cards.iter().any(|c| c.keyword_str() == "BSCALE");
+        assert!(!has_bscale);
     }
 }
