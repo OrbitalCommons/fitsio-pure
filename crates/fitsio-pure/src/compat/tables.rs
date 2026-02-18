@@ -223,6 +223,159 @@ impl ReadsCol for String {
     }
 }
 
+/// Trait for reading a range of rows from a table column.
+pub trait ReadsColRange: Sized {
+    fn read_col_range(
+        file: &FitsFile,
+        hdu: &FitsHdu,
+        name: &str,
+        start_row: usize,
+        num_rows: usize,
+    ) -> Result<Vec<Self>>;
+}
+
+fn resolve_column(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<(usize, usize)> {
+    let idx = validate_hdu_index(file, hdu)?;
+    let parsed = file.parsed()?;
+    let core_hdu = &parsed.hdus[idx];
+    let tfields = get_tfields(core_hdu)?;
+    let col_idx = find_column_index(&core_hdu.cards, name, tfields)?;
+    Ok((idx, col_idx))
+}
+
+macro_rules! impl_reads_col_range {
+    ($t:ty, $convert:expr) => {
+        impl ReadsColRange for $t {
+            fn read_col_range(
+                file: &FitsFile,
+                hdu: &FitsHdu,
+                name: &str,
+                start_row: usize,
+                num_rows: usize,
+            ) -> Result<Vec<Self>> {
+                let (idx, col_idx) = resolve_column(file, hdu, name)?;
+                let parsed = file.parsed()?;
+                let core_hdu = &parsed.hdus[idx];
+                let col_data = crate::bintable::read_binary_column_range(
+                    file.data(),
+                    core_hdu,
+                    col_idx,
+                    start_row,
+                    num_rows,
+                )?;
+                #[allow(clippy::redundant_closure_call)]
+                $convert(col_data)
+            }
+        }
+    };
+}
+
+impl_reads_col_range!(i32, |col_data: crate::bintable::BinaryColumnData| {
+    match col_data {
+        crate::bintable::BinaryColumnData::Int(v) => Ok(v),
+        crate::bintable::BinaryColumnData::Short(v) => Ok(v.iter().map(|&x| x as i32).collect()),
+        crate::bintable::BinaryColumnData::Long(v) => Ok(v.iter().map(|&x| x as i32).collect()),
+        _ => Err(Error::Message("column is not integer type".to_string())),
+    }
+});
+
+impl_reads_col_range!(i64, |col_data: crate::bintable::BinaryColumnData| {
+    match col_data {
+        crate::bintable::BinaryColumnData::Long(v) => Ok(v),
+        crate::bintable::BinaryColumnData::Int(v) => Ok(v.iter().map(|&x| x as i64).collect()),
+        crate::bintable::BinaryColumnData::Short(v) => Ok(v.iter().map(|&x| x as i64).collect()),
+        _ => Err(Error::Message("column is not integer type".to_string())),
+    }
+});
+
+impl_reads_col_range!(f32, |col_data: crate::bintable::BinaryColumnData| {
+    match col_data {
+        crate::bintable::BinaryColumnData::Float(v) => Ok(v),
+        crate::bintable::BinaryColumnData::Double(v) => Ok(v.iter().map(|&x| x as f32).collect()),
+        _ => Err(Error::Message("column is not float type".to_string())),
+    }
+});
+
+impl_reads_col_range!(f64, |col_data: crate::bintable::BinaryColumnData| {
+    match col_data {
+        crate::bintable::BinaryColumnData::Double(v) => Ok(v),
+        crate::bintable::BinaryColumnData::Float(v) => Ok(v.iter().map(|&x| x as f64).collect()),
+        crate::bintable::BinaryColumnData::Int(v) => Ok(v.iter().map(|&x| x as f64).collect()),
+        crate::bintable::BinaryColumnData::Long(v) => Ok(v.iter().map(|&x| x as f64).collect()),
+        _ => Err(Error::Message("column is not numeric type".to_string())),
+    }
+});
+
+impl_reads_col_range!(String, |col_data: crate::bintable::BinaryColumnData| {
+    match col_data {
+        crate::bintable::BinaryColumnData::Ascii(v) => Ok(v),
+        _ => Err(Error::Message("column is not string type".to_string())),
+    }
+});
+
+// ---- WritesCol implementations ----
+
+impl WritesCol for i32 {
+    fn write_col(file: &mut FitsFile, hdu: &FitsHdu, name: &str, data: &[Self]) -> Result<()> {
+        let col_data = crate::bintable::BinaryColumnData::Int(data.to_vec());
+        write_col_inner(file, hdu, name, &col_data)
+    }
+}
+
+impl WritesCol for i64 {
+    fn write_col(file: &mut FitsFile, hdu: &FitsHdu, name: &str, data: &[Self]) -> Result<()> {
+        let col_data = crate::bintable::BinaryColumnData::Long(data.to_vec());
+        write_col_inner(file, hdu, name, &col_data)
+    }
+}
+
+impl WritesCol for f32 {
+    fn write_col(file: &mut FitsFile, hdu: &FitsHdu, name: &str, data: &[Self]) -> Result<()> {
+        let col_data = crate::bintable::BinaryColumnData::Float(data.to_vec());
+        write_col_inner(file, hdu, name, &col_data)
+    }
+}
+
+impl WritesCol for f64 {
+    fn write_col(file: &mut FitsFile, hdu: &FitsHdu, name: &str, data: &[Self]) -> Result<()> {
+        let col_data = crate::bintable::BinaryColumnData::Double(data.to_vec());
+        write_col_inner(file, hdu, name, &col_data)
+    }
+}
+
+impl WritesCol for String {
+    fn write_col(file: &mut FitsFile, hdu: &FitsHdu, name: &str, data: &[Self]) -> Result<()> {
+        let col_data = crate::bintable::BinaryColumnData::Ascii(data.to_vec());
+        write_col_inner(file, hdu, name, &col_data)
+    }
+}
+
+fn write_col_inner(
+    file: &mut FitsFile,
+    hdu: &FitsHdu,
+    name: &str,
+    col_data: &crate::bintable::BinaryColumnData,
+) -> Result<()> {
+    let (idx, col_idx) = {
+        let idx = validate_hdu_index(file, hdu)?;
+        let parsed = file.parsed()?;
+        let core_hdu = &parsed.hdus[idx];
+        let tfields = get_tfields(core_hdu)?;
+        let col_idx = find_column_index(&core_hdu.cards, name, tfields)?;
+        (idx, col_idx)
+    };
+
+    // We need to get hdu info without borrowing file immutably
+    let parsed = file.parsed()?;
+    let core_hdu = parsed.hdus[idx].clone();
+    drop(parsed);
+
+    let mut data = file.data().to_vec();
+    crate::bintable::write_binary_column(&mut data, &core_hdu, col_idx, col_data)?;
+    file.set_data(data);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,5 +474,144 @@ mod tests {
 
         let hdu = f.hdu(1usize).unwrap();
         assert!(i32::read_col(&f, &hdu, "MISSING").is_err());
+    }
+
+    fn make_test_table(f: &mut FitsFile) -> FitsHdu {
+        let columns = vec![
+            crate::bintable::BinaryColumnDescriptor {
+                name: Some("ID".to_string()),
+                repeat: 1,
+                col_type: crate::bintable::BinaryColumnType::Int,
+                byte_width: 4,
+                tdim: None,
+            },
+            crate::bintable::BinaryColumnDescriptor {
+                name: Some("VAL".to_string()),
+                repeat: 1,
+                col_type: crate::bintable::BinaryColumnType::Double,
+                byte_width: 8,
+                tdim: None,
+            },
+        ];
+
+        let col_data = vec![
+            crate::bintable::BinaryColumnData::Int(vec![10, 20, 30, 40, 50]),
+            crate::bintable::BinaryColumnData::Double(vec![1.5, 2.5, 3.5, 4.5, 5.5]),
+        ];
+
+        let hdu_bytes =
+            crate::bintable::serialize_binary_table_hdu(&columns, &col_data, 5).unwrap();
+
+        let mut data = f.data().to_vec();
+        data.extend_from_slice(&hdu_bytes);
+        f.set_data(data);
+
+        f.hdu(1usize).unwrap()
+    }
+
+    #[test]
+    fn read_col_range_middle_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("table.fits");
+        let mut f = FitsFile::create(&path).open().unwrap();
+        let hdu = make_test_table(&mut f);
+
+        let ids: Vec<i32> = i32::read_col_range(&f, &hdu, "ID", 1, 3).unwrap();
+        assert_eq!(ids, vec![20, 30, 40]);
+
+        let vals: Vec<f64> = f64::read_col_range(&f, &hdu, "VAL", 2, 2).unwrap();
+        assert!((vals[0] - 3.5).abs() < 1e-10);
+        assert!((vals[1] - 4.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn read_col_range_first_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("table.fits");
+        let mut f = FitsFile::create(&path).open().unwrap();
+        let hdu = make_test_table(&mut f);
+
+        let ids: Vec<i32> = i32::read_col_range(&f, &hdu, "ID", 0, 1).unwrap();
+        assert_eq!(ids, vec![10]);
+    }
+
+    #[test]
+    fn read_col_range_out_of_bounds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("table.fits");
+        let mut f = FitsFile::create(&path).open().unwrap();
+        let hdu = make_test_table(&mut f);
+
+        assert!(i32::read_col_range(&f, &hdu, "ID", 3, 5).is_err());
+    }
+
+    #[test]
+    fn write_col_i32() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("table.fits");
+        let mut f = FitsFile::create(&path).open().unwrap();
+        let hdu = make_test_table(&mut f);
+
+        let new_data = vec![100, 200, 300, 400, 500];
+        i32::write_col(&mut f, &hdu, "ID", &new_data).unwrap();
+
+        let read_back: Vec<i32> = i32::read_col(&f, &hdu, "ID").unwrap();
+        assert_eq!(read_back, new_data);
+    }
+
+    #[test]
+    fn write_col_f64() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("table.fits");
+        let mut f = FitsFile::create(&path).open().unwrap();
+        let hdu = make_test_table(&mut f);
+
+        let new_data = vec![10.5, 20.5, 30.5, 40.5, 50.5];
+        f64::write_col(&mut f, &hdu, "VAL", &new_data).unwrap();
+
+        let read_back: Vec<f64> = f64::read_col(&f, &hdu, "VAL").unwrap();
+        assert_eq!(read_back, new_data);
+    }
+
+    #[test]
+    fn write_col_preserves_other_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("table.fits");
+        let mut f = FitsFile::create(&path).open().unwrap();
+        let hdu = make_test_table(&mut f);
+
+        // Write new values to ID column
+        i32::write_col(&mut f, &hdu, "ID", &[100, 200, 300, 400, 500]).unwrap();
+
+        // VAL column should be unchanged
+        let vals: Vec<f64> = f64::read_col(&f, &hdu, "VAL").unwrap();
+        assert!((vals[0] - 1.5).abs() < 1e-10);
+        assert!((vals[4] - 5.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn hdu_write_col_method() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("table.fits");
+        let mut f = FitsFile::create(&path).open().unwrap();
+        let hdu = make_test_table(&mut f);
+
+        hdu.write_col(&mut f, "ID", &[99i32, 88, 77, 66, 55])
+            .unwrap();
+        let read_back: Vec<i32> = hdu.read_col(&f, "ID").unwrap();
+        assert_eq!(read_back, vec![99, 88, 77, 66, 55]);
+    }
+
+    #[test]
+    fn hdu_read_col_range_method() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("table.fits");
+        let mut f = FitsFile::create(&path).open().unwrap();
+        let hdu = make_test_table(&mut f);
+
+        let vals: Vec<f64> = hdu.read_col_range(&f, "VAL", 0, 3).unwrap();
+        assert_eq!(vals.len(), 3);
+        assert!((vals[0] - 1.5).abs() < 1e-10);
+        assert!((vals[2] - 3.5).abs() < 1e-10);
     }
 }
