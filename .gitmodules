@@ -1,0 +1,3 @@
+[submodule "fits-test-cases"]
+	path = fits-test-cases
+	url = https://github.com/OrbitalCommons/fits-test-cases.git
