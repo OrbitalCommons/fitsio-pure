@@ -22,11 +22,17 @@ use crate::value::Value;
 /// Image pixel data extracted from a FITS HDU, typed by BITPIX.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ImageData {
+    /// BITPIX = 8: unsigned 8-bit integers.
     U8(Vec<u8>),
+    /// BITPIX = 16: signed 16-bit integers.
     I16(Vec<i16>),
+    /// BITPIX = 32: signed 32-bit integers.
     I32(Vec<i32>),
+    /// BITPIX = 64: signed 64-bit integers.
     I64(Vec<i64>),
+    /// BITPIX = -32: IEEE 754 single-precision floats.
     F32(Vec<f32>),
+    /// BITPIX = -64: IEEE 754 double-precision floats.
     F64(Vec<f64>),
 }
 

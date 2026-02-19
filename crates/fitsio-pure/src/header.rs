@@ -56,9 +56,13 @@ impl Card {
 /// The type of HDU, which determines required keywords per the FITS standard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HduType {
+    /// Primary HDU (starts with SIMPLE=T).
     Primary,
+    /// Image extension.
     Image,
+    /// ASCII table extension.
     AsciiTable,
+    /// Binary table extension.
     BinaryTable,
 }
 

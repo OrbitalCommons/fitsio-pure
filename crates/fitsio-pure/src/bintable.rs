@@ -68,23 +68,39 @@ pub struct BinaryColumnDescriptor {
 /// Column data extracted from a binary table.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BinaryColumnData {
+    /// Logical (L) column.
     Logical(Vec<bool>),
+    /// Unsigned byte (B) column.
     Byte(Vec<u8>),
+    /// 16-bit integer (I) column.
     Short(Vec<i16>),
+    /// 32-bit integer (J) column.
     Int(Vec<i32>),
+    /// 64-bit integer (K) column.
     Long(Vec<i64>),
+    /// 32-bit float (E) column.
     Float(Vec<f32>),
+    /// 64-bit float (D) column.
     Double(Vec<f64>),
+    /// Complex float (C) column.
     ComplexFloat(Vec<(f32, f32)>),
+    /// Complex double (M) column.
     ComplexDouble(Vec<(f64, f64)>),
+    /// ASCII string (A) column.
     Ascii(Vec<String>),
+    /// Bit array (X) column, one byte-vec per row.
     Bit(Vec<Vec<u8>>),
-    /// Variable-length array column: one inner Vec per row.
+    /// Variable-length byte array column: one inner Vec per row.
     VarByte(Vec<Vec<u8>>),
+    /// Variable-length i16 array column.
     VarShort(Vec<Vec<i16>>),
+    /// Variable-length i32 array column.
     VarInt(Vec<Vec<i32>>),
+    /// Variable-length i64 array column.
     VarLong(Vec<Vec<i64>>),
+    /// Variable-length f32 array column.
     VarFloat(Vec<Vec<f32>>),
+    /// Variable-length f64 array column.
     VarDouble(Vec<Vec<f64>>),
 }
 
