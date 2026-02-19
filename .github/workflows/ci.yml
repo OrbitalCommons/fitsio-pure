@@ -17,11 +17,7 @@ jobs:
           submodules: true
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --workspace
-        env:
-          FITS_TEST_CASES: ${{ github.workspace }}/fits-test-cases
       - run: cargo test --features array
-        env:
-          FITS_TEST_CASES: ${{ github.workspace }}/fits-test-cases
 
   clippy:
     runs-on: ubuntu-latest
@@ -50,3 +46,10 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - run: cargo build --target wasm32-unknown-unknown -p fitsio-pure
+
+  cli:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --features cli
