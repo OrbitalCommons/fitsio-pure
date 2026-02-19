@@ -11,8 +11,11 @@ use crate::value::Value;
 /// The type of FITS extension, determined by the XTENSION keyword value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExtensionType {
+    /// XTENSION = 'IMAGE'.
     Image,
+    /// XTENSION = 'TABLE'.
     AsciiTable,
+    /// XTENSION = 'BINTABLE'.
     BinaryTable,
 }
 
@@ -37,12 +40,19 @@ impl ExtensionType {
 /// A parsed FITS extension header with all mandatory keyword values extracted.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExtensionHeader {
+    /// The extension type (IMAGE, TABLE, or BINTABLE).
     pub xtension: ExtensionType,
+    /// Bits per pixel / data value.
     pub bitpix: i64,
+    /// Number of axes.
     pub naxis: usize,
+    /// Axis dimensions (NAXIS1, NAXIS2, ...).
     pub naxes: Vec<usize>,
+    /// Parameter count (heap size for binary tables).
     pub pcount: usize,
+    /// Group count (always 1 for standard extensions).
     pub gcount: usize,
+    /// All header cards from this extension.
     pub cards: Vec<Card>,
 }
 

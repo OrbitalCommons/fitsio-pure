@@ -9,41 +9,72 @@ use crate::value::Value;
 /// Describes the kind and shape of data in a single HDU.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HduInfo {
+    /// Primary HDU containing image data.
     Primary {
+        /// BITPIX value (8, 16, 32, 64, -32, -64).
         bitpix: i64,
+        /// Axis dimensions (NAXIS1, NAXIS2, ...).
         naxes: Vec<usize>,
     },
+    /// Image extension (XTENSION = 'IMAGE').
     Image {
+        /// BITPIX value.
         bitpix: i64,
+        /// Axis dimensions.
         naxes: Vec<usize>,
     },
+    /// ASCII table extension (XTENSION = 'TABLE').
     AsciiTable {
+        /// Row width in bytes.
         naxis1: usize,
+        /// Number of rows.
         naxis2: usize,
+        /// Number of columns.
         tfields: usize,
     },
+    /// Binary table extension (XTENSION = 'BINTABLE').
     BinaryTable {
+        /// Row width in bytes.
         naxis1: usize,
+        /// Number of rows.
         naxis2: usize,
+        /// Size of the variable-length array heap in bytes.
         pcount: usize,
+        /// Number of columns.
         tfields: usize,
     },
+    /// Random groups structure (primary HDU with GROUPS=T, NAXIS1=0).
     RandomGroups {
+        /// BITPIX value.
         bitpix: i64,
+        /// Group dimensions (NAXIS2..NAXISm, excluding NAXIS1=0).
         naxes: Vec<usize>,
+        /// Number of parameters per group.
         pcount: usize,
+        /// Number of groups.
         gcount: usize,
     },
+    /// Tile-compressed image stored as a binary table (ZIMAGE=T).
     CompressedImage {
+        /// Original image BITPIX before compression.
         zbitpix: i64,
+        /// Original image dimensions.
         znaxes: Vec<usize>,
+        /// Compression algorithm name (e.g. "RICE_1", "GZIP_1").
         zcmptype: String,
+        /// Tile dimensions for compression.
         ztile: Vec<usize>,
+        /// Rice compression block size (ZVAL1).
         blocksize: usize,
+        /// Rice bytes per pixel (ZVAL2).
         rice_bytepix: usize,
+        /// Underlying binary table row width.
         naxis1: usize,
+        /// Underlying binary table row count (number of tiles).
         naxis2: usize,
+        /// Heap size for variable-length compressed data.
         pcount: usize,
+        /// Number of columns in the underlying binary table.
         tfields: usize,
     },
 }
@@ -51,28 +82,37 @@ pub enum HduInfo {
 /// A single Header Data Unit parsed from a FITS byte stream.
 #[derive(Debug, Clone)]
 pub struct Hdu {
+    /// Parsed metadata describing the HDU type and shape.
     pub info: HduInfo,
+    /// Byte offset where the header begins in the FITS stream.
     pub header_start: usize,
+    /// Byte offset where the data segment begins.
     pub data_start: usize,
+    /// Length of the data segment in bytes (unpadded).
     pub data_len: usize,
+    /// All header cards parsed from this HDU.
     pub cards: Vec<Card>,
 }
 
 /// A collection of HDUs parsed from a complete FITS file.
 #[derive(Debug, Clone)]
 pub struct FitsData {
+    /// All HDUs in the file, with the primary HDU at index 0.
     pub hdus: Vec<Hdu>,
 }
 
 impl FitsData {
+    /// Returns the primary (first) HDU.
     pub fn primary(&self) -> &Hdu {
         &self.hdus[0]
     }
 
+    /// Returns the HDU at the given index, or `None` if out of bounds.
     pub fn get(&self, index: usize) -> Option<&Hdu> {
         self.hdus.get(index)
     }
 
+    /// Finds the first HDU whose EXTNAME matches `name`.
     pub fn find_by_name(&self, name: &str) -> Option<&Hdu> {
         self.hdus.iter().find(|hdu| {
             card_string_value(&hdu.cards, "EXTNAME")
@@ -81,14 +121,17 @@ impl FitsData {
         })
     }
 
+    /// Returns the number of HDUs.
     pub fn len(&self) -> usize {
         self.hdus.len()
     }
 
+    /// Returns `true` if the file contains no HDUs.
     pub fn is_empty(&self) -> bool {
         self.hdus.is_empty()
     }
 
+    /// Iterates over all HDUs in order.
     pub fn iter(&self) -> impl Iterator<Item = &Hdu> {
         self.hdus.iter()
     }
