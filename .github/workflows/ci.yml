@@ -13,15 +13,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - uses: dtolnay/rust-toolchain@stable
-      - name: Clone test corpus
-        run: git clone --depth 1 https://github.com/OrbitalCommons/fits-test-cases.git test-cases
       - run: cargo test --workspace
         env:
-          FITS_TEST_CASES: ${{ github.workspace }}/test-cases
+          FITS_TEST_CASES: ${{ github.workspace }}/fits-test-cases
       - run: cargo test --features array
         env:
-          FITS_TEST_CASES: ${{ github.workspace }}/test-cases
+          FITS_TEST_CASES: ${{ github.workspace }}/fits-test-cases
 
   clippy:
     runs-on: ubuntu-latest

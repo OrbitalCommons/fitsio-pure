@@ -7,17 +7,52 @@
 
 use std::path::{Path, PathBuf};
 
+use fitsio_pure::bintable::{parse_binary_table_columns, read_binary_column, BinaryColumnData};
 use fitsio_pure::hdu::{parse_fits, FitsData, HduInfo};
 use fitsio_pure::image::{extract_bscale_bzero, read_image_data, read_image_physical, ImageData};
+use fitsio_pure::value::Value;
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
+fn find_keyword_str<'a>(cards: &'a [fitsio_pure::header::Card], keyword: &str) -> Option<&'a str> {
+    cards.iter().find_map(|c| {
+        if c.keyword_str() == keyword {
+            match &c.value {
+                Some(Value::String(s)) => Some(s.as_str()),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    })
+}
+
+fn find_keyword_int(cards: &[fitsio_pure::header::Card], keyword: &str) -> Option<i64> {
+    cards.iter().find_map(|c| {
+        if c.keyword_str() == keyword {
+            match &c.value {
+                Some(Value::Integer(n)) => Some(*n),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    })
+}
+
 fn corpus_dir() -> Option<PathBuf> {
-    let dir = PathBuf::from(std::env::var("FITS_TEST_CASES").ok()?);
-    if dir.is_dir() {
-        Some(dir)
+    if let Ok(val) = std::env::var("FITS_TEST_CASES") {
+        let dir = PathBuf::from(val);
+        if dir.is_dir() {
+            return Some(dir);
+        }
+    }
+    // Fall back to submodule path
+    let submod = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fits-test-cases");
+    if submod.is_dir() {
+        Some(submod)
     } else {
         None
     }
@@ -50,7 +85,11 @@ fn collect_fits_files(dir: &Path, out: &mut Vec<PathBuf>) {
             }
             collect_fits_files(&path, &mut *out);
         } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if name.ends_with(".fits") || name.ends_with(".fit") {
+            if name.ends_with(".fits")
+                || name.ends_with(".fit")
+                || name.ends_with(".metafits")
+                || name.ends_with(".uvfits")
+            {
                 out.push(path);
             }
         }
@@ -741,5 +780,570 @@ fn hipsgen_healpix_tile() {
             assert_eq!(naxes, &[512, 512]);
         }
         other => panic!("Expected Primary, got {:?}", other),
+    }
+}
+
+// ===========================================================================
+// MWA telescope test data
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// MWA metafits: minimal MWAX (1297526432)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mwa_metafits_minimal_structure() {
+    let (_, fits) = match load("mwa/1297526432.metafits") {
+        Some(v) => v,
+        None => return,
+    };
+
+    assert_eq!(fits.len(), 2);
+
+    // Primary: empty with metadata
+    match &fits.primary().info {
+        HduInfo::Primary { naxes, .. } => assert!(naxes.is_empty()),
+        other => panic!("Expected Primary, got {:?}", other),
+    }
+
+    // Check key header values
+    assert_eq!(
+        find_keyword_int(&fits.primary().cards, "GPSTIME"),
+        Some(1297526432)
+    );
+    assert_eq!(find_keyword_int(&fits.primary().cards, "EXPOSURE"), Some(2));
+    assert_eq!(
+        find_keyword_str(&fits.primary().cards, "TELESCOP"),
+        Some("MWA")
+    );
+    assert_eq!(find_keyword_int(&fits.primary().cards, "NINPUTS"), Some(4));
+    assert_eq!(find_keyword_int(&fits.primary().cards, "NCHANS"), Some(48));
+
+    // TILEDATA table: 17 columns, 4 rows
+    let tiledata = fits.find_by_name("TILEDATA").unwrap();
+    match &tiledata.info {
+        HduInfo::BinaryTable {
+            tfields, naxis2, ..
+        } => {
+            assert_eq!(*tfields, 17);
+            assert_eq!(*naxis2, 4);
+        }
+        other => panic!("Expected BinaryTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn mwa_metafits_minimal_column_data() {
+    let (bytes, fits) = match load("mwa/1297526432.metafits") {
+        Some(v) => v,
+        None => return,
+    };
+
+    let tiledata = fits.find_by_name("TILEDATA").unwrap();
+    let tfields = match &tiledata.info {
+        HduInfo::BinaryTable { tfields, .. } => *tfields,
+        _ => panic!("Expected BinaryTable"),
+    };
+    let cols = parse_binary_table_columns(&tiledata.cards, tfields).unwrap();
+
+    // Find TileName column by name
+    let tilename_idx = cols
+        .iter()
+        .position(|c| c.name.as_deref() == Some("TileName"))
+        .unwrap();
+    let tilename_data = read_binary_column(&bytes, tiledata, tilename_idx).unwrap();
+    match &tilename_data {
+        BinaryColumnData::Ascii(v) => {
+            assert_eq!(v.len(), 4);
+            assert_eq!(
+                v[0].trim_matches(|c: char| c == ' ' || c == '\0'),
+                "Tile052"
+            );
+        }
+        other => panic!("Expected Ascii for TileName, got {:?}", other),
+    }
+
+    // Find Pol column by name
+    let pol_idx = cols
+        .iter()
+        .position(|c| c.name.as_deref() == Some("Pol"))
+        .unwrap();
+    let pol_data = read_binary_column(&bytes, tiledata, pol_idx).unwrap();
+    match &pol_data {
+        BinaryColumnData::Ascii(v) => {
+            assert_eq!(v.len(), 4);
+            assert_eq!(v[0].trim_matches(|c: char| c == ' ' || c == '\0'), "Y");
+        }
+        other => panic!("Expected Ascii for Pol, got {:?}", other),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MWA metafits: full 128-tile with CONTINUE long strings (1244973688)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mwa_metafits_full_structure() {
+    let (_, fits) = match load("mwa/1244973688.metafits") {
+        Some(v) => v,
+        None => return,
+    };
+
+    assert_eq!(fits.len(), 2);
+
+    assert_eq!(
+        find_keyword_int(&fits.primary().cards, "GPSTIME"),
+        Some(1244973688)
+    );
+    assert_eq!(
+        find_keyword_int(&fits.primary().cards, "EXPOSURE"),
+        Some(120)
+    );
+    assert_eq!(
+        find_keyword_str(&fits.primary().cards, "TELESCOP"),
+        Some("MWA")
+    );
+    assert_eq!(
+        find_keyword_int(&fits.primary().cards, "NINPUTS"),
+        Some(256)
+    );
+    assert_eq!(
+        find_keyword_int(&fits.primary().cards, "NCHANS"),
+        Some(3072)
+    );
+
+    // TILEDATA: 20 columns, 256 rows
+    let tiledata = fits.find_by_name("TILEDATA").unwrap();
+    match &tiledata.info {
+        HduInfo::BinaryTable {
+            tfields, naxis2, ..
+        } => {
+            assert_eq!(*tfields, 20);
+            assert_eq!(*naxis2, 256);
+        }
+        other => panic!("Expected BinaryTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn mwa_metafits_continue_long_string() {
+    let (_, fits) = match load("mwa/1244973688.metafits") {
+        Some(v) => v,
+        None => return,
+    };
+
+    // CHANNELS should be a long string assembled from CONTINUE cards
+    let channels = find_keyword_str(&fits.primary().cards, "CHANNELS").unwrap();
+    assert_eq!(
+        channels,
+        "104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127"
+    );
+    // 24 channels listed
+    assert_eq!(channels.split(',').count(), 24);
+}
+
+#[test]
+fn mwa_metafits_full_column_data() {
+    let (bytes, fits) = match load("mwa/1244973688.metafits") {
+        Some(v) => v,
+        None => return,
+    };
+
+    let tiledata = fits.find_by_name("TILEDATA").unwrap();
+    let tfields = match &tiledata.info {
+        HduInfo::BinaryTable { tfields, .. } => *tfields,
+        _ => panic!("Expected BinaryTable"),
+    };
+    let cols = parse_binary_table_columns(&tiledata.cards, tfields).unwrap();
+
+    // TileName first row
+    let tilename_idx = cols
+        .iter()
+        .position(|c| c.name.as_deref() == Some("TileName"))
+        .unwrap();
+    let tilename_data = read_binary_column(&bytes, tiledata, tilename_idx).unwrap();
+    match &tilename_data {
+        BinaryColumnData::Ascii(v) => {
+            assert_eq!(v.len(), 256);
+            assert_eq!(
+                v[0].trim_matches(|c: char| c == ' ' || c == '\0'),
+                "Tile104"
+            );
+        }
+        other => panic!("Expected Ascii for TileName, got {:?}", other),
+    }
+
+    // Gains column: 24I per row (array-in-cell)
+    let gains_idx = cols
+        .iter()
+        .position(|c| c.name.as_deref() == Some("Gains"))
+        .unwrap();
+    assert_eq!(cols[gains_idx].repeat, 24);
+    let gains_data = read_binary_column(&bytes, tiledata, gains_idx).unwrap();
+    match &gains_data {
+        BinaryColumnData::Short(v) => {
+            // 256 rows x 24 elements = 6144 total values
+            assert_eq!(v.len(), 256 * 24);
+        }
+        other => panic!("Expected Short for Gains, got {:?}", other),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MWA metafits: signal chain correction (1096952256)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mwa_metafits_signal_chain() {
+    let (_, fits) = match load("mwa/1096952256_metafits.fits") {
+        Some(v) => v,
+        None => return,
+    };
+
+    assert_eq!(fits.len(), 3);
+    assert_eq!(
+        find_keyword_int(&fits.primary().cards, "GPSTIME"),
+        Some(1096952256)
+    );
+
+    // TILEDATA: 21 columns, 256 rows
+    let tiledata = fits.find_by_name("TILEDATA").unwrap();
+    match &tiledata.info {
+        HduInfo::BinaryTable {
+            tfields, naxis2, ..
+        } => {
+            assert_eq!(*tfields, 21);
+            assert_eq!(*naxis2, 256);
+        }
+        other => panic!("Expected BinaryTable for TILEDATA, got {:?}", other),
+    }
+
+    // SIGCHAINDATA: 3 columns, 8 rows
+    let sigchain = fits.find_by_name("SIGCHAINDATA").unwrap();
+    match &sigchain.info {
+        HduInfo::BinaryTable {
+            tfields, naxis2, ..
+        } => {
+            assert_eq!(*tfields, 3);
+            assert_eq!(*naxis2, 8);
+        }
+        other => panic!("Expected BinaryTable for SIGCHAINDATA, got {:?}", other),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MWA metafits: calibration data (1111842752)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mwa_metafits_calibration_data() {
+    let (_, fits) = match load("mwa/1111842752_metafits.fits") {
+        Some(v) => v,
+        None => return,
+    };
+
+    assert_eq!(fits.len(), 3);
+    assert_eq!(
+        find_keyword_int(&fits.primary().cards, "GPSTIME"),
+        Some(1111842752)
+    );
+
+    // TILEDATA: 21 columns, 256 rows
+    let tiledata = fits.find_by_name("TILEDATA").unwrap();
+    match &tiledata.info {
+        HduInfo::BinaryTable {
+            tfields, naxis2, ..
+        } => {
+            assert_eq!(*tfields, 21);
+            assert_eq!(*naxis2, 256);
+        }
+        other => panic!("Expected BinaryTable for TILEDATA, got {:?}", other),
+    }
+
+    // CALIBDATA: 6 columns, 256 rows
+    let calibdata = fits.find_by_name("CALIBDATA").unwrap();
+    match &calibdata.info {
+        HduInfo::BinaryTable {
+            tfields, naxis2, ..
+        } => {
+            assert_eq!(*tfields, 6);
+            assert_eq!(*naxis2, 256);
+        }
+        other => panic!("Expected BinaryTable for CALIBDATA, got {:?}", other),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MWA GLEAM sky model catalog
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mwa_gleam_catalog_structure() {
+    let (_, fits) = match load("mwa/gleam.fits") {
+        Some(v) => v,
+        None => return,
+    };
+
+    assert_eq!(fits.len(), 2);
+
+    let table = fits.get(1).unwrap();
+    match &table.info {
+        HduInfo::BinaryTable {
+            tfields, naxis2, ..
+        } => {
+            assert_eq!(*tfields, 9);
+            assert_eq!(*naxis2, 4);
+        }
+        other => panic!("Expected BinaryTable, got {:?}", other),
+    }
+
+    // Verify column names match expected sky model schema
+    let cols = parse_binary_table_columns(&table.cards, 9).unwrap();
+    let names: Vec<&str> = cols.iter().filter_map(|c| c.name.as_deref()).collect();
+    assert_eq!(
+        names,
+        &["Name", "RAJ2000", "DEJ2000", "S_200", "alpha", "beta", "a", "b", "pa"]
+    );
+}
+
+#[test]
+fn mwa_gleam_catalog_values() {
+    let (bytes, fits) = match load("mwa/gleam.fits") {
+        Some(v) => v,
+        None => return,
+    };
+
+    let table = fits.get(1).unwrap();
+    let tfields = match &table.info {
+        HduInfo::BinaryTable { tfields, .. } => *tfields,
+        _ => panic!("Expected BinaryTable"),
+    };
+    let cols = parse_binary_table_columns(&table.cards, tfields).unwrap();
+
+    // Name column: first row should be "point-pl"
+    let name_idx = cols
+        .iter()
+        .position(|c| c.name.as_deref() == Some("Name"))
+        .unwrap();
+    let name_data = read_binary_column(&bytes, table, name_idx).unwrap();
+    match &name_data {
+        BinaryColumnData::Ascii(v) => {
+            assert_eq!(v.len(), 4);
+            assert_eq!(
+                v[0].trim_matches(|c: char| c == ' ' || c == '\0'),
+                "point-pl"
+            );
+        }
+        other => panic!("Expected Ascii for Name, got {:?}", other),
+    }
+
+    // RAJ2000 first row = 1.0
+    let ra_idx = cols
+        .iter()
+        .position(|c| c.name.as_deref() == Some("RAJ2000"))
+        .unwrap();
+    let ra_data = read_binary_column(&bytes, table, ra_idx).unwrap();
+    match &ra_data {
+        BinaryColumnData::Double(v) => {
+            assert_eq!(v.len(), 4);
+            assert!(
+                (v[0] - 1.0).abs() < 1e-10,
+                "RAJ2000[0] = {}, expected 1.0",
+                v[0]
+            );
+        }
+        other => panic!("Expected Double for RAJ2000, got {:?}", other),
+    }
+
+    // DEJ2000 first row = 2.0
+    let dec_idx = cols
+        .iter()
+        .position(|c| c.name.as_deref() == Some("DEJ2000"))
+        .unwrap();
+    let dec_data = read_binary_column(&bytes, table, dec_idx).unwrap();
+    match &dec_data {
+        BinaryColumnData::Double(v) => {
+            assert_eq!(v.len(), 4);
+            assert!(
+                (v[0] - 2.0).abs() < 1e-10,
+                "DEJ2000[0] = {}, expected 2.0",
+                v[0]
+            );
+        }
+        other => panic!("Expected Double for DEJ2000, got {:?}", other),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MWA Hyperdrive jack.fits: multi-table source model
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mwa_jack_multi_table() {
+    let (_, fits) = match load("mwa/jack.fits") {
+        Some(v) => v,
+        None => return,
+    };
+
+    assert_eq!(fits.len(), 3);
+
+    // Extension 1: component table, 17 columns, 8 rows
+    match &fits.get(1).unwrap().info {
+        HduInfo::BinaryTable {
+            tfields, naxis2, ..
+        } => {
+            assert_eq!(*tfields, 17);
+            assert_eq!(*naxis2, 8);
+        }
+        other => panic!("Expected BinaryTable for ext 1, got {:?}", other),
+    }
+
+    // Extension 2: source mapping table, 4 columns, 4 rows
+    match &fits.get(2).unwrap().info {
+        HduInfo::BinaryTable {
+            tfields, naxis2, ..
+        } => {
+            assert_eq!(*tfields, 4);
+            assert_eq!(*naxis2, 4);
+        }
+        other => panic!("Expected BinaryTable for ext 2, got {:?}", other),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MWA SDC3 UVFITS: random groups format
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mwa_sdc3_uvfits_random_groups() {
+    let (_, fits) = match load("mwa/sdc3_0000.uvfits") {
+        Some(v) => v,
+        None => return,
+    };
+
+    assert_eq!(fits.len(), 3);
+
+    // Primary: random groups with 9 parameters, 1 group
+    match &fits.primary().info {
+        HduInfo::RandomGroups {
+            bitpix,
+            naxes,
+            pcount,
+            gcount,
+        } => {
+            assert_eq!(*bitpix, -32);
+            assert_eq!(naxes, &[3, 1, 1, 1, 1, 1]);
+            assert_eq!(*pcount, 9);
+            assert_eq!(*gcount, 1);
+        }
+        other => panic!("Expected RandomGroups, got {:?}", other),
+    }
+
+    // AIPS FQ table: 5 columns, 1 row
+    let fq = fits.find_by_name("AIPS FQ").unwrap();
+    match &fq.info {
+        HduInfo::BinaryTable {
+            tfields, naxis2, ..
+        } => {
+            assert_eq!(*tfields, 5);
+            assert_eq!(*naxis2, 1);
+        }
+        other => panic!("Expected BinaryTable for AIPS FQ, got {:?}", other),
+    }
+
+    // AIPS AN table: 13 columns, 512 rows
+    let an = fits.find_by_name("AIPS AN").unwrap();
+    match &an.info {
+        HduInfo::BinaryTable {
+            tfields, naxis2, ..
+        } => {
+            assert_eq!(*tfields, 13);
+            assert_eq!(*naxis2, 512);
+        }
+        other => panic!("Expected BinaryTable for AIPS AN, got {:?}", other),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MWA MWAX gpubox: alternating visibility + weight images
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mwa_gpubox_image_structure() {
+    let (_, fits) = match load("mwa/1297526432_gpubox_ch117.fits") {
+        Some(v) => v,
+        None => return,
+    };
+
+    // Empty primary + 4 image extensions (2 timesteps x 2 HDUs each)
+    assert_eq!(fits.len(), 5);
+
+    match &fits.primary().info {
+        HduInfo::Primary { naxes, .. } => assert!(naxes.is_empty()),
+        other => panic!("Expected Primary, got {:?}", other),
+    }
+
+    // HDU 1: visibility data (BITPIX=32, 16x3)
+    match &fits.get(1).unwrap().info {
+        HduInfo::Image { bitpix, naxes } => {
+            assert_eq!(*bitpix, 32);
+            assert_eq!(naxes, &[16, 3]);
+        }
+        other => panic!("Expected Image for HDU 1, got {:?}", other),
+    }
+
+    // HDU 2: weights (BITPIX=-32, 4x3)
+    match &fits.get(2).unwrap().info {
+        HduInfo::Image { bitpix, naxes } => {
+            assert_eq!(*bitpix, -32);
+            assert_eq!(naxes, &[4, 3]);
+        }
+        other => panic!("Expected Image for HDU 2, got {:?}", other),
+    }
+
+    // HDU 3: same pattern repeats for timestep 2
+    match &fits.get(3).unwrap().info {
+        HduInfo::Image { bitpix, naxes } => {
+            assert_eq!(*bitpix, 32);
+            assert_eq!(naxes, &[16, 3]);
+        }
+        other => panic!("Expected Image for HDU 3, got {:?}", other),
+    }
+
+    // HDU 4: weights for timestep 2
+    match &fits.get(4).unwrap().info {
+        HduInfo::Image { bitpix, naxes } => {
+            assert_eq!(*bitpix, -32);
+            assert_eq!(naxes, &[4, 3]);
+        }
+        other => panic!("Expected Image for HDU 4, got {:?}", other),
+    }
+}
+
+#[test]
+fn mwa_gpubox_pixel_data() {
+    let (bytes, fits) = match load("mwa/1297526432_gpubox_ch117.fits") {
+        Some(v) => v,
+        None => return,
+    };
+
+    // Read visibility data from HDU 1 (32-bit int, 16x3 = 48 pixels)
+    let vis = read_image_data(&bytes, fits.get(1).unwrap()).unwrap();
+    match vis {
+        ImageData::I32(v) => assert_eq!(v.len(), 48),
+        other => panic!("Expected I32 for visibility, got {:?}", other),
+    }
+
+    // Read weight data from HDU 2 (32-bit float, 4x3 = 12 pixels)
+    let wgt = read_image_data(&bytes, fits.get(2).unwrap()).unwrap();
+    match wgt {
+        ImageData::F32(v) => {
+            assert_eq!(v.len(), 12);
+            assert!(
+                v.iter().all(|x| x.is_finite()),
+                "All weights should be finite"
+            );
+        }
+        other => panic!("Expected F32 for weights, got {:?}", other),
     }
 }
