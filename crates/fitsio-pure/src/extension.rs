@@ -109,9 +109,13 @@ fn parse_extension_type(cards: &[Card]) -> Result<ExtensionType> {
             "IMAGE" => Ok(ExtensionType::Image),
             "TABLE" => Ok(ExtensionType::AsciiTable),
             "BINTABLE" => Ok(ExtensionType::BinaryTable),
-            _ => Err(Error::UnsupportedExtension),
+            other => Err(Error::UnsupportedExtension(if other.starts_with("A3D") {
+                "A3DTABLE"
+            } else {
+                "unknown XTENSION"
+            })),
         },
-        _ => Err(Error::UnsupportedExtension),
+        _ => Err(Error::UnsupportedExtension("XTENSION not a string")),
     }
 }
 
@@ -137,7 +141,7 @@ pub fn parse_extension_header(cards: &[Card]) -> Result<ExtensionHeader> {
         let mut kw_buf = [b' '; 8];
         let len = kw_name.len().min(8);
         kw_buf[..len].copy_from_slice(&kw_name.as_bytes()[..len]);
-        let card = find_keyword(cards, &kw_buf).ok_or(Error::InvalidHeader)?;
+        let card = find_keyword(cards, &kw_buf).ok_or(Error::InvalidHeader("missing NAXISn"))?;
         let val = extract_usize(card, "NAXISn")?;
         naxes.push(val);
     }
@@ -451,7 +455,7 @@ mod tests {
         ];
         assert!(matches!(
             parse_extension_header(&cards),
-            Err(Error::UnsupportedExtension)
+            Err(Error::UnsupportedExtension(_))
         ));
     }
 

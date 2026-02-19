@@ -2,7 +2,7 @@
 #[derive(Debug)]
 pub enum Error {
     /// Malformed FITS header block.
-    InvalidHeader,
+    InvalidHeader(&'static str),
     /// Premature end of data while reading.
     UnexpectedEof,
     /// Unrecognized BITPIX value.
@@ -10,15 +10,15 @@ pub enum Error {
     /// Malformed keyword name in a header card.
     InvalidKeyword,
     /// Unknown or unsupported XTENSION type.
-    UnsupportedExtension,
+    UnsupportedExtension(&'static str),
     /// A header value could not be parsed correctly.
     InvalidValue,
     /// A required keyword was not found in the header.
     MissingKeyword(&'static str),
     /// Unsupported or unknown tile compression algorithm.
-    UnsupportedCompression,
+    UnsupportedCompression(&'static str),
     /// Error during tile decompression (Rice/GZIP).
-    DecompressionError,
+    DecompressionError(&'static str),
     /// An I/O error from the standard library.
     #[cfg(feature = "std")]
     Io(std::io::Error),
@@ -30,15 +30,17 @@ pub type Result<T> = core::result::Result<T, Error>;
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Error::InvalidHeader => write!(f, "invalid FITS header"),
+            Error::InvalidHeader(ctx) => write!(f, "invalid FITS header: {ctx}"),
             Error::UnexpectedEof => write!(f, "unexpected end of file"),
             Error::InvalidBitpix(v) => write!(f, "invalid BITPIX value: {v}"),
             Error::InvalidKeyword => write!(f, "invalid keyword name"),
-            Error::UnsupportedExtension => write!(f, "unsupported XTENSION type"),
+            Error::UnsupportedExtension(ctx) => write!(f, "unsupported XTENSION type: {ctx}"),
             Error::InvalidValue => write!(f, "invalid header value"),
             Error::MissingKeyword(kw) => write!(f, "missing required keyword: {kw}"),
-            Error::UnsupportedCompression => write!(f, "unsupported compression algorithm"),
-            Error::DecompressionError => write!(f, "decompression error"),
+            Error::UnsupportedCompression(ctx) => {
+                write!(f, "unsupported compression algorithm: {ctx}")
+            }
+            Error::DecompressionError(ctx) => write!(f, "decompression error: {ctx}"),
             #[cfg(feature = "std")]
             Error::Io(e) => write!(f, "I/O error: {e}"),
         }
@@ -68,8 +70,8 @@ mod tests {
 
     #[test]
     fn display_invalid_header() {
-        let e = Error::InvalidHeader;
-        assert_eq!(e.to_string(), "invalid FITS header");
+        let e = Error::InvalidHeader("bad block");
+        assert_eq!(e.to_string(), "invalid FITS header: bad block");
     }
 
     #[test]
@@ -92,8 +94,8 @@ mod tests {
 
     #[test]
     fn display_unsupported_extension() {
-        let e = Error::UnsupportedExtension;
-        assert_eq!(e.to_string(), "unsupported XTENSION type");
+        let e = Error::UnsupportedExtension("FOREIGN");
+        assert_eq!(e.to_string(), "unsupported XTENSION type: FOREIGN");
     }
 
     #[test]
@@ -129,14 +131,14 @@ mod tests {
         let ok: Result<u32> = Ok(42);
         assert!(ok.is_ok());
 
-        let err: Result<u32> = Err(Error::InvalidHeader);
+        let err: Result<u32> = Err(Error::InvalidHeader("test"));
         assert!(err.is_err());
     }
 
     #[test]
     fn debug_formatting() {
         let e = Error::InvalidBitpix(99);
-        let debug = format!("{e:?}");
+        let debug = alloc::format!("{e:?}");
         assert!(debug.contains("InvalidBitpix"));
         assert!(debug.contains("99"));
     }
@@ -146,7 +148,7 @@ mod tests {
     fn std_error_source() {
         use std::error::Error as StdError;
 
-        let e = Error::InvalidHeader;
+        let e = Error::InvalidHeader("test");
         assert!(e.source().is_none());
 
         let io_err = std::io::Error::other("inner");

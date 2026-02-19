@@ -38,7 +38,7 @@ pub fn image_dimensions(hdu: &Hdu) -> Result<Vec<usize>> {
         HduInfo::Primary { naxes, .. } => Ok(naxes.clone()),
         HduInfo::Image { naxes, .. } => Ok(naxes.clone()),
         HduInfo::CompressedImage { znaxes, .. } => Ok(znaxes.clone()),
-        _ => Err(Error::InvalidHeader),
+        _ => Err(Error::InvalidHeader("not an image HDU")),
     }
 }
 
@@ -48,7 +48,7 @@ fn hdu_bitpix(hdu: &Hdu) -> Result<i64> {
     match &hdu.info {
         HduInfo::Primary { bitpix, .. } | HduInfo::Image { bitpix, .. } => Ok(*bitpix),
         HduInfo::CompressedImage { zbitpix, .. } => Ok(*zbitpix),
-        _ => Err(Error::InvalidHeader),
+        _ => Err(Error::InvalidHeader("not an image HDU")),
     }
 }
 
@@ -582,7 +582,7 @@ fn hdu_bitpix_naxes(hdu: &Hdu) -> Result<(i64, &[usize])> {
         HduInfo::CompressedImage {
             zbitpix, znaxes, ..
         } => Ok((*zbitpix, znaxes)),
-        _ => Err(Error::InvalidHeader),
+        _ => Err(Error::InvalidHeader("not an image HDU")),
     }
 }
 
@@ -671,7 +671,9 @@ pub fn read_image_rows(
 ) -> Result<ImageData> {
     let (_, naxes) = hdu_bitpix_naxes(hdu)?;
     if naxes.len() < 2 {
-        return Err(Error::InvalidHeader);
+        return Err(Error::InvalidHeader(
+            "image needs at least 2 axes for row slicing",
+        ));
     }
 
     let row_len = naxes[0];

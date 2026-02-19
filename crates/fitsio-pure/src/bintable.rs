@@ -314,7 +314,7 @@ fn extract_table_info(
             tfields,
             ..
         } => (*naxis1, *naxis2, *tfields),
-        _ => return Err(Error::InvalidHeader),
+        _ => return Err(Error::InvalidHeader("not a binary table HDU")),
     };
 
     if hdu.data_start + naxis1 * naxis2 > fits_data.len() {
@@ -666,14 +666,14 @@ pub fn read_binary_column_vla(
             pcount,
             ..
         } => (*naxis1, *naxis2, *pcount),
-        _ => return Err(Error::InvalidHeader),
+        _ => return Err(Error::InvalidHeader("not a binary table HDU")),
     };
 
     let columns = parse_binary_table_columns(
         &hdu.cards,
         match &hdu.info {
             HduInfo::BinaryTable { tfields, .. } => *tfields,
-            _ => return Err(Error::InvalidHeader),
+            _ => return Err(Error::InvalidHeader("not a binary table HDU")),
         },
     )?;
 

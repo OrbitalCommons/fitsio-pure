@@ -168,23 +168,27 @@ fn compute_data_byte_len(cards: &[Card], is_primary: bool) -> Result<usize> {
         // Product of NAXIS2 * NAXIS3 * ... * NAXISm
         let mut product: usize = 1;
         for &d in &dims[1..] {
-            product = product.checked_mul(d).ok_or(Error::InvalidHeader)?;
+            product = product
+                .checked_mul(d)
+                .ok_or(Error::InvalidHeader("NAXIS overflow"))?;
         }
 
         // Nbytes = bytes_per_value * GCOUNT * (PCOUNT + product)
-        let group_size = pcount.checked_add(product).ok_or(Error::InvalidHeader)?;
+        let group_size = pcount
+            .checked_add(product)
+            .ok_or(Error::InvalidHeader("random groups size overflow"))?;
         let data_bytes = bytes_per_value
             .checked_mul(gcount)
-            .ok_or(Error::InvalidHeader)?
+            .ok_or(Error::InvalidHeader("random groups size overflow"))?
             .checked_mul(group_size)
-            .ok_or(Error::InvalidHeader)?;
+            .ok_or(Error::InvalidHeader("random groups size overflow"))?;
         return Ok(data_bytes);
     }
 
     let total_pixels: usize = dims
         .iter()
         .try_fold(1usize, |acc, &d| acc.checked_mul(d))
-        .ok_or(Error::InvalidHeader)?;
+        .ok_or(Error::InvalidHeader("pixel count overflow"))?;
 
     let pcount = if is_primary {
         0
@@ -207,11 +211,15 @@ fn compute_data_byte_len(cards: &[Card], is_primary: bool) -> Result<usize> {
         .checked_mul(
             total_pixels
                 .checked_mul(bytes_per_value)
-                .ok_or(Error::InvalidHeader)?,
+                .ok_or(Error::InvalidHeader("data size overflow"))?,
         )
-        .ok_or(Error::InvalidHeader)?
-        .checked_add(gcount.checked_mul(pcount).ok_or(Error::InvalidHeader)?)
-        .ok_or(Error::InvalidHeader)?;
+        .ok_or(Error::InvalidHeader("data size overflow"))?
+        .checked_add(
+            gcount
+                .checked_mul(pcount)
+                .ok_or(Error::InvalidHeader("data size overflow"))?,
+        )
+        .ok_or(Error::InvalidHeader("data size overflow"))?;
 
     Ok(data_bytes)
 }
@@ -337,7 +345,15 @@ fn parse_hdu_info(cards: &[Card], is_primary: bool) -> Result<HduInfo> {
                 tfields,
             })
         }
-        _ => Err(Error::UnsupportedExtension),
+        other => Err(Error::UnsupportedExtension(
+            if other.starts_with("A3DTABLE") {
+                "A3DTABLE"
+            } else if other.starts_with("FOREIGN") {
+                "FOREIGN"
+            } else {
+                "unknown XTENSION"
+            },
+        )),
     }
 }
 
@@ -373,7 +389,7 @@ pub fn parse_fits(data: &[u8]) -> Result<FitsData> {
 
         let is_primary = hdus.is_empty() && is_primary_hdu(&cards);
         if hdus.is_empty() && !is_primary {
-            return Err(Error::InvalidHeader);
+            return Err(Error::InvalidHeader("first HDU must be primary"));
         }
 
         let info = match parse_hdu_info(&cards, is_primary) {
@@ -408,7 +424,7 @@ pub fn parse_fits(data: &[u8]) -> Result<FitsData> {
     }
 
     if hdus.is_empty() {
-        return Err(Error::InvalidHeader);
+        return Err(Error::InvalidHeader("no valid HDUs found"));
     }
 
     Ok(FitsData { hdus })

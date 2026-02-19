@@ -50,8 +50,11 @@ mod tests {
 
     #[test]
     fn from_fits_error() {
-        let e: Error = crate::Error::InvalidHeader.into();
-        assert!(matches!(e, Error::Fits(crate::Error::InvalidHeader)));
+        let e: Error = crate::Error::InvalidHeader("test").into();
+        assert!(matches!(
+            e,
+            Error::Fits(crate::Error::InvalidHeader("test"))
+        ));
     }
 
     #[test]
@@ -63,7 +66,7 @@ mod tests {
 
     #[test]
     fn display_fits_error() {
-        let e = Error::Fits(crate::Error::InvalidHeader);
+        let e = Error::Fits(crate::Error::InvalidHeader("test"));
         let s = e.to_string();
         assert!(s.contains("FITS error"));
     }
@@ -89,7 +92,7 @@ mod tests {
         let e = Error::Message("msg".into());
         assert!(e.source().is_none());
 
-        let e = Error::Fits(crate::Error::InvalidHeader);
+        let e = Error::Fits(crate::Error::InvalidHeader("test"));
         assert!(e.source().is_some());
     }
 }

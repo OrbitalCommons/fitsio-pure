@@ -61,7 +61,8 @@ fn parse_column_layout(cards: &[Card], tfields: usize) -> Result<ColumnInfo> {
     for i in 1..=tfields {
         offsets.push(offset);
         let tform_kw = alloc::format!("TFORM{}", i);
-        let tform = card_string_value(cards, &tform_kw).ok_or(Error::InvalidHeader)?;
+        let tform = card_string_value(cards, &tform_kw)
+            .ok_or(Error::InvalidHeader("missing TFORM in compressed image"))?;
         let (repeat, col_type) = crate::bintable::parse_tform_binary(&tform)?;
         let width = match col_type {
             crate::bintable::BinaryColumnType::Bit => repeat.div_ceil(8),
@@ -72,7 +73,8 @@ fn parse_column_layout(cards: &[Card], tfields: usize) -> Result<ColumnInfo> {
         offset += width;
     }
 
-    let compressed_idx = compressed_data_col.ok_or(Error::InvalidHeader)?;
+    let compressed_idx =
+        compressed_data_col.ok_or(Error::InvalidHeader("missing COMPRESSED_DATA column"))?;
 
     Ok(ColumnInfo {
         compressed_data_offset: offsets[compressed_idx],
@@ -164,7 +166,7 @@ impl RiceParams {
                 bbits: 32,
                 bytes_per_val: 4,
             }),
-            _ => Err(Error::UnsupportedCompression),
+            _ => Err(Error::UnsupportedCompression("unsupported Rice bytepix")),
         }
     }
 }
@@ -177,7 +179,7 @@ fn rice_decompress(
     params: &RiceParams,
 ) -> Result<Vec<i32>> {
     if compressed.len() < params.bytes_per_val {
-        return Err(Error::DecompressionError);
+        return Err(Error::DecompressionError("Rice data too short"));
     }
 
     let mut output = Vec::with_capacity(num_pixels);
@@ -192,7 +194,7 @@ fn rice_decompress(
             v as i16 as i32
         }
         4 => read_i32_be(compressed),
-        _ => return Err(Error::DecompressionError),
+        _ => return Err(Error::DecompressionError("unsupported Rice bytepix")),
     };
     pos += params.bytes_per_val;
 
@@ -347,14 +349,14 @@ fn rice_decompress(
 /// Strip the gzip header and trailer, returning the raw deflate payload.
 fn strip_gzip_header(data: &[u8]) -> Result<&[u8]> {
     if data.len() < 18 || data[0] != 0x1f || data[1] != 0x8b || data[2] != 0x08 {
-        return Err(Error::DecompressionError);
+        return Err(Error::DecompressionError("invalid gzip header"));
     }
     let flg = data[3];
     let mut pos = 10usize;
     if flg & 0x04 != 0 {
         // FEXTRA
         if pos + 2 > data.len() {
-            return Err(Error::DecompressionError);
+            return Err(Error::DecompressionError("truncated gzip FEXTRA"));
         }
         let xlen = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
         pos += 2 + xlen;
@@ -378,7 +380,7 @@ fn strip_gzip_header(data: &[u8]) -> Result<&[u8]> {
         pos += 2;
     }
     if pos >= data.len() || data.len() < pos + 8 {
-        return Err(Error::DecompressionError);
+        return Err(Error::DecompressionError("truncated gzip data"));
     }
     // Strip the 8-byte trailer (CRC32 + ISIZE)
     Ok(&data[pos..data.len() - 8])
@@ -390,11 +392,11 @@ fn gzip_decompress(compressed: &[u8]) -> Result<Vec<u8>> {
     if compressed.len() >= 2 && compressed[0] == 0x1f && compressed[1] == 0x8b {
         let deflate_payload = strip_gzip_header(compressed)?;
         return miniz_oxide::inflate::decompress_to_vec(deflate_payload)
-            .map_err(|_| Error::DecompressionError);
+            .map_err(|_| Error::DecompressionError("gzip inflate failed"));
     }
     miniz_oxide::inflate::decompress_to_vec_zlib(compressed)
         .or_else(|_| miniz_oxide::inflate::decompress_to_vec(compressed))
-        .map_err(|_| Error::DecompressionError)
+        .map_err(|_| Error::DecompressionError("zlib/deflate inflate failed"))
 }
 
 /// Convert big-endian decompressed bytes to i16 values.
@@ -477,7 +479,7 @@ pub fn read_tiled_image(fits_data: &[u8], hdu: &Hdu) -> Result<ImageData> {
             *pcount,
             *tfields,
         ),
-        _ => return Err(Error::InvalidHeader),
+        _ => return Err(Error::InvalidHeader("not a compressed image HDU")),
     };
 
     let _ = pcount; // used implicitly via heap
@@ -504,7 +506,9 @@ pub fn read_tiled_image(fits_data: &[u8], hdu: &Hdu) -> Result<ImageData> {
     let is_rice = zcmptype.contains("RICE");
     let is_gzip = zcmptype.contains("GZIP");
     if !is_rice && !is_gzip {
-        return Err(Error::UnsupportedCompression);
+        return Err(Error::UnsupportedCompression(
+            "only RICE_1 and GZIP_1 supported",
+        ));
     }
 
     // Determine tile pixel count
