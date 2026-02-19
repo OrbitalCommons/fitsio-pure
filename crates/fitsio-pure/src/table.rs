@@ -391,7 +391,7 @@ fn ascii_table_dims(hdu: &Hdu) -> Result<(usize, usize, usize)> {
             naxis2,
             tfields,
         } => Ok((*naxis1, *naxis2, *tfields)),
-        _ => Err(Error::InvalidHeader),
+        _ => Err(Error::InvalidHeader("not an ASCII table HDU")),
     }
 }
 

@@ -95,7 +95,7 @@ pub fn parse_card(card_bytes: &[u8; CARD_SIZE]) -> Result<Card> {
     if is_commentary_keyword(&keyword) {
         let text_bytes = &card_bytes[8..CARD_SIZE];
         let text = str::from_utf8(text_bytes)
-            .map_err(|_| Error::InvalidHeader)?
+            .map_err(|_| Error::InvalidHeader("non-UTF8 card data"))?
             .trim_end();
         let comment = if text.is_empty() {
             None
@@ -118,7 +118,8 @@ pub fn parse_card(card_bytes: &[u8; CARD_SIZE]) -> Result<Card> {
                 comment: comment.map(String::from),
             }),
             None => {
-                let field_str = str::from_utf8(value_field).map_err(|_| Error::InvalidHeader)?;
+                let field_str = str::from_utf8(value_field)
+                    .map_err(|_| Error::InvalidHeader("non-UTF8 card data"))?;
                 let comment = extract_comment_from_empty_value(field_str);
                 Ok(Card {
                     keyword,
@@ -130,7 +131,7 @@ pub fn parse_card(card_bytes: &[u8; CARD_SIZE]) -> Result<Card> {
     } else {
         let text_bytes = &card_bytes[8..CARD_SIZE];
         let text = str::from_utf8(text_bytes)
-            .map_err(|_| Error::InvalidHeader)?
+            .map_err(|_| Error::InvalidHeader("non-UTF8 card data"))?
             .trim_end();
         let comment = if text.is_empty() {
             None
@@ -190,7 +191,7 @@ pub fn parse_header_blocks(data: &[u8]) -> Result<Vec<Card>> {
             let card_start = block_start + card_idx * CARD_SIZE;
             let card_bytes: &[u8; CARD_SIZE] = data[card_start..card_start + CARD_SIZE]
                 .try_into()
-                .map_err(|_| Error::InvalidHeader)?;
+                .map_err(|_| Error::InvalidHeader("non-UTF8 card data"))?;
 
             let card = parse_card(card_bytes)?;
             let is_end = card.is_end();
@@ -528,21 +529,21 @@ fn require_keyword_present<'a>(
 fn require_logical(card: &Card, expected: bool) -> Result<()> {
     match &card.value {
         Some(Value::Logical(b)) if *b == expected => Ok(()),
-        _ => Err(Error::InvalidHeader),
+        _ => Err(Error::InvalidHeader("unexpected logical value")),
     }
 }
 
 fn require_integer(card: &Card, expected: i64) -> Result<()> {
     match &card.value {
         Some(Value::Integer(n)) if *n == expected => Ok(()),
-        _ => Err(Error::InvalidHeader),
+        _ => Err(Error::InvalidHeader("unexpected integer value")),
     }
 }
 
 fn require_string(card: &Card, expected: &str) -> Result<()> {
     match &card.value {
         Some(Value::String(s)) if s.trim() == expected => Ok(()),
-        _ => Err(Error::InvalidHeader),
+        _ => Err(Error::InvalidHeader("unexpected string value")),
     }
 }
 
@@ -1264,7 +1265,7 @@ mod validate_tests {
         ];
         assert!(matches!(
             validate_required_keywords(HduType::Primary, &cards),
-            Err(Error::InvalidHeader)
+            Err(Error::InvalidHeader(_))
         ));
     }
 
@@ -1315,7 +1316,7 @@ mod validate_tests {
         ];
         assert!(matches!(
             validate_required_keywords(HduType::Image, &cards),
-            Err(Error::InvalidHeader)
+            Err(Error::InvalidHeader(_))
         ));
     }
 
@@ -1362,7 +1363,7 @@ mod validate_tests {
         ];
         assert!(matches!(
             validate_required_keywords(HduType::AsciiTable, &cards),
-            Err(Error::InvalidHeader)
+            Err(Error::InvalidHeader(_))
         ));
     }
 
@@ -1412,7 +1413,7 @@ mod validate_tests {
         ];
         assert!(matches!(
             validate_required_keywords(HduType::BinaryTable, &cards),
-            Err(Error::InvalidHeader)
+            Err(Error::InvalidHeader(_))
         ));
     }
 
@@ -1430,7 +1431,7 @@ mod validate_tests {
         ];
         assert!(matches!(
             validate_required_keywords(HduType::BinaryTable, &cards),
-            Err(Error::InvalidHeader)
+            Err(Error::InvalidHeader(_))
         ));
     }
 
