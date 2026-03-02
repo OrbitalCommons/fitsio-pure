@@ -17,6 +17,7 @@ jobs:
           submodules: true
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --workspace
+      - run: cargo test --features compat
       - run: cargo test --features array
 
   clippy:
@@ -27,6 +28,7 @@ jobs:
         with:
           components: clippy
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --all-targets --features compat -- -D warnings
       - run: cargo clippy --all-targets --features array -- -D warnings
 
   fmt:
@@ -38,13 +40,14 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
-  wasm32:
+  no-std:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+      - run: cargo build --no-default-features -p fitsio-pure
       - run: cargo build --target wasm32-unknown-unknown -p fitsio-pure
 
   cli:
