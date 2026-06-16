@@ -1,9 +1,37 @@
-use ndarray::{Array, ArrayD};
+use ndarray::{Array, ArrayBase, ArrayD, Data, Dimension};
 
 use super::errors::Result;
 use super::fitsfile::FitsFile;
 use super::hdu::{FitsHdu, HduInfo};
-use super::images::ReadImage;
+use super::images::{ReadImage, WriteImage};
+
+/// Write an n-dimensional array directly to an image HDU (requires the `array`
+/// feature).
+///
+/// The array is flattened in row-major (C) order — which is FITS storage order
+/// (NAXIS1 fastest-varying) — and written via the element type's
+/// [`WriteImage`] impl. The target HDU must already be created with a matching
+/// total pixel count; per `create_image`'s convention the `dimensions` are
+/// given in FITS axis order (NAXIS1 first), i.e. the reverse of the array's
+/// `(.., NAXIS2, NAXIS1)` shape.
+pub trait WriteImageArray {
+    /// Flatten and write this array's elements into `hdu`.
+    fn write_image_array(&self, file: &mut FitsFile, hdu: &FitsHdu) -> Result<()>;
+}
+
+impl<S, D> WriteImageArray for ArrayBase<S, D>
+where
+    S: Data,
+    S::Elem: WriteImage + Clone,
+    D: Dimension,
+{
+    fn write_image_array(&self, file: &mut FitsFile, hdu: &FitsHdu) -> Result<()> {
+        // `iter()` yields elements in logical row-major order regardless of the
+        // array's physical memory layout, giving a NAXIS1-fastest buffer.
+        let flat: Vec<S::Elem> = self.iter().cloned().collect();
+        <S::Elem as WriteImage>::write_image(file, hdu, &flat)
+    }
+}
 
 impl<T> ReadImage for ArrayD<T>
 where
@@ -89,6 +117,74 @@ fn image_shape(file: &FitsFile, hdu: &FitsHdu) -> Result<Vec<usize>> {
 mod tests {
     use super::*;
     use crate::compat::images::{ImageDescription, ImageType, WriteImage};
+    use ndarray::{arr2, Array};
+
+    #[test]
+    fn write_image_array_2d_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("write2d.fits");
+        let mut f = FitsFile::create(&path).open().unwrap();
+
+        // Logical 4-row x 3-col array; values encode row*10 + col.
+        let arr = Array::from_shape_fn((4, 3), |(r, c)| (r * 10 + c) as f32);
+
+        // create_image takes FITS axis order (NAXIS1 first): cols then rows.
+        let desc = ImageDescription {
+            data_type: ImageType::Float,
+            dimensions: vec![3, 4],
+        };
+        let hdu = f.create_image("SCI", &desc).unwrap();
+        arr.write_image_array(&mut f, &hdu).unwrap();
+
+        // Scalar read returns the flat storage buffer (NAXIS1-fastest), which
+        // must equal the array's row-major flatten.
+        let flat: Vec<f32> = f32::read_image(&f, &hdu).unwrap();
+        let expected: Vec<f32> = arr.iter().copied().collect();
+        assert_eq!(flat, expected);
+        assert_eq!(flat[0], 0.0); // (0,0)
+        assert_eq!(flat[11], 32.0); // (3,2)
+    }
+
+    #[test]
+    fn write_image_array_1d_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("write1d.fits");
+        let mut f = FitsFile::create(&path).open().unwrap();
+
+        let arr = Array::from_vec(vec![10i32, 20, 30, 40, 50]);
+        let desc = ImageDescription {
+            data_type: ImageType::Long,
+            dimensions: vec![5],
+        };
+        let hdu = f.create_image("DATA", &desc).unwrap();
+        arr.write_image_array(&mut f, &hdu).unwrap();
+
+        let flat: Vec<i32> = i32::read_image(&f, &hdu).unwrap();
+        assert_eq!(flat, vec![10, 20, 30, 40, 50]);
+    }
+
+    #[test]
+    fn write_image_array_non_contiguous_uses_logical_order() {
+        // A transposed view is Fortran-ordered in memory; `write_image_array`
+        // must still emit logical row-major order.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("write_t.fits");
+        let mut f = FitsFile::create(&path).open().unwrap();
+
+        let base = arr2(&[[1.0f64, 2.0, 3.0], [4.0, 5.0, 6.0]]); // shape (2, 3)
+        let view = base.t(); // shape (3, 2), non-contiguous
+
+        // view logical order: [1,4, 2,5, 3,6]
+        let desc = ImageDescription {
+            data_type: ImageType::Double,
+            dimensions: vec![2, 3], // NAXIS1=2, NAXIS2=3 to match view shape (3, 2)
+        };
+        let hdu = f.create_image("T", &desc).unwrap();
+        view.write_image_array(&mut f, &hdu).unwrap();
+
+        let flat: Vec<f64> = f64::read_image(&f, &hdu).unwrap();
+        assert_eq!(flat, vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+    }
 
     #[test]
     fn read_image_2d_f32() {
