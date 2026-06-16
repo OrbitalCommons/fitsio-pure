@@ -11,7 +11,12 @@ where
 {
     fn read_image(file: &FitsFile, hdu: &FitsHdu) -> Result<Vec<Self>> {
         let data: Vec<T> = T::read_image(file, hdu)?;
-        let shape = image_shape(file, hdu)?;
+        // FITS stores NAXIS1 as the fastest-varying axis, but ndarray is
+        // row-major (last axis fastest). Reverse the FITS axis order so the
+        // flat NAXIS1-fastest buffer maps to a (.., NAXIS2, NAXIS1) shape;
+        // without this, any non-square image is transposed/mis-strided.
+        let mut shape = image_shape(file, hdu)?;
+        shape.reverse();
         let arr = Array::from_shape_vec(shape, data)
             .map_err(|e| super::errors::Error::Message(e.to_string()))?;
         Ok(vec![arr])
@@ -60,7 +65,11 @@ where
         ranges: &[std::ops::Range<usize>],
     ) -> Result<Vec<Self>> {
         let data: Vec<T> = T::read_region(file, hdu, ranges)?;
-        let shape: Vec<usize> = ranges.iter().map(|r| r.end - r.start).collect();
+        // `ranges` are in FITS axis order (NAXIS1 first) and the returned
+        // buffer is NAXIS1-fastest, so reverse to row-major shape to match
+        // `read_image`.
+        let mut shape: Vec<usize> = ranges.iter().map(|r| r.end - r.start).collect();
+        shape.reverse();
         let arr = Array::from_shape_vec(shape, data)
             .map_err(|e| super::errors::Error::Message(e.to_string()))?;
         Ok(vec![arr])
@@ -98,9 +107,10 @@ mod tests {
         let result: Vec<ArrayD<f32>> = ArrayD::<f32>::read_image(&f, &hdu).unwrap();
         assert_eq!(result.len(), 1);
         let arr = &result[0];
-        assert_eq!(arr.shape(), &[3, 4]);
+        // dimensions [3, 4] => NAXIS1=3, NAXIS2=4; shape is (NAXIS2, NAXIS1).
+        assert_eq!(arr.shape(), &[4, 3]);
         assert_eq!(arr[[0, 0]], 0.0);
-        assert_eq!(arr[[2, 3]], 11.0);
+        assert_eq!(arr[[3, 2]], 11.0);
     }
 
     #[test]
@@ -120,9 +130,11 @@ mod tests {
         let result: Vec<ArrayD<f64>> = ArrayD::<f64>::read_image(&f, &hdu).unwrap();
         assert_eq!(result.len(), 1);
         let arr = &result[0];
-        assert_eq!(arr.shape(), &[2, 3, 4]);
+        // dimensions [2, 3, 4] => NAXIS1=2, NAXIS2=3, NAXIS3=4; shape reverses
+        // to (NAXIS3, NAXIS2, NAXIS1).
+        assert_eq!(arr.shape(), &[4, 3, 2]);
         assert_eq!(arr[[0, 0, 0]], 0.0);
-        assert_eq!(arr[[1, 2, 3]], 23.0);
+        assert_eq!(arr[[3, 2, 1]], 23.0);
     }
 
     #[test]
@@ -231,8 +243,48 @@ mod tests {
         let result: Vec<ArrayD<f32>> = ArrayD::<f32>::read_image(&f, &hdu).unwrap();
         assert_eq!(result.len(), 1);
         let arr = &result[0];
-        assert_eq!(arr.shape(), &[2, 3]);
+        // dimensions [2, 3] => NAXIS1=2, NAXIS2=3; shape is (NAXIS2, NAXIS1).
+        assert_eq!(arr.shape(), &[3, 2]);
         assert_eq!(arr[[0, 0]], 1.0);
-        assert_eq!(arr[[1, 2]], 6.0);
+        assert_eq!(arr[[2, 1]], 6.0);
+    }
+
+    #[test]
+    fn read_image_nonsquare_preserves_layout() {
+        // Regression test for the NAXIS axis-order bug: a logical 4-row x 3-col
+        // image must round-trip to shape [4, 3] with element positions intact.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonsquare.fits");
+        let mut f = FitsFile::create(&path).open().unwrap();
+
+        // NAXIS1 = 3 (columns, fastest), NAXIS2 = 4 (rows).
+        let desc = ImageDescription {
+            data_type: ImageType::Float,
+            dimensions: vec![3, 4],
+        };
+        let hdu = f.create_image("SCI", &desc).unwrap();
+
+        // Flat buffer in FITS storage order (NAXIS1-fastest): pixel at logical
+        // (row, col) is stored at row * 3 + col, with value encoded as row*10+col.
+        let mut pixels = vec![0.0f32; 12];
+        for row in 0..4 {
+            for col in 0..3 {
+                pixels[row * 3 + col] = (row * 10 + col) as f32;
+            }
+        }
+        f32::write_image(&mut f, &hdu, &pixels).unwrap();
+
+        let result: Vec<ArrayD<f32>> = ArrayD::<f32>::read_image(&f, &hdu).unwrap();
+        let arr = &result[0];
+        assert_eq!(arr.shape(), &[4, 3], "shape must be (rows, cols)");
+        for row in 0..4 {
+            for col in 0..3 {
+                assert_eq!(
+                    arr[[row, col]],
+                    (row * 10 + col) as f32,
+                    "scrambled element at ({row}, {col})"
+                );
+            }
+        }
     }
 }
