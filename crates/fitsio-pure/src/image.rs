@@ -139,7 +139,7 @@ pub fn read_image_data_into_f32(fits_data: &[u8], hdu: &Hdu, buf: &mut [f32]) ->
     let bitpix = hdu_bitpix(hdu)?;
     let bpp = bytes_per_pixel(bitpix)?;
     let data_len = hdu.data_len;
-    let npixels = if bpp > 0 { data_len / bpp } else { 0 };
+    let npixels = data_len.checked_div(bpp).unwrap_or(0);
 
     if buf.len() != npixels {
         return Err(Error::InvalidValue);
@@ -199,7 +199,7 @@ pub fn read_image_data_into_f64(fits_data: &[u8], hdu: &Hdu, buf: &mut [f64]) ->
     let bitpix = hdu_bitpix(hdu)?;
     let bpp = bytes_per_pixel(bitpix)?;
     let data_len = hdu.data_len;
-    let npixels = if bpp > 0 { data_len / bpp } else { 0 };
+    let npixels = data_len.checked_div(bpp).unwrap_or(0);
 
     if buf.len() != npixels {
         return Err(Error::InvalidValue);
