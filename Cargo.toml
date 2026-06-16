@@ -3,4 +3,9 @@ members = [
     "crates/fitsio-pure",
     "crates/fits-benchmark",
 ]
+# compat-parity links the C cfitsio library to cross-check our pure-Rust
+# implementation; keep it out of the workspace so the main build stays C-free.
+exclude = [
+    "crates/compat-parity",
+]
 resolver = "2"
