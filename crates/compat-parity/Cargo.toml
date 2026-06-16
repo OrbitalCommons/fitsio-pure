@@ -1,0 +1,17 @@
+[package]
+name = "compat-parity"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Differential roundtrip tests comparing fitsio-pure's compat shims against the cfitsio-backed fitsio crate. Not part of the main workspace; requires a system cfitsio."
+
+# Intentionally NOT a member of the root workspace: this crate links the C
+# cfitsio library (via the `fitsio` crate) purely to cross-check our pure-Rust
+# implementation. Keeping it excluded means the main workspace stays C-free.
+
+[dependencies]
+
+[dev-dependencies]
+fitsio = "0.21"
+fitsio-pure = { path = "../fitsio-pure", features = ["compat", "array"] }
+tempfile = "3"
