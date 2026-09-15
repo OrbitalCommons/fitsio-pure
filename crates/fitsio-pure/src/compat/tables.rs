@@ -223,6 +223,21 @@ impl ReadsCol for String {
     }
 }
 
+impl ReadsCol for bool {
+    fn read_col(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<Vec<Self>> {
+        let idx = validate_hdu_index(file, hdu)?;
+        let parsed = file.parsed()?;
+        let core_hdu = &parsed.hdus[idx];
+        let tfields = get_tfields(core_hdu)?;
+        let col_idx = find_column_index(&core_hdu.cards, name, tfields)?;
+        let col_data = crate::bintable::read_binary_column(file.data(), core_hdu, col_idx)?;
+        match col_data {
+            crate::bintable::BinaryColumnData::Logical(v) => Ok(v),
+            _ => Err(Error::Message("column is not boolean type".to_string())),
+        }
+    }
+}
+
 /// Trait for reading a range of rows from a table column.
 pub trait ReadsColRange: Sized {
     fn read_col_range(
