@@ -22,11 +22,17 @@ use crate::value::Value;
 /// Image pixel data extracted from a FITS HDU, typed by BITPIX.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ImageData {
+    /// BITPIX = 8: unsigned 8-bit integers.
     U8(Vec<u8>),
+    /// BITPIX = 16: signed 16-bit integers.
     I16(Vec<i16>),
+    /// BITPIX = 32: signed 32-bit integers.
     I32(Vec<i32>),
+    /// BITPIX = 64: signed 64-bit integers.
     I64(Vec<i64>),
+    /// BITPIX = -32: IEEE 754 single-precision floats.
     F32(Vec<f32>),
+    /// BITPIX = -64: IEEE 754 double-precision floats.
     F64(Vec<f64>),
 }
 
@@ -38,7 +44,7 @@ pub fn image_dimensions(hdu: &Hdu) -> Result<Vec<usize>> {
         HduInfo::Primary { naxes, .. } => Ok(naxes.clone()),
         HduInfo::Image { naxes, .. } => Ok(naxes.clone()),
         HduInfo::CompressedImage { znaxes, .. } => Ok(znaxes.clone()),
-        _ => Err(Error::InvalidHeader),
+        _ => Err(Error::InvalidHeader("not an image HDU")),
     }
 }
 
@@ -48,7 +54,7 @@ fn hdu_bitpix(hdu: &Hdu) -> Result<i64> {
     match &hdu.info {
         HduInfo::Primary { bitpix, .. } | HduInfo::Image { bitpix, .. } => Ok(*bitpix),
         HduInfo::CompressedImage { zbitpix, .. } => Ok(*zbitpix),
-        _ => Err(Error::InvalidHeader),
+        _ => Err(Error::InvalidHeader("not an image HDU")),
     }
 }
 
@@ -133,7 +139,7 @@ pub fn read_image_data_into_f32(fits_data: &[u8], hdu: &Hdu, buf: &mut [f32]) ->
     let bitpix = hdu_bitpix(hdu)?;
     let bpp = bytes_per_pixel(bitpix)?;
     let data_len = hdu.data_len;
-    let npixels = if bpp > 0 { data_len / bpp } else { 0 };
+    let npixels = data_len.checked_div(bpp).unwrap_or(0);
 
     if buf.len() != npixels {
         return Err(Error::InvalidValue);
@@ -193,7 +199,7 @@ pub fn read_image_data_into_f64(fits_data: &[u8], hdu: &Hdu, buf: &mut [f64]) ->
     let bitpix = hdu_bitpix(hdu)?;
     let bpp = bytes_per_pixel(bitpix)?;
     let data_len = hdu.data_len;
-    let npixels = if bpp > 0 { data_len / bpp } else { 0 };
+    let npixels = data_len.checked_div(bpp).unwrap_or(0);
 
     if buf.len() != npixels {
         return Err(Error::InvalidValue);
@@ -582,7 +588,7 @@ fn hdu_bitpix_naxes(hdu: &Hdu) -> Result<(i64, &[usize])> {
         HduInfo::CompressedImage {
             zbitpix, znaxes, ..
         } => Ok((*zbitpix, znaxes)),
-        _ => Err(Error::InvalidHeader),
+        _ => Err(Error::InvalidHeader("not an image HDU")),
     }
 }
 
@@ -671,7 +677,9 @@ pub fn read_image_rows(
 ) -> Result<ImageData> {
     let (_, naxes) = hdu_bitpix_naxes(hdu)?;
     if naxes.len() < 2 {
-        return Err(Error::InvalidHeader);
+        return Err(Error::InvalidHeader(
+            "image needs at least 2 axes for row slicing",
+        ));
     }
 
     let row_len = naxes[0];

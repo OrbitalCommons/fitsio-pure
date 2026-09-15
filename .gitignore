@@ -1,2 +1,4 @@
 /reference/
 /target/
+# compat-parity is excluded from the workspace, so it builds to its own target/
+/crates/compat-parity/target/

@@ -11,8 +11,11 @@ use crate::value::Value;
 /// The type of FITS extension, determined by the XTENSION keyword value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExtensionType {
+    /// XTENSION = 'IMAGE'.
     Image,
+    /// XTENSION = 'TABLE'.
     AsciiTable,
+    /// XTENSION = 'BINTABLE'.
     BinaryTable,
 }
 
@@ -37,12 +40,19 @@ impl ExtensionType {
 /// A parsed FITS extension header with all mandatory keyword values extracted.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExtensionHeader {
+    /// The extension type (IMAGE, TABLE, or BINTABLE).
     pub xtension: ExtensionType,
+    /// Bits per pixel / data value.
     pub bitpix: i64,
+    /// Number of axes.
     pub naxis: usize,
+    /// Axis dimensions (NAXIS1, NAXIS2, ...).
     pub naxes: Vec<usize>,
+    /// Parameter count (heap size for binary tables).
     pub pcount: usize,
+    /// Group count (always 1 for standard extensions).
     pub gcount: usize,
+    /// All header cards from this extension.
     pub cards: Vec<Card>,
 }
 
@@ -109,9 +119,13 @@ fn parse_extension_type(cards: &[Card]) -> Result<ExtensionType> {
             "IMAGE" => Ok(ExtensionType::Image),
             "TABLE" => Ok(ExtensionType::AsciiTable),
             "BINTABLE" => Ok(ExtensionType::BinaryTable),
-            _ => Err(Error::UnsupportedExtension),
+            other => Err(Error::UnsupportedExtension(if other.starts_with("A3D") {
+                "A3DTABLE"
+            } else {
+                "unknown XTENSION"
+            })),
         },
-        _ => Err(Error::UnsupportedExtension),
+        _ => Err(Error::UnsupportedExtension("XTENSION not a string")),
     }
 }
 
@@ -137,7 +151,7 @@ pub fn parse_extension_header(cards: &[Card]) -> Result<ExtensionHeader> {
         let mut kw_buf = [b' '; 8];
         let len = kw_name.len().min(8);
         kw_buf[..len].copy_from_slice(&kw_name.as_bytes()[..len]);
-        let card = find_keyword(cards, &kw_buf).ok_or(Error::InvalidHeader)?;
+        let card = find_keyword(cards, &kw_buf).ok_or(Error::InvalidHeader("missing NAXISn"))?;
         let val = extract_usize(card, "NAXISn")?;
         naxes.push(val);
     }
@@ -451,7 +465,7 @@ mod tests {
         ];
         assert!(matches!(
             parse_extension_header(&cards),
-            Err(Error::UnsupportedExtension)
+            Err(Error::UnsupportedExtension(_))
         ));
     }
 

@@ -93,7 +93,7 @@ pub fn parse_primary_header(cards: &[Card]) -> Result<PrimaryHeader> {
     let naxis_card = find_keyword(cards, &KW_NAXIS).ok_or(Error::MissingKeyword("NAXIS"))?;
     let naxis_val = extract_integer(naxis_card, "NAXIS")?;
     if naxis_val < 0 {
-        return Err(Error::InvalidHeader);
+        return Err(Error::InvalidHeader("negative NAXIS"));
     }
     let naxis = naxis_val as usize;
 
@@ -103,7 +103,7 @@ pub fn parse_primary_header(cards: &[Card]) -> Result<PrimaryHeader> {
         let card = find_keyword(cards, &kw_name).ok_or(Error::MissingKeyword("NAXISn"))?;
         let val = extract_integer(card, "NAXISn")?;
         if val < 0 {
-            return Err(Error::InvalidHeader);
+            return Err(Error::InvalidHeader("negative NAXISn"));
         }
         naxes.push(val as usize);
     }
