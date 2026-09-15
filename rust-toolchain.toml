@@ -1,0 +1,7 @@
+# Pin the toolchain so CI and local builds use a deterministic Rust version.
+# Bumping this is an explicit, reviewable change (new lints land with new
+# versions); see the CI clippy job.
+[toolchain]
+channel = "1.96.0"
+components = ["clippy", "rustfmt"]
+targets = ["wasm32-unknown-unknown"]

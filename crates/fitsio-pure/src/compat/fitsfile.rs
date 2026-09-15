@@ -164,6 +164,21 @@ impl FitsFile {
             1,
         )?;
 
+        // For unsigned pixel types, record the cfitsio storage convention
+        // (signed BITPIX offset by BZERO) so readers recover unsigned values.
+        if let Some(bzero) = desc.data_type.unsigned_bzero() {
+            cards.push(crate::header::Card {
+                keyword: make_keyword("BZERO"),
+                value: Some(bzero),
+                comment: None,
+            });
+            cards.push(crate::header::Card {
+                keyword: make_keyword("BSCALE"),
+                value: Some(crate::value::Value::Integer(1)),
+                comment: None,
+            });
+        }
+
         let extname_card = crate::header::Card {
             keyword: make_keyword("EXTNAME"),
             value: Some(crate::value::Value::String(extname.to_string())),
