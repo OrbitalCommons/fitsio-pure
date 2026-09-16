@@ -75,17 +75,18 @@ impl FitsHdu {
             "HDU index {} out of range",
             self.hdu_index
         )))?;
+        let (bscale, bzero) = crate::image::extract_bscale_bzero(&hdu.cards);
 
         match &hdu.info {
             crate::hdu::HduInfo::Primary { bitpix, naxes } => {
-                let image_type = super::images::ImageType::from_bitpix(*bitpix)?;
+                let image_type = super::images::ImageType::equivalent(*bitpix, bscale, bzero)?;
                 Ok(HduInfo::ImageInfo {
                     shape: naxes.clone(),
                     image_type,
                 })
             }
             crate::hdu::HduInfo::Image { bitpix, naxes } => {
-                let image_type = super::images::ImageType::from_bitpix(*bitpix)?;
+                let image_type = super::images::ImageType::equivalent(*bitpix, bscale, bzero)?;
                 Ok(HduInfo::ImageInfo {
                     shape: naxes.clone(),
                     image_type,
@@ -104,7 +105,7 @@ impl FitsHdu {
                 row_count: *naxis2,
             }),
             crate::hdu::HduInfo::RandomGroups { bitpix, naxes, .. } => {
-                let image_type = super::images::ImageType::from_bitpix(*bitpix)?;
+                let image_type = super::images::ImageType::equivalent(*bitpix, bscale, bzero)?;
                 Ok(HduInfo::ImageInfo {
                     shape: naxes.clone(),
                     image_type,
@@ -113,7 +114,7 @@ impl FitsHdu {
             crate::hdu::HduInfo::CompressedImage {
                 zbitpix, znaxes, ..
             } => {
-                let image_type = super::images::ImageType::from_bitpix(*zbitpix)?;
+                let image_type = super::images::ImageType::equivalent(*zbitpix, bscale, bzero)?;
                 Ok(HduInfo::ImageInfo {
                     shape: znaxes.clone(),
                     image_type,
