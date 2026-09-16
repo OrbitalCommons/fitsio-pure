@@ -435,6 +435,142 @@ fn bytes_to_f64(data: &[u8]) -> Vec<f64> {
 }
 
 // ---------------------------------------------------------------------------
+// Tile geometry
+// ---------------------------------------------------------------------------
+
+/// The tile grid of a compressed image: how `ZTILEn` tiles the `ZNAXISn` image.
+///
+/// Tiles are stored one per binary-table row in raster order, fastest axis
+/// first. A tile is a *rectangle* of the image, so reassembly is a 2-D scatter,
+/// not an append: only when `ZTILE1 == ZNAXIS1` does a tile span whole image
+/// rows and appending happen to give the right answer.
+struct TileGrid {
+    /// Image dimensions (`ZNAXISn`), fastest axis first.
+    dims: Vec<usize>,
+    /// Tile dimensions (`ZTILEn`), fastest axis first.
+    tile: Vec<usize>,
+    /// Number of tiles along each axis.
+    counts: Vec<usize>,
+}
+
+impl TileGrid {
+    fn new(dims: &[usize], tile: &[usize]) -> Self {
+        // A missing or zero ZTILEn defaults to the full axis length, matching
+        // the convention's "one tile spans the axis" reading.
+        let tile: Vec<usize> = dims
+            .iter()
+            .enumerate()
+            .map(|(i, &d)| match tile.get(i) {
+                Some(&t) if t > 0 => t.min(d),
+                _ => d,
+            })
+            .collect();
+        let counts = dims
+            .iter()
+            .zip(&tile)
+            .map(|(&d, &t)| d.div_ceil(t))
+            .collect();
+        Self {
+            dims: dims.to_vec(),
+            tile,
+            counts,
+        }
+    }
+
+    /// Total number of tiles in the grid.
+    fn len(&self) -> usize {
+        self.counts.iter().product()
+    }
+
+    /// Grid coordinate of tile `index`, fastest axis first.
+    fn coord(&self, index: usize) -> Vec<usize> {
+        let mut rest = index;
+        self.counts
+            .iter()
+            .map(|&c| {
+                let v = rest % c;
+                rest /= c;
+                v
+            })
+            .collect()
+    }
+
+    /// Extent of tile `index` along each axis. Edge tiles are *clipped* to the
+    /// image, so they hold fewer pixels than `ZTILEn` implies.
+    fn extent(&self, index: usize) -> Vec<usize> {
+        let coord = self.coord(index);
+        coord
+            .iter()
+            .enumerate()
+            .map(|(ax, &c)| {
+                let start = c * self.tile[ax];
+                self.tile[ax].min(self.dims[ax].saturating_sub(start))
+            })
+            .collect()
+    }
+
+    /// Number of pixels actually stored in tile `index`.
+    fn tile_pixels(&self, index: usize) -> usize {
+        self.extent(index).iter().product()
+    }
+
+    /// Scatter one decoded tile into the flat image buffer.
+    ///
+    /// The fastest axis of a tile is contiguous in both source and destination,
+    /// so each tile row is a single copy; the loop walks the higher axes.
+    fn blit<T: Copy>(&self, index: usize, src: &[T], dst: &mut [T]) {
+        let coord = self.coord(index);
+        let extent = self.extent(index);
+        let run = extent[0].min(src.len());
+        if run == 0 {
+            return;
+        }
+        // Strides of the flat image buffer, fastest axis first.
+        let mut strides = Vec::with_capacity(self.dims.len());
+        let mut s = 1usize;
+        for &d in &self.dims {
+            strides.push(s);
+            s *= d;
+        }
+        // Offset of the tile's origin in the image.
+        let origin: usize = coord
+            .iter()
+            .enumerate()
+            .map(|(ax, &c)| c * self.tile[ax] * strides[ax])
+            .sum();
+
+        let rows: usize = extent[1..].iter().product();
+        let mut higher = alloc::vec![0usize; extent.len().saturating_sub(1)];
+        for r in 0..rows {
+            let src_off = r * extent[0];
+            if src_off >= src.len() {
+                break;
+            }
+            let dst_off = origin
+                + higher
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &h)| h * strides[i + 1])
+                    .sum::<usize>();
+            let n = run
+                .min(src.len() - src_off)
+                .min(dst.len().saturating_sub(dst_off));
+            if n > 0 {
+                dst[dst_off..dst_off + n].copy_from_slice(&src[src_off..src_off + n]);
+            }
+            // Odometer over the higher axes of this tile.
+            for (i, h) in higher.iter_mut().enumerate() {
+                *h += 1;
+                if *h < extent[i + 1] {
+                    break;
+                }
+                *h = 0;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Top-level decompression
 // ---------------------------------------------------------------------------
 
@@ -511,8 +647,7 @@ pub fn read_tiled_image(fits_data: &[u8], hdu: &Hdu) -> Result<ImageData> {
         ));
     }
 
-    // Determine tile pixel count
-    let tile_pixels: usize = ztile.iter().copied().product();
+    let grid = TileGrid::new(znaxes, ztile);
 
     // For float types with quantization, we need ZSCALE/ZZERO
     let is_quantized = (zbitpix == -32 || zbitpix == -64)
@@ -526,7 +661,7 @@ pub fn read_tiled_image(fits_data: &[u8], hdu: &Hdu) -> Result<ImageData> {
             hdu,
             zbitpix,
             total_pixels,
-            tile_pixels,
+            &grid,
             naxis1,
             naxis2,
             blocksize,
@@ -540,7 +675,7 @@ pub fn read_tiled_image(fits_data: &[u8], hdu: &Hdu) -> Result<ImageData> {
             hdu,
             zbitpix,
             total_pixels,
-            tile_pixels,
+            &grid,
             naxis1,
             naxis2,
             &col_info,
@@ -549,13 +684,52 @@ pub fn read_tiled_image(fits_data: &[u8], hdu: &Hdu) -> Result<ImageData> {
     }
 }
 
+/// Decode every tile and scatter it into a flat image buffer.
+///
+/// `decode` turns one tile's compressed bytes into that tile's pixel values,
+/// in tile-local raster order; `TileGrid::blit` places them at the tile's
+/// rectangle in the image. Reassembly is a scatter rather than an append
+/// because a tile is a rectangle: appending is only correct in the special
+/// case `ZTILE1 == ZNAXIS1`, where a tile happens to span whole image rows.
+#[allow(clippy::too_many_arguments)]
+fn scatter_tiles<T, F>(
+    fits_data: &[u8],
+    hdu: &Hdu,
+    total_pixels: usize,
+    grid: &TileGrid,
+    naxis1: usize,
+    naxis2: usize,
+    col_info: &ColumnInfo,
+    fill: T,
+    mut decode: F,
+) -> Result<Vec<T>>
+where
+    T: Copy,
+    F: FnMut(usize, &[u8], usize, usize) -> Result<Vec<T>>,
+{
+    let mut output = alloc::vec![fill; total_pixels];
+    for row in 0..grid.len().min(naxis2) {
+        let (tile_data, tile_count) = extract_tile_bytes(
+            fits_data,
+            hdu.data_start,
+            naxis1,
+            naxis2,
+            row,
+            col_info.compressed_data_offset,
+        )?;
+        let vals = decode(row, tile_data, tile_count, grid.tile_pixels(row))?;
+        grid.blit(row, &vals, &mut output);
+    }
+    Ok(output)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn decompress_rice_tiles(
     fits_data: &[u8],
     hdu: &Hdu,
     zbitpix: i64,
     total_pixels: usize,
-    tile_pixels: usize,
+    grid: &TileGrid,
     naxis1: usize,
     naxis2: usize,
     blocksize: usize,
@@ -563,136 +737,66 @@ fn decompress_rice_tiles(
     col_info: &ColumnInfo,
     is_quantized: bool,
 ) -> Result<ImageData> {
+    // Per-tile ZSCALE/ZZERO, read from the tile's own binary-table row.
+    let quant = |row: usize| {
+        read_zscale_zzero(
+            fits_data,
+            hdu.data_start,
+            naxis1,
+            row,
+            col_info.zscale_offset.unwrap(),
+            col_info.zzero_offset.unwrap(),
+        )
+    };
+
+    macro_rules! scatter {
+        ($fill:expr, $conv:expr) => {
+            scatter_tiles(
+                fits_data,
+                hdu,
+                total_pixels,
+                grid,
+                naxis1,
+                naxis2,
+                col_info,
+                $fill,
+                |row, tile_data, _tile_count, pixels_in_tile| {
+                    let vals = rice_decompress(tile_data, pixels_in_tile, blocksize, params)?;
+                    Ok($conv(row, vals))
+                },
+            )?
+        };
+    }
+
     if is_quantized && zbitpix == -32 {
-        let mut output = Vec::with_capacity(total_pixels);
-        for row in 0..naxis2 {
-            let (compressed, _tile_count) = extract_tile_bytes(
-                fits_data,
-                hdu.data_start,
-                naxis1,
-                naxis2,
-                row,
-                col_info.compressed_data_offset,
-            )?;
-            let pixels_in_tile = tile_pixels.min(total_pixels - output.len());
-            let int_vals = rice_decompress(compressed, pixels_in_tile, blocksize, params)?;
-
-            let (scale, zero) = read_zscale_zzero(
-                fits_data,
-                hdu.data_start,
-                naxis1,
-                row,
-                col_info.zscale_offset.unwrap(),
-                col_info.zzero_offset.unwrap(),
-            );
-            for &iv in &int_vals {
-                output.push((zero + scale * iv as f64) as f32);
-            }
-        }
-        Ok(ImageData::F32(output))
+        Ok(ImageData::F32(scatter!(0.0f32, |row, vals: Vec<i32>| {
+            let (scale, zero) = quant(row);
+            vals.iter()
+                .map(|&iv| (zero + scale * iv as f64) as f32)
+                .collect::<Vec<f32>>()
+        })))
     } else if is_quantized && zbitpix == -64 {
-        let mut output = Vec::with_capacity(total_pixels);
-        for row in 0..naxis2 {
-            let (compressed, _tile_count) = extract_tile_bytes(
-                fits_data,
-                hdu.data_start,
-                naxis1,
-                naxis2,
-                row,
-                col_info.compressed_data_offset,
-            )?;
-            let pixels_in_tile = tile_pixels.min(total_pixels - output.len());
-            let int_vals = rice_decompress(compressed, pixels_in_tile, blocksize, params)?;
-
-            let (scale, zero) = read_zscale_zzero(
-                fits_data,
-                hdu.data_start,
-                naxis1,
-                row,
-                col_info.zscale_offset.unwrap(),
-                col_info.zzero_offset.unwrap(),
-            );
-            for &iv in &int_vals {
-                output.push(zero + scale * iv as f64);
-            }
-        }
-        Ok(ImageData::F64(output))
+        Ok(ImageData::F64(scatter!(0.0f64, |row, vals: Vec<i32>| {
+            let (scale, zero) = quant(row);
+            vals.iter()
+                .map(|&iv| zero + scale * iv as f64)
+                .collect::<Vec<f64>>()
+        })))
     } else {
         match zbitpix {
-            8 => {
-                let mut output = Vec::with_capacity(total_pixels);
-                for row in 0..naxis2 {
-                    let (compressed, _tile_count) = extract_tile_bytes(
-                        fits_data,
-                        hdu.data_start,
-                        naxis1,
-                        naxis2,
-                        row,
-                        col_info.compressed_data_offset,
-                    )?;
-                    let pixels_in_tile = tile_pixels.min(total_pixels - output.len());
-                    let vals = rice_decompress(compressed, pixels_in_tile, blocksize, params)?;
-                    for &v in &vals {
-                        output.push(v as u8);
-                    }
-                }
-                Ok(ImageData::U8(output))
-            }
-            16 => {
-                let mut output = Vec::with_capacity(total_pixels);
-                for row in 0..naxis2 {
-                    let (compressed, _tile_count) = extract_tile_bytes(
-                        fits_data,
-                        hdu.data_start,
-                        naxis1,
-                        naxis2,
-                        row,
-                        col_info.compressed_data_offset,
-                    )?;
-                    let pixels_in_tile = tile_pixels.min(total_pixels - output.len());
-                    let vals = rice_decompress(compressed, pixels_in_tile, blocksize, params)?;
-                    for &v in &vals {
-                        output.push(v as i16);
-                    }
-                }
-                Ok(ImageData::I16(output))
-            }
-            32 => {
-                let mut output = Vec::with_capacity(total_pixels);
-                for row in 0..naxis2 {
-                    let (compressed, _tile_count) = extract_tile_bytes(
-                        fits_data,
-                        hdu.data_start,
-                        naxis1,
-                        naxis2,
-                        row,
-                        col_info.compressed_data_offset,
-                    )?;
-                    let pixels_in_tile = tile_pixels.min(total_pixels - output.len());
-                    let vals = rice_decompress(compressed, pixels_in_tile, blocksize, params)?;
-                    output.extend_from_slice(&vals);
-                }
-                Ok(ImageData::I32(output))
-            }
-            64 => {
-                let mut output = Vec::with_capacity(total_pixels);
-                for row in 0..naxis2 {
-                    let (compressed, _tile_count) = extract_tile_bytes(
-                        fits_data,
-                        hdu.data_start,
-                        naxis1,
-                        naxis2,
-                        row,
-                        col_info.compressed_data_offset,
-                    )?;
-                    let pixels_in_tile = tile_pixels.min(total_pixels - output.len());
-                    let vals = rice_decompress(compressed, pixels_in_tile, blocksize, params)?;
-                    for &v in &vals {
-                        output.push(v as i64);
-                    }
-                }
-                Ok(ImageData::I64(output))
-            }
+            8 => Ok(ImageData::U8(scatter!(0u8, |_row, vals: Vec<i32>| vals
+                .iter()
+                .map(|&v| v as u8)
+                .collect::<Vec<u8>>()))),
+            16 => Ok(ImageData::I16(scatter!(0i16, |_row, vals: Vec<i32>| vals
+                .iter()
+                .map(|&v| v as i16)
+                .collect::<Vec<i16>>()))),
+            32 => Ok(ImageData::I32(scatter!(0i32, |_row, vals: Vec<i32>| vals))),
+            64 => Ok(ImageData::I64(scatter!(0i64, |_row, vals: Vec<i32>| vals
+                .iter()
+                .map(|&v| v as i64)
+                .collect::<Vec<i64>>()))),
             other => Err(Error::InvalidBitpix(other)),
         }
     }
@@ -704,203 +808,106 @@ fn decompress_gzip_tiles(
     hdu: &Hdu,
     zbitpix: i64,
     total_pixels: usize,
-    tile_pixels: usize,
+    grid: &TileGrid,
     naxis1: usize,
     naxis2: usize,
     col_info: &ColumnInfo,
     is_quantized: bool,
 ) -> Result<ImageData> {
+    let quant = |row: usize| {
+        read_zscale_zzero(
+            fits_data,
+            hdu.data_start,
+            naxis1,
+            row,
+            col_info.zscale_offset.unwrap(),
+            col_info.zzero_offset.unwrap(),
+        )
+    };
+
+    macro_rules! scatter {
+        ($fill:expr, $conv:expr) => {
+            scatter_tiles(
+                fits_data,
+                hdu,
+                total_pixels,
+                grid,
+                naxis1,
+                naxis2,
+                col_info,
+                $fill,
+                |row, tile_data, tile_count, pixels_in_tile| {
+                    let raw = gzip_decompress(&tile_data[..tile_count])?;
+                    Ok($conv(row, raw, pixels_in_tile))
+                },
+            )?
+        };
+    }
+
     if is_quantized && zbitpix == -32 {
-        let mut output = Vec::with_capacity(total_pixels);
-        for row in 0..naxis2 {
-            let (tile_data, tile_count) = extract_tile_bytes(
-                fits_data,
-                hdu.data_start,
-                naxis1,
-                naxis2,
-                row,
-                col_info.compressed_data_offset,
-            )?;
-            let raw = gzip_decompress(&tile_data[..tile_count])?;
-            let int_vals = bytes_to_i32(&raw);
-
-            let (scale, zero) = read_zscale_zzero(
-                fits_data,
-                hdu.data_start,
-                naxis1,
-                row,
-                col_info.zscale_offset.unwrap(),
-                col_info.zzero_offset.unwrap(),
-            );
-            let count = int_vals
-                .len()
-                .min(tile_pixels)
-                .min(total_pixels - output.len());
-            for &iv in &int_vals[..count] {
-                output.push((zero + scale * iv as f64) as f32);
+        Ok(ImageData::F32(scatter!(
+            0.0f32,
+            |row, raw: Vec<u8>, _n: usize| {
+                let (scale, zero) = quant(row);
+                bytes_to_i32(&raw)
+                    .iter()
+                    .map(|&iv| (zero + scale * iv as f64) as f32)
+                    .collect::<Vec<f32>>()
             }
-        }
-        Ok(ImageData::F32(output))
+        )))
     } else if is_quantized && zbitpix == -64 {
-        let mut output = Vec::with_capacity(total_pixels);
-        for row in 0..naxis2 {
-            let (tile_data, tile_count) = extract_tile_bytes(
-                fits_data,
-                hdu.data_start,
-                naxis1,
-                naxis2,
-                row,
-                col_info.compressed_data_offset,
-            )?;
-            let raw = gzip_decompress(&tile_data[..tile_count])?;
-            let int_vals = bytes_to_i32(&raw);
-
-            let (scale, zero) = read_zscale_zzero(
-                fits_data,
-                hdu.data_start,
-                naxis1,
-                row,
-                col_info.zscale_offset.unwrap(),
-                col_info.zzero_offset.unwrap(),
-            );
-            let count = int_vals
-                .len()
-                .min(tile_pixels)
-                .min(total_pixels - output.len());
-            for &iv in &int_vals[..count] {
-                output.push(zero + scale * iv as f64);
+        Ok(ImageData::F64(scatter!(
+            0.0f64,
+            |row, raw: Vec<u8>, _n: usize| {
+                let (scale, zero) = quant(row);
+                bytes_to_i32(&raw)
+                    .iter()
+                    .map(|&iv| zero + scale * iv as f64)
+                    .collect::<Vec<f64>>()
             }
-        }
-        Ok(ImageData::F64(output))
+        )))
     } else {
         match zbitpix {
-            8 => {
-                let mut output = Vec::with_capacity(total_pixels);
-                for row in 0..naxis2 {
-                    let (tile_data, tile_count) = extract_tile_bytes(
-                        fits_data,
-                        hdu.data_start,
-                        naxis1,
-                        naxis2,
-                        row,
-                        col_info.compressed_data_offset,
-                    )?;
-                    let raw = gzip_decompress(&tile_data[..tile_count])?;
-                    let remaining = total_pixels - output.len();
-                    if raw.len() == tile_pixels * 4 {
-                        // cfitsio encodes as i32; truncate to u8
-                        let vals = bytes_to_i32(&raw);
-                        let count = vals.len().min(tile_pixels).min(remaining);
-                        for &v in &vals[..count] {
-                            output.push(v as u8);
-                        }
-                    } else {
-                        let count = raw.len().min(tile_pixels).min(remaining);
-                        output.extend_from_slice(&raw[..count]);
-                    }
+            // cfitsio may encode 8- and 16-bit GZIP tiles as i32; detect by
+            // decompressed length and narrow, otherwise take the bytes as-is.
+            8 => Ok(ImageData::U8(scatter!(
+                0u8,
+                |_row, raw: Vec<u8>, n: usize| if raw.len() == n * 4 {
+                    bytes_to_i32(&raw)
+                        .iter()
+                        .map(|&v| v as u8)
+                        .collect::<Vec<u8>>()
+                } else {
+                    raw
                 }
-                Ok(ImageData::U8(output))
-            }
-            16 => {
-                let mut output = Vec::with_capacity(total_pixels);
-                for row in 0..naxis2 {
-                    let (tile_data, tile_count) = extract_tile_bytes(
-                        fits_data,
-                        hdu.data_start,
-                        naxis1,
-                        naxis2,
-                        row,
-                        col_info.compressed_data_offset,
-                    )?;
-                    let raw = gzip_decompress(&tile_data[..tile_count])?;
-                    let remaining = total_pixels - output.len();
-                    if raw.len() == tile_pixels * 4 {
-                        // cfitsio encodes as i32; truncate to i16
-                        let vals = bytes_to_i32(&raw);
-                        let count = vals.len().min(tile_pixels).min(remaining);
-                        for &v in &vals[..count] {
-                            output.push(v as i16);
-                        }
-                    } else {
-                        let vals = bytes_to_i16(&raw);
-                        let count = vals.len().min(tile_pixels).min(remaining);
-                        output.extend_from_slice(&vals[..count]);
-                    }
+            ))),
+            16 => Ok(ImageData::I16(scatter!(
+                0i16,
+                |_row, raw: Vec<u8>, n: usize| if raw.len() == n * 4 {
+                    bytes_to_i32(&raw)
+                        .iter()
+                        .map(|&v| v as i16)
+                        .collect::<Vec<i16>>()
+                } else {
+                    bytes_to_i16(&raw)
                 }
-                Ok(ImageData::I16(output))
-            }
-            32 => {
-                let mut output = Vec::with_capacity(total_pixels);
-                for row in 0..naxis2 {
-                    let (tile_data, tile_count) = extract_tile_bytes(
-                        fits_data,
-                        hdu.data_start,
-                        naxis1,
-                        naxis2,
-                        row,
-                        col_info.compressed_data_offset,
-                    )?;
-                    let raw = gzip_decompress(&tile_data[..tile_count])?;
-                    let vals = bytes_to_i32(&raw);
-                    let count = vals.len().min(tile_pixels).min(total_pixels - output.len());
-                    output.extend_from_slice(&vals[..count]);
-                }
-                Ok(ImageData::I32(output))
-            }
-            64 => {
-                let mut output = Vec::with_capacity(total_pixels);
-                for row in 0..naxis2 {
-                    let (tile_data, tile_count) = extract_tile_bytes(
-                        fits_data,
-                        hdu.data_start,
-                        naxis1,
-                        naxis2,
-                        row,
-                        col_info.compressed_data_offset,
-                    )?;
-                    let raw = gzip_decompress(&tile_data[..tile_count])?;
-                    let vals = bytes_to_i64(&raw);
-                    let count = vals.len().min(tile_pixels).min(total_pixels - output.len());
-                    output.extend_from_slice(&vals[..count]);
-                }
-                Ok(ImageData::I64(output))
-            }
-            -32 => {
-                let mut output = Vec::with_capacity(total_pixels);
-                for row in 0..naxis2 {
-                    let (tile_data, tile_count) = extract_tile_bytes(
-                        fits_data,
-                        hdu.data_start,
-                        naxis1,
-                        naxis2,
-                        row,
-                        col_info.compressed_data_offset,
-                    )?;
-                    let raw = gzip_decompress(&tile_data[..tile_count])?;
-                    let vals = bytes_to_f32(&raw);
-                    let count = vals.len().min(tile_pixels).min(total_pixels - output.len());
-                    output.extend_from_slice(&vals[..count]);
-                }
-                Ok(ImageData::F32(output))
-            }
-            -64 => {
-                let mut output = Vec::with_capacity(total_pixels);
-                for row in 0..naxis2 {
-                    let (tile_data, tile_count) = extract_tile_bytes(
-                        fits_data,
-                        hdu.data_start,
-                        naxis1,
-                        naxis2,
-                        row,
-                        col_info.compressed_data_offset,
-                    )?;
-                    let raw = gzip_decompress(&tile_data[..tile_count])?;
-                    let vals = bytes_to_f64(&raw);
-                    let count = vals.len().min(tile_pixels).min(total_pixels - output.len());
-                    output.extend_from_slice(&vals[..count]);
-                }
-                Ok(ImageData::F64(output))
-            }
+            ))),
+            32 => Ok(ImageData::I32(scatter!(
+                0i32,
+                |_row, raw: Vec<u8>, _n: usize| bytes_to_i32(&raw)
+            ))),
+            64 => Ok(ImageData::I64(scatter!(
+                0i64,
+                |_row, raw: Vec<u8>, _n: usize| bytes_to_i64(&raw)
+            ))),
+            -32 => Ok(ImageData::F32(scatter!(
+                0.0f32,
+                |_row, raw: Vec<u8>, _n: usize| bytes_to_f32(&raw)
+            ))),
+            -64 => Ok(ImageData::F64(scatter!(
+                0.0f64,
+                |_row, raw: Vec<u8>, _n: usize| bytes_to_f64(&raw)
+            ))),
             other => Err(Error::InvalidBitpix(other)),
         }
     }
