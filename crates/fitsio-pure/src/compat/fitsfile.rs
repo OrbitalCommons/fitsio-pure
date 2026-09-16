@@ -1,5 +1,5 @@
-use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use super::errors::{Error, Result};
 use super::hdu::FitsHdu;
@@ -13,11 +13,15 @@ pub enum FileOpenMode {
 }
 
 /// An in-memory representation of an open FITS file.
+///
+/// The parse cache is a [`OnceLock`], so `&FitsFile` is `Sync` and one open
+/// file can be shared across threads (reading every column of a table in
+/// parallel, say) instead of reopening and reparsing the file per thread.
 pub struct FitsFile {
     data: Vec<u8>,
     filename: PathBuf,
     mode: FileOpenMode,
-    cached_parse: RefCell<Option<crate::hdu::FitsData>>,
+    cached_parse: OnceLock<crate::hdu::FitsData>,
 }
 
 /// Builder for creating a new FITS file.
@@ -80,7 +84,7 @@ impl FitsFile {
             data,
             filename: path.as_ref().to_path_buf(),
             mode: FileOpenMode::ReadOnly,
-            cached_parse: RefCell::new(None),
+            cached_parse: OnceLock::new(),
         })
     }
 
@@ -91,28 +95,28 @@ impl FitsFile {
             data,
             filename: path.as_ref().to_path_buf(),
             mode: FileOpenMode::ReadWrite,
-            cached_parse: RefCell::new(None),
+            cached_parse: OnceLock::new(),
         })
     }
 
     /// Return the cached parse of the FITS data, parsing if needed.
-    pub fn parsed(&self) -> Result<std::cell::Ref<'_, crate::hdu::FitsData>> {
-        {
-            let cache = self.cached_parse.borrow();
-            if cache.is_some() {
-                return Ok(std::cell::Ref::map(cache, |c| c.as_ref().unwrap()));
-            }
+    pub fn parsed(&self) -> Result<&crate::hdu::FitsData> {
+        if let Some(cached) = self.cached_parse.get() {
+            return Ok(cached);
         }
         let parsed = crate::hdu::parse_fits(&self.data)?;
-        *self.cached_parse.borrow_mut() = Some(parsed);
-        Ok(std::cell::Ref::map(self.cached_parse.borrow(), |c| {
-            c.as_ref().unwrap()
-        }))
+        // A concurrent caller may have won the race; either parse is equivalent,
+        // so keep whichever landed first.
+        let _ = self.cached_parse.set(parsed);
+        Ok(self
+            .cached_parse
+            .get()
+            .expect("cache is populated immediately above"))
     }
 
     /// Invalidate the cached parse (called after data mutations).
-    fn invalidate_cache(&self) {
-        *self.cached_parse.borrow_mut() = None;
+    fn invalidate_cache(&mut self) {
+        self.cached_parse.take();
     }
 
     /// Return a builder for creating a new FITS file.
@@ -132,7 +136,7 @@ impl FitsFile {
     pub fn hdu<D: DescribesHdu>(&self, desc: D) -> Result<FitsHdu> {
         let fits_data = self.parsed()?;
         let (idx, _) = desc
-            .get_hdu(&fits_data)
+            .get_hdu(fits_data)
             .ok_or(Error::Message("HDU not found".to_string()))?;
         Ok(FitsHdu { hdu_index: idx })
     }
@@ -312,7 +316,7 @@ impl NewFitsFile {
             data: header_bytes,
             filename: self.path,
             mode: FileOpenMode::ReadWrite,
-            cached_parse: RefCell::new(None),
+            cached_parse: OnceLock::new(),
         })
     }
 }
@@ -327,6 +331,17 @@ fn make_keyword(name: &str) -> [u8; 8] {
 
 #[cfg(test)]
 mod tests {
+    fn assert_send<T: Send>() {}
+    fn assert_sync<T: Sync>() {}
+
+    /// `&FitsFile` crossing a thread boundary is the whole point of the
+    /// `OnceLock` cache; a `RefCell` here would fail to compile.
+    #[test]
+    fn fits_file_is_send_and_sync() {
+        assert_send::<super::FitsFile>();
+        assert_sync::<super::FitsFile>();
+    }
+
     use super::*;
     use crate::compat::images::ImageType;
 

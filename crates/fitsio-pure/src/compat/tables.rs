@@ -516,10 +516,8 @@ fn write_col_inner(
         (idx, col_idx)
     };
 
-    // We need to get hdu info without borrowing file immutably
-    let parsed = file.parsed()?;
-    let core_hdu = parsed.hdus[idx].clone();
-    drop(parsed);
+    // Clone the HDU so nothing borrows `file` when we write back below.
+    let core_hdu = file.parsed()?.hdus[idx].clone();
 
     let mut data = file.data().to_vec();
     crate::bintable::write_binary_column(&mut data, &core_hdu, col_idx, col_data)?;

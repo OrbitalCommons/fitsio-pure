@@ -579,7 +579,6 @@ mod tests {
         let parsed = f.parsed().unwrap();
         let raw = crate::image::read_image_data(f.data(), &parsed.hdus[hdu.hdu_index]).unwrap();
         assert_eq!(raw, crate::image::ImageData::I16(vec![-32768, 0, 32767]));
-        drop(parsed);
 
         // Like cfitsio, an i16 read applies BZERO, so 32768 and 65535 overflow.
         assert!(i16::read_image(&f, &hdu).is_err());
