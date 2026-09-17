@@ -748,6 +748,7 @@ fn decompress_rice_tiles(
             col_info.zzero_offset.unwrap(),
         )
     };
+    let dither = Dither::from_cards(&hdu.cards);
 
     macro_rules! scatter {
         ($fill:expr, $conv:expr) => {
@@ -771,16 +772,16 @@ fn decompress_rice_tiles(
     if is_quantized && zbitpix == -32 {
         Ok(ImageData::F32(scatter!(0.0f32, |row, vals: Vec<i32>| {
             let (scale, zero) = quant(row);
-            vals.iter()
-                .map(|&iv| (zero + scale * iv as f64) as f32)
+            dither
+                .dequantize(row, &vals, scale, zero)
+                .iter()
+                .map(|&v| v as f32)
                 .collect::<Vec<f32>>()
         })))
     } else if is_quantized && zbitpix == -64 {
         Ok(ImageData::F64(scatter!(0.0f64, |row, vals: Vec<i32>| {
             let (scale, zero) = quant(row);
-            vals.iter()
-                .map(|&iv| zero + scale * iv as f64)
-                .collect::<Vec<f64>>()
+            dither.dequantize(row, &vals, scale, zero)
         })))
     } else {
         match zbitpix {
@@ -824,6 +825,7 @@ fn decompress_gzip_tiles(
             col_info.zzero_offset.unwrap(),
         )
     };
+    let dither = Dither::from_cards(&hdu.cards);
 
     macro_rules! scatter {
         ($fill:expr, $conv:expr) => {
@@ -849,9 +851,10 @@ fn decompress_gzip_tiles(
             0.0f32,
             |row, raw: Vec<u8>, _n: usize| {
                 let (scale, zero) = quant(row);
-                bytes_to_i32(&raw)
+                dither
+                    .dequantize(row, &bytes_to_i32(&raw), scale, zero)
                     .iter()
-                    .map(|&iv| (zero + scale * iv as f64) as f32)
+                    .map(|&v| v as f32)
                     .collect::<Vec<f32>>()
             }
         )))
@@ -860,10 +863,7 @@ fn decompress_gzip_tiles(
             0.0f64,
             |row, raw: Vec<u8>, _n: usize| {
                 let (scale, zero) = quant(row);
-                bytes_to_i32(&raw)
-                    .iter()
-                    .map(|&iv| zero + scale * iv as f64)
-                    .collect::<Vec<f64>>()
+                dither.dequantize(row, &bytes_to_i32(&raw), scale, zero)
             }
         )))
     } else {
@@ -911,6 +911,92 @@ fn decompress_gzip_tiles(
             other => Err(Error::InvalidBitpix(other)),
         }
     }
+}
+
+/// Length of cfitsio's dither random table (`N_RANDOM`).
+const N_RANDOM: usize = 10_000;
+
+/// Quantized value that `SUBTRACTIVE_DITHER_2` reserves for an exact 0.0.
+const ZERO_VALUE: i32 = -2_147_483_646;
+
+/// How quantized floats were dithered, from `ZQUANTIZ` and `ZDITHER0`.
+enum Dither {
+    None,
+    Subtractive {
+        /// `ZDITHER0`, the 1-based seed of the first tile.
+        seed: usize,
+        /// `SUBTRACTIVE_DITHER_2`, which keeps exact zeros undithered.
+        keep_zero: bool,
+        table: Vec<f32>,
+    },
+}
+
+impl Dither {
+    fn from_cards(cards: &[Card]) -> Self {
+        let method = card_string_value(cards, "ZQUANTIZ");
+        let keep_zero = match method.as_deref() {
+            Some("SUBTRACTIVE_DITHER_1") => false,
+            Some("SUBTRACTIVE_DITHER_2") => true,
+            _ => return Dither::None,
+        };
+        let seed = cards
+            .iter()
+            .find(|c| c.keyword_str() == "ZDITHER0")
+            .and_then(|c| match c.value {
+                Some(Value::Integer(n)) if n > 0 => Some(n as usize),
+                _ => None,
+            })
+            .unwrap_or(1);
+        Dither::Subtractive {
+            seed,
+            keep_zero,
+            table: dither_table(),
+        }
+    }
+
+    /// Restore physical values for one tile (0-based `tile`).
+    fn dequantize(&self, tile: usize, vals: &[i32], scale: f64, zero: f64) -> Vec<f64> {
+        match self {
+            Dither::None => vals.iter().map(|&iv| zero + scale * iv as f64).collect(),
+            Dither::Subtractive {
+                seed,
+                keep_zero,
+                table,
+            } => {
+                let mut iseed = (tile + seed - 1) % N_RANDOM;
+                let mut next = (table[iseed] * 500.0) as usize;
+                vals.iter()
+                    .map(|&iv| {
+                        let v = if *keep_zero && iv == ZERO_VALUE {
+                            0.0
+                        } else {
+                            (iv as f64 - table[next] as f64 + 0.5) * scale + zero
+                        };
+                        next += 1;
+                        if next == N_RANDOM {
+                            iseed = (iseed + 1) % N_RANDOM;
+                            next = (table[iseed] * 500.0) as usize;
+                        }
+                        v
+                    })
+                    .collect()
+            }
+        }
+    }
+}
+
+/// cfitsio's `fits_init_randoms`: a Park–Miller sequence scaled to (0, 1).
+fn dither_table() -> Vec<f32> {
+    let a = 16807.0f64;
+    let m = 2_147_483_647.0f64;
+    let mut seed = 1.0f64;
+    (0..N_RANDOM)
+        .map(|_| {
+            let temp = a * seed;
+            seed = temp - m * ((temp / m) as i64) as f64;
+            (seed / m) as f32
+        })
+        .collect()
 }
 
 fn read_zscale_zzero(
@@ -981,5 +1067,54 @@ mod tests {
 
         let result = rice_decompress(&data, 5, blocksize, &params).unwrap();
         assert_eq!(result, vec![42, 42, 42, 42, 42]);
+    }
+
+    #[test]
+    fn test_dither_table_matches_cfitsio() {
+        let table = dither_table();
+        assert_eq!(table.len(), N_RANDOM);
+        // cfitsio's fits_init_randoms checks that the 10000th seed is 1043618065.
+        let last = (table[N_RANDOM - 1] as f64 * 2_147_483_647.0).round();
+        assert!((last - 1_043_618_065.0).abs() < 256.0);
+    }
+
+    fn quantize_cards(method: &str, seed: i64) -> Vec<Card> {
+        vec![
+            Card {
+                keyword: *b"ZQUANTIZ",
+                value: Some(Value::String(method.into())),
+                comment: None,
+            },
+            Card {
+                keyword: *b"ZDITHER0",
+                value: Some(Value::Integer(seed)),
+                comment: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn test_dequantize_subtractive_dither_1() {
+        let dither = Dither::from_cards(&quantize_cards("SUBTRACTIVE_DITHER_1", 3));
+        let table = dither_table();
+        // Tile 1 with ZDITHER0 = 3 starts at iseed = 3.
+        let next = (table[3] * 500.0) as usize;
+        let out = dither.dequantize(1, &[10, -4], 2.0, 100.0);
+        assert_eq!(out[0], (10.0 - table[next] as f64 + 0.5) * 2.0 + 100.0);
+        assert_eq!(out[1], (-4.0 - table[next + 1] as f64 + 0.5) * 2.0 + 100.0);
+    }
+
+    #[test]
+    fn test_dequantize_subtractive_dither_2_keeps_zero() {
+        let dither = Dither::from_cards(&quantize_cards("SUBTRACTIVE_DITHER_2", 1));
+        let out = dither.dequantize(0, &[ZERO_VALUE, 7], 0.5, 10.0);
+        assert_eq!(out[0], 0.0);
+        assert_ne!(out[1], 10.0 + 0.5 * 7.0);
+    }
+
+    #[test]
+    fn test_dequantize_no_dither() {
+        let dither = Dither::from_cards(&quantize_cards("NO_DITHER", 1));
+        assert_eq!(dither.dequantize(0, &[4], 0.5, 10.0), vec![12.0]);
     }
 }
