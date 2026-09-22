@@ -28,3 +28,10 @@ Reference materials live in `reference/` (gitignored). To populate them:
    ```
 
 These files should never be checked into the repo.
+
+## Releasing
+
+- Releases are automated: merging a version change to `main` publishes it. `.github/workflows/publish.yml` publishes every crate whose `name@version` is not yet on crates.io, then tags `vX.Y.Z` and creates the GitHub release from that version's `CHANGELOG.md` section.
+- To release, bump `version` in `crates/fitsio-pure/Cargo.toml`, add a `## X.Y.Z` section to `CHANGELOG.md`, and commit the updated `Cargo.lock`, all in the same PR. The `Release Check` workflow fails the PR if the changelog entry is missing or the crate doesn't package.
+- Never run `cargo publish` by hand. If a publish fails after merge, fix the cause and re-run the Publish workflow (`gh workflow run publish.yml`).
+- Publishing uses the `CARGO_REGISTRY_TOKEN` repository secret: a crates.io token with the `publish-update` scope, restricted to `fitsio-pure`.
