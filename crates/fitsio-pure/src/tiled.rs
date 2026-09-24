@@ -1,12 +1,13 @@
 //! Tile-compressed image decompression for FITS.
 //!
-//! Supports RICE_1/RICE_ONE and GZIP_1 compression algorithms per the
-//! FITS tiled image compression convention.
+//! Supports RICE_1/RICE_ONE, GZIP_1, GZIP_2, and NOCOMPRESS per the FITS
+//! tiled image compression convention. HCOMPRESS_1 and PLIO_1 are rejected
+//! with [`Error::UnsupportedCompression`].
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::endian::{read_f64_be, read_i32_be};
+use crate::endian::{read_f64_be, read_i32_be, read_i64_be};
 use crate::error::{Error, Result};
 use crate::hdu::{Hdu, HduInfo};
 use crate::header::Card;
@@ -17,10 +18,25 @@ use crate::value::Value;
 // Column layout helpers
 // ---------------------------------------------------------------------------
 
+/// A variable-length array column of the tile table.
+struct HeapColumn {
+    /// Byte offset of the descriptor within a table row.
+    offset: usize,
+    /// `Q` (64-bit) rather than `P` (32-bit) descriptor.
+    wide: bool,
+    /// Bytes per array element.
+    elem_size: usize,
+}
+
 struct ColumnInfo {
-    compressed_data_offset: usize,
+    compressed_data: HeapColumn,
+    /// cfitsio stores a tile it could not compress here, gzipped.
+    gzip_data: Option<HeapColumn>,
+    /// Pre-2011 cfitsio stored such a tile here, uncompressed.
+    uncompressed_data: Option<HeapColumn>,
     zscale_offset: Option<usize>,
     zzero_offset: Option<usize>,
+    zblank_offset: Option<usize>,
 }
 
 fn card_string_value(cards: &[Card], keyword: &str) -> Option<String> {
@@ -36,50 +52,63 @@ fn card_string_value(cards: &[Card], keyword: &str) -> Option<String> {
     })
 }
 
-/// Parse the binary table column layout to find COMPRESSED_DATA, ZSCALE, and ZZERO columns.
+/// Parse the binary table column layout to find the tile data columns and
+/// the per-tile ZSCALE, ZZERO, and ZBLANK columns.
 fn parse_column_layout(cards: &[Card], tfields: usize) -> Result<ColumnInfo> {
-    let mut offsets = Vec::with_capacity(tfields);
-    let mut compressed_data_col = None;
-    let mut zscale_col = None;
-    let mut zzero_col = None;
+    use crate::bintable::BinaryColumnType;
 
-    // First pass: collect column names
-    for i in 1..=tfields {
-        let ttype_kw = alloc::format!("TTYPE{}", i);
-        let name = card_string_value(cards, &ttype_kw).unwrap_or_default();
-        if name == "COMPRESSED_DATA" {
-            compressed_data_col = Some(i - 1);
-        } else if name == "ZSCALE" {
-            zscale_col = Some(i - 1);
-        } else if name == "ZZERO" {
-            zzero_col = Some(i - 1);
-        }
-    }
-
-    // Second pass: compute byte offsets from TFORM values
+    let mut columns = Vec::with_capacity(tfields);
     let mut offset = 0usize;
     for i in 1..=tfields {
-        offsets.push(offset);
-        let tform_kw = alloc::format!("TFORM{}", i);
-        let tform = card_string_value(cards, &tform_kw)
+        let name = card_string_value(cards, &alloc::format!("TTYPE{}", i)).unwrap_or_default();
+        let tform = card_string_value(cards, &alloc::format!("TFORM{}", i))
             .ok_or(Error::InvalidHeader("missing TFORM in compressed image"))?;
         let (repeat, col_type) = crate::bintable::parse_tform_binary(&tform)?;
         let width = match col_type {
-            crate::bintable::BinaryColumnType::Bit => repeat.div_ceil(8),
-            crate::bintable::BinaryColumnType::VarArrayP(_) => 8 * repeat,
-            crate::bintable::BinaryColumnType::VarArrayQ(_) => 16 * repeat,
+            BinaryColumnType::Bit => repeat.div_ceil(8),
             _ => repeat * crate::bintable::binary_type_byte_size(&col_type),
         };
+        columns.push((name, offset, col_type));
         offset += width;
     }
 
-    let compressed_idx =
-        compressed_data_col.ok_or(Error::InvalidHeader("missing COMPRESSED_DATA column"))?;
+    let find = |wanted: &str| columns.iter().find(|(name, ..)| name == wanted);
+    let offset_of = |wanted: &str| find(wanted).map(|&(_, offset, _)| offset);
+    let heap_column = |wanted: &str| -> Result<Option<HeapColumn>> {
+        let Some((_, offset, col_type)) = find(wanted) else {
+            return Ok(None);
+        };
+        let (wide, elem) = match col_type {
+            BinaryColumnType::VarArrayP(elem) => (false, *elem),
+            BinaryColumnType::VarArrayQ(elem) => (true, *elem),
+            _ => {
+                return Err(Error::InvalidHeader(
+                    "tile data column is not a variable array",
+                ))
+            }
+        };
+        let elem_size = match elem {
+            'B' => 1,
+            'I' => 2,
+            'J' | 'E' => 4,
+            'K' | 'D' => 8,
+            _ => return Err(Error::InvalidHeader("unsupported tile data element type")),
+        };
+        Ok(Some(HeapColumn {
+            offset: *offset,
+            wide,
+            elem_size,
+        }))
+    };
 
     Ok(ColumnInfo {
-        compressed_data_offset: offsets[compressed_idx],
-        zscale_offset: zscale_col.map(|i| offsets[i]),
-        zzero_offset: zzero_col.map(|i| offsets[i]),
+        compressed_data: heap_column("COMPRESSED_DATA")?
+            .ok_or(Error::InvalidHeader("missing COMPRESSED_DATA column"))?,
+        gzip_data: heap_column("GZIP_COMPRESSED_DATA")?,
+        uncompressed_data: heap_column("UNCOMPRESSED_DATA")?,
+        zscale_offset: offset_of("ZSCALE"),
+        zzero_offset: offset_of("ZZERO"),
+        zblank_offset: offset_of("ZBLANK"),
     })
 }
 
@@ -94,25 +123,38 @@ fn read_p_descriptor(data: &[u8]) -> (usize, usize) {
     (count, offset)
 }
 
-/// Extract compressed tile bytes from the heap for a given row.
+/// Read a 64-bit Q-descriptor: (element_count, heap_byte_offset).
+fn read_q_descriptor(data: &[u8]) -> (usize, usize) {
+    let count = read_i64_be(data) as u64 as usize;
+    let offset = read_i64_be(&data[8..]) as u64 as usize;
+    (count, offset)
+}
+
+/// Extract a tile's bytes from the heap for a given row.
 ///
-/// Returns `(data_slice, count)` where `count` is the number of compressed
-/// bytes.  For Rice decompression the slice extends beyond `count` so that
-/// the bit-stream reader can safely over-read by a few bytes, matching the
+/// Returns `(data_slice, count)` where `count` is the number of tile bytes.
+/// For Rice decompression the slice extends beyond `count` so that the
+/// bit-stream reader can safely over-read by a few bytes, matching the
 /// cfitsio behaviour.
-fn extract_tile_bytes(
-    fits_data: &[u8],
+fn extract_tile_bytes<'a>(
+    fits_data: &'a [u8],
     data_start: usize,
     naxis1: usize,
     naxis2: usize,
     row: usize,
-    col_offset: usize,
-) -> Result<(&[u8], usize)> {
-    let desc_pos = data_start + row * naxis1 + col_offset;
-    if desc_pos + 8 > fits_data.len() {
+    column: &HeapColumn,
+) -> Result<(&'a [u8], usize)> {
+    let desc_pos = data_start + row * naxis1 + column.offset;
+    let desc_len = if column.wide { 16 } else { 8 };
+    if desc_pos + desc_len > fits_data.len() {
         return Err(Error::UnexpectedEof);
     }
-    let (count, heap_offset) = read_p_descriptor(&fits_data[desc_pos..]);
+    let (count, heap_offset) = if column.wide {
+        read_q_descriptor(&fits_data[desc_pos..])
+    } else {
+        read_p_descriptor(&fits_data[desc_pos..])
+    };
+    let count = count * column.elem_size;
     let heap_start = data_start + naxis1 * naxis2;
     let tile_start = heap_start + heap_offset;
     let tile_end = tile_start + count;
@@ -386,7 +428,7 @@ fn strip_gzip_header(data: &[u8]) -> Result<&[u8]> {
     Ok(&data[pos..data.len() - 8])
 }
 
-/// Decompress GZIP_1 compressed tile data.
+/// Inflate gzip-compressed tile data.
 fn gzip_decompress(compressed: &[u8]) -> Result<Vec<u8>> {
     // Try gzip format first (magic bytes 1f 8b), then zlib, then raw deflate.
     if compressed.len() >= 2 && compressed[0] == 0x1f && compressed[1] == 0x8b {
@@ -433,6 +475,69 @@ fn bytes_to_f64(data: &[u8]) -> Vec<f64> {
         .map(|c| f64::from_be_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
         .collect()
 }
+
+/// Undo GZIP_2 byte shuffling of `pixels` elements.
+///
+/// GZIP_2 stores the most significant byte of every element, then the next
+/// byte plane, and so on. The element width is implied by the tile length.
+fn unshuffle(data: &[u8], pixels: usize) -> Vec<u8> {
+    if pixels == 0 || !data.len().is_multiple_of(pixels) {
+        return data.to_vec();
+    }
+    let width = data.len() / pixels;
+    let mut out = alloc::vec![0u8; data.len()];
+    for (plane, bytes) in data.chunks_exact(pixels).enumerate() {
+        for (i, &b) in bytes.iter().enumerate() {
+            out[i * width + plane] = b;
+        }
+    }
+    out
+}
+
+/// Tile codecs whose output is plain big-endian pixel bytes.
+#[derive(Clone, Copy)]
+enum ByteCodec {
+    /// GZIP_1
+    Gzip,
+    /// GZIP_2: gzip over byte-shuffled pixels.
+    ShuffledGzip,
+    /// NOCOMPRESS: the tile is stored as-is.
+    Raw,
+}
+
+impl ByteCodec {
+    fn decode(self, tile: &[u8], pixels: usize) -> Result<Vec<u8>> {
+        match self {
+            ByteCodec::Gzip => gzip_decompress(tile),
+            ByteCodec::ShuffledGzip => Ok(unshuffle(&gzip_decompress(tile)?, pixels)),
+            ByteCodec::Raw => Ok(tile.to_vec()),
+        }
+    }
+}
+
+/// A pixel type decodable from big-endian bytes.
+trait BePixel: Copy {
+    fn from_be_slice(data: &[u8]) -> Vec<Self>;
+}
+
+macro_rules! be_pixel {
+    ($($t:ty => $conv:expr),* $(,)?) => {
+        $(impl BePixel for $t {
+            fn from_be_slice(data: &[u8]) -> Vec<Self> {
+                $conv(data)
+            }
+        })*
+    };
+}
+
+be_pixel!(
+    u8 => <[u8]>::to_vec,
+    i16 => bytes_to_i16,
+    i32 => bytes_to_i32,
+    i64 => bytes_to_i64,
+    f32 => bytes_to_f32,
+    f64 => bytes_to_f64,
+);
 
 // ---------------------------------------------------------------------------
 // Tile geometry
@@ -638,15 +743,17 @@ pub fn read_tiled_image(fits_data: &[u8], hdu: &Hdu) -> Result<ImageData> {
         };
     }
 
-    let col_info = parse_column_layout(&hdu.cards, tfields)?;
-    let is_rice = zcmptype.contains("RICE");
-    let is_gzip = zcmptype.contains("GZIP");
-    if !is_rice && !is_gzip {
-        return Err(Error::UnsupportedCompression(
-            "only RICE_1 and GZIP_1 supported",
-        ));
-    }
+    let codec = match zcmptype {
+        "RICE_1" | "RICE_ONE" => None,
+        "GZIP_1" => Some(ByteCodec::Gzip),
+        "GZIP_2" => Some(ByteCodec::ShuffledGzip),
+        "NOCOMPRESS" => Some(ByteCodec::Raw),
+        "HCOMPRESS_1" => return Err(Error::UnsupportedCompression("HCOMPRESS_1")),
+        "PLIO_1" => return Err(Error::UnsupportedCompression("PLIO_1")),
+        _ => return Err(Error::UnsupportedCompression("unrecognized ZCMPTYPE")),
+    };
 
+    let col_info = parse_column_layout(&hdu.cards, tfields)?;
     let grid = TileGrid::new(znaxes, ztile);
 
     // For float types with quantization, we need ZSCALE/ZZERO
@@ -654,7 +761,20 @@ pub fn read_tiled_image(fits_data: &[u8], hdu: &Hdu) -> Result<ImageData> {
         && col_info.zscale_offset.is_some()
         && col_info.zzero_offset.is_some();
 
-    if is_rice {
+    if let Some(codec) = codec {
+        decompress_byte_tiles(
+            fits_data,
+            hdu,
+            zbitpix,
+            total_pixels,
+            &grid,
+            naxis1,
+            naxis2,
+            codec,
+            &col_info,
+            is_quantized,
+        )
+    } else {
         let params = RiceParams::for_bytepix(rice_bytepix)?;
         decompress_rice_tiles(
             fits_data,
@@ -669,18 +789,6 @@ pub fn read_tiled_image(fits_data: &[u8], hdu: &Hdu) -> Result<ImageData> {
             &col_info,
             is_quantized,
         )
-    } else {
-        decompress_gzip_tiles(
-            fits_data,
-            hdu,
-            zbitpix,
-            total_pixels,
-            &grid,
-            naxis1,
-            naxis2,
-            &col_info,
-            is_quantized,
-        )
     }
 }
 
@@ -691,6 +799,10 @@ pub fn read_tiled_image(fits_data: &[u8], hdu: &Hdu) -> Result<ImageData> {
 /// rectangle in the image. Reassembly is a scatter rather than an append
 /// because a tile is a rectangle: appending is only correct in the special
 /// case `ZTILE1 == ZNAXIS1`, where a tile happens to span whole image rows.
+///
+/// A tile with an empty `COMPRESSED_DATA` entry is one cfitsio could not
+/// compress (e.g. a constant float tile); its unquantized pixels are read
+/// from the fallback column instead of passing through `decode`.
 #[allow(clippy::too_many_arguments)]
 fn scatter_tiles<T, F>(
     fits_data: &[u8],
@@ -704,20 +816,26 @@ fn scatter_tiles<T, F>(
     mut decode: F,
 ) -> Result<Vec<T>>
 where
-    T: Copy,
+    T: BePixel,
     F: FnMut(usize, &[u8], usize, usize) -> Result<Vec<T>>,
 {
+    let tile = |row: usize, column: &HeapColumn| {
+        extract_tile_bytes(fits_data, hdu.data_start, naxis1, naxis2, row, column)
+    };
     let mut output = alloc::vec![fill; total_pixels];
     for row in 0..grid.len().min(naxis2) {
-        let (tile_data, tile_count) = extract_tile_bytes(
-            fits_data,
-            hdu.data_start,
-            naxis1,
-            naxis2,
-            row,
-            col_info.compressed_data_offset,
-        )?;
-        let vals = decode(row, tile_data, tile_count, grid.tile_pixels(row))?;
+        let (tile_data, tile_count) = tile(row, &col_info.compressed_data)?;
+        let vals = if tile_count > 0 {
+            decode(row, tile_data, tile_count, grid.tile_pixels(row))?
+        } else if let Some(column) = &col_info.uncompressed_data {
+            let (data, count) = tile(row, column)?;
+            T::from_be_slice(&data[..count])
+        } else if let Some(column) = &col_info.gzip_data {
+            let (data, count) = tile(row, column)?;
+            T::from_be_slice(&gzip_decompress(&data[..count])?)
+        } else {
+            return Err(Error::DecompressionError("empty tile"));
+        };
         grid.blit(row, &vals, &mut output);
     }
     Ok(output)
@@ -737,17 +855,8 @@ fn decompress_rice_tiles(
     col_info: &ColumnInfo,
     is_quantized: bool,
 ) -> Result<ImageData> {
-    // Per-tile ZSCALE/ZZERO, read from the tile's own binary-table row.
-    let quant = |row: usize| {
-        read_zscale_zzero(
-            fits_data,
-            hdu.data_start,
-            naxis1,
-            row,
-            col_info.zscale_offset.unwrap(),
-            col_info.zzero_offset.unwrap(),
-        )
-    };
+    // Per-tile quantization, read from the tile's own binary-table row.
+    let quant = |row: usize| TileQuant::read(fits_data, hdu, naxis1, row, col_info);
     let dither = Dither::from_cards(&hdu.cards);
 
     macro_rules! scatter {
@@ -771,17 +880,15 @@ fn decompress_rice_tiles(
 
     if is_quantized && zbitpix == -32 {
         Ok(ImageData::F32(scatter!(0.0f32, |row, vals: Vec<i32>| {
-            let (scale, zero) = quant(row);
             dither
-                .dequantize(row, &vals, scale, zero)
+                .dequantize(row, &vals, &quant(row))
                 .iter()
                 .map(|&v| v as f32)
                 .collect::<Vec<f32>>()
         })))
     } else if is_quantized && zbitpix == -64 {
         Ok(ImageData::F64(scatter!(0.0f64, |row, vals: Vec<i32>| {
-            let (scale, zero) = quant(row);
-            dither.dequantize(row, &vals, scale, zero)
+            dither.dequantize(row, &vals, &quant(row))
         })))
     } else {
         match zbitpix {
@@ -804,7 +911,7 @@ fn decompress_rice_tiles(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn decompress_gzip_tiles(
+fn decompress_byte_tiles(
     fits_data: &[u8],
     hdu: &Hdu,
     zbitpix: i64,
@@ -812,19 +919,11 @@ fn decompress_gzip_tiles(
     grid: &TileGrid,
     naxis1: usize,
     naxis2: usize,
+    codec: ByteCodec,
     col_info: &ColumnInfo,
     is_quantized: bool,
 ) -> Result<ImageData> {
-    let quant = |row: usize| {
-        read_zscale_zzero(
-            fits_data,
-            hdu.data_start,
-            naxis1,
-            row,
-            col_info.zscale_offset.unwrap(),
-            col_info.zzero_offset.unwrap(),
-        )
-    };
+    let quant = |row: usize| TileQuant::read(fits_data, hdu, naxis1, row, col_info);
     let dither = Dither::from_cards(&hdu.cards);
 
     macro_rules! scatter {
@@ -839,7 +938,7 @@ fn decompress_gzip_tiles(
                 col_info,
                 $fill,
                 |row, tile_data, tile_count, pixels_in_tile| {
-                    let raw = gzip_decompress(&tile_data[..tile_count])?;
+                    let raw = codec.decode(&tile_data[..tile_count], pixels_in_tile)?;
                     Ok($conv(row, raw, pixels_in_tile))
                 },
             )?
@@ -850,9 +949,8 @@ fn decompress_gzip_tiles(
         Ok(ImageData::F32(scatter!(
             0.0f32,
             |row, raw: Vec<u8>, _n: usize| {
-                let (scale, zero) = quant(row);
                 dither
-                    .dequantize(row, &bytes_to_i32(&raw), scale, zero)
+                    .dequantize(row, &bytes_to_i32(&raw), &quant(row))
                     .iter()
                     .map(|&v| v as f32)
                     .collect::<Vec<f32>>()
@@ -862,8 +960,7 @@ fn decompress_gzip_tiles(
         Ok(ImageData::F64(scatter!(
             0.0f64,
             |row, raw: Vec<u8>, _n: usize| {
-                let (scale, zero) = quant(row);
-                dither.dequantize(row, &bytes_to_i32(&raw), scale, zero)
+                dither.dequantize(row, &bytes_to_i32(&raw), &quant(row))
             }
         )))
     } else {
@@ -954,10 +1051,21 @@ impl Dither {
         }
     }
 
-    /// Restore physical values for one tile (0-based `tile`).
-    fn dequantize(&self, tile: usize, vals: &[i32], scale: f64, zero: f64) -> Vec<f64> {
+    /// Restore physical values for one tile (0-based `tile`); null pixels
+    /// become NaN.
+    fn dequantize(&self, tile: usize, vals: &[i32], quant: &TileQuant) -> Vec<f64> {
+        let &TileQuant { scale, zero, blank } = quant;
         match self {
-            Dither::None => vals.iter().map(|&iv| zero + scale * iv as f64).collect(),
+            Dither::None => vals
+                .iter()
+                .map(|&iv| {
+                    if Some(iv) == blank {
+                        f64::NAN
+                    } else {
+                        zero + scale * iv as f64
+                    }
+                })
+                .collect(),
             Dither::Subtractive {
                 seed,
                 keep_zero,
@@ -967,7 +1075,9 @@ impl Dither {
                 let mut next = (table[iseed] * 500.0) as usize;
                 vals.iter()
                     .map(|&iv| {
-                        let v = if *keep_zero && iv == ZERO_VALUE {
+                        let v = if Some(iv) == blank {
+                            f64::NAN
+                        } else if *keep_zero && iv == ZERO_VALUE {
                             0.0
                         } else {
                             (iv as f64 - table[next] as f64 + 0.5) * scale + zero
@@ -999,18 +1109,30 @@ fn dither_table() -> Vec<f32> {
         .collect()
 }
 
-fn read_zscale_zzero(
-    fits_data: &[u8],
-    data_start: usize,
-    naxis1: usize,
-    row: usize,
-    zscale_offset: usize,
-    zzero_offset: usize,
-) -> (f64, f64) {
-    let row_start = data_start + row * naxis1;
-    let scale = read_f64_be(&fits_data[row_start + zscale_offset..]);
-    let zero = read_f64_be(&fits_data[row_start + zzero_offset..]);
-    (scale, zero)
+/// Per-tile quantization: ZSCALE, ZZERO, and the integer marking a null
+/// pixel (the tile's `ZBLANK` column, else the `ZBLANK` header keyword).
+struct TileQuant {
+    scale: f64,
+    zero: f64,
+    blank: Option<i32>,
+}
+
+impl TileQuant {
+    fn read(fits_data: &[u8], hdu: &Hdu, naxis1: usize, row: usize, col_info: &ColumnInfo) -> Self {
+        let row_start = hdu.data_start + row * naxis1;
+        let header_blank = hdu.cards.iter().find_map(|c| match c.value {
+            Some(Value::Integer(n)) if c.keyword_str() == "ZBLANK" => Some(n as i32),
+            _ => None,
+        });
+        TileQuant {
+            scale: read_f64_be(&fits_data[row_start + col_info.zscale_offset.unwrap()..]),
+            zero: read_f64_be(&fits_data[row_start + col_info.zzero_offset.unwrap()..]),
+            blank: col_info
+                .zblank_offset
+                .map(|off| read_i32_be(&fits_data[row_start + off..]))
+                .or(header_blank),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1099,7 +1221,7 @@ mod tests {
         let table = dither_table();
         // Tile 1 with ZDITHER0 = 3 starts at iseed = 3.
         let next = (table[3] * 500.0) as usize;
-        let out = dither.dequantize(1, &[10, -4], 2.0, 100.0);
+        let out = dither.dequantize(1, &[10, -4], &quant(2.0, 100.0, None));
         assert_eq!(out[0], (10.0 - table[next] as f64 + 0.5) * 2.0 + 100.0);
         assert_eq!(out[1], (-4.0 - table[next + 1] as f64 + 0.5) * 2.0 + 100.0);
     }
@@ -1107,7 +1229,7 @@ mod tests {
     #[test]
     fn test_dequantize_subtractive_dither_2_keeps_zero() {
         let dither = Dither::from_cards(&quantize_cards("SUBTRACTIVE_DITHER_2", 1));
-        let out = dither.dequantize(0, &[ZERO_VALUE, 7], 0.5, 10.0);
+        let out = dither.dequantize(0, &[ZERO_VALUE, 7], &quant(0.5, 10.0, None));
         assert_eq!(out[0], 0.0);
         assert_ne!(out[1], 10.0 + 0.5 * 7.0);
     }
@@ -1115,6 +1237,275 @@ mod tests {
     #[test]
     fn test_dequantize_no_dither() {
         let dither = Dither::from_cards(&quantize_cards("NO_DITHER", 1));
-        assert_eq!(dither.dequantize(0, &[4], 0.5, 10.0), vec![12.0]);
+        assert_eq!(
+            dither.dequantize(0, &[4], &quant(0.5, 10.0, None)),
+            vec![12.0]
+        );
+    }
+
+    #[test]
+    fn test_dequantize_zblank_is_nan() {
+        for method in ["NO_DITHER", "SUBTRACTIVE_DITHER_1", "SUBTRACTIVE_DITHER_2"] {
+            let dither = Dither::from_cards(&quantize_cards(method, 1));
+            let out = dither.dequantize(0, &[i32::MIN, 4], &quant(0.5, 10.0, Some(i32::MIN)));
+            assert!(out[0].is_nan(), "{method}");
+            assert!(out[1].is_finite(), "{method}");
+        }
+    }
+
+    #[test]
+    fn test_unshuffle() {
+        // Two i16 values 0x0102, 0x0304 shuffled as MSBs then LSBs.
+        assert_eq!(unshuffle(&[1, 3, 2, 4], 2), vec![1, 2, 3, 4]);
+        // One i32 per pixel: four byte planes.
+        let shuffled = [0xA0, 0xB0, 0xA1, 0xB1, 0xA2, 0xB2, 0xA3, 0xB3];
+        assert_eq!(
+            unshuffle(&shuffled, 2),
+            vec![0xA0, 0xA1, 0xA2, 0xA3, 0xB0, 0xB1, 0xB2, 0xB3]
+        );
+        // One byte per pixel is the identity.
+        assert_eq!(unshuffle(&[7, 8, 9], 3), vec![7, 8, 9]);
+    }
+
+    fn quant(scale: f64, zero: f64, blank: Option<i32>) -> TileQuant {
+        TileQuant { scale, zero, blank }
+    }
+
+    fn string_card(keyword: &str, value: &str) -> Card {
+        let mut kw = [b' '; 8];
+        kw[..keyword.len()].copy_from_slice(keyword.as_bytes());
+        Card {
+            keyword: kw,
+            value: Some(Value::String(value.into())),
+            comment: None,
+        }
+    }
+
+    fn integer_card(keyword: &str, value: i64) -> Card {
+        let mut kw = [b' '; 8];
+        kw[..keyword.len()].copy_from_slice(keyword.as_bytes());
+        Card {
+            keyword: kw,
+            value: Some(Value::Integer(value)),
+            comment: None,
+        }
+    }
+
+    fn gzip(data: &[u8]) -> Vec<u8> {
+        miniz_oxide::deflate::compress_to_vec_zlib(data, 6)
+    }
+
+    /// Build a one-tile-per-row compressed image HDU over `rows` of
+    /// `(column name, tile bytes)` plus optional fixed ZSCALE/ZZERO columns.
+    fn tiled_hdu(
+        zcmptype: &str,
+        zbitpix: i64,
+        width: usize,
+        heap_columns: &[(&str, &str)],
+        rows: &[Vec<Vec<u8>>],
+        quant: Option<(f64, f64)>,
+        extra: Vec<Card>,
+    ) -> (Vec<u8>, Hdu) {
+        let mut cards = vec![
+            string_card("ZQUANTIZ", "NO_DITHER"),
+            integer_card("ZVAL1", 32),
+            integer_card("ZVAL2", 4),
+        ];
+        cards.extend(extra);
+        let mut naxis1 = 0;
+        for (i, (name, tform)) in heap_columns.iter().enumerate() {
+            cards.push(string_card(&alloc::format!("TTYPE{}", i + 1), name));
+            cards.push(string_card(&alloc::format!("TFORM{}", i + 1), tform));
+            naxis1 += 8;
+        }
+        let mut tfields = heap_columns.len();
+        if quant.is_some() {
+            for name in ["ZSCALE", "ZZERO"] {
+                tfields += 1;
+                cards.push(string_card(&alloc::format!("TTYPE{tfields}"), name));
+                cards.push(string_card(&alloc::format!("TFORM{tfields}"), "1D"));
+                naxis1 += 8;
+            }
+        }
+
+        let mut table = Vec::new();
+        let mut heap = Vec::new();
+        for row in rows {
+            for (bytes, (_, tform)) in row.iter().zip(heap_columns) {
+                let elem = if tform.contains("PI") { 2 } else { 1 };
+                table.extend_from_slice(&((bytes.len() / elem) as u32).to_be_bytes());
+                table.extend_from_slice(&(heap.len() as u32).to_be_bytes());
+                heap.extend_from_slice(bytes);
+            }
+            if let Some((scale, zero)) = quant {
+                table.extend_from_slice(&scale.to_be_bytes());
+                table.extend_from_slice(&zero.to_be_bytes());
+            }
+        }
+        table.extend(heap);
+
+        let hdu = Hdu {
+            info: HduInfo::CompressedImage {
+                zbitpix,
+                znaxes: vec![width, rows.len()],
+                zcmptype: zcmptype.into(),
+                ztile: vec![width, 1],
+                blocksize: 32,
+                rice_bytepix: 4,
+                naxis1,
+                naxis2: rows.len(),
+                pcount: 0,
+                tfields,
+            },
+            header_start: 0,
+            data_start: 0,
+            data_len: table.len(),
+            cards,
+        };
+        (table, hdu)
+    }
+
+    fn i16_be(vals: &[i16]) -> Vec<u8> {
+        vals.iter().flat_map(|v| v.to_be_bytes()).collect()
+    }
+
+    #[test]
+    fn test_gzip2_unshuffles_i16() {
+        let vals = [0x0102i16, -3, 0x7f00];
+        let shuffled = unshuffle_inverse(&i16_be(&vals), 2);
+        let (data, hdu) = tiled_hdu(
+            "GZIP_2",
+            16,
+            3,
+            &[("COMPRESSED_DATA", "1PB")],
+            &[vec![gzip(&shuffled)]],
+            None,
+            vec![],
+        );
+        match read_tiled_image(&data, &hdu).unwrap() {
+            ImageData::I16(v) => assert_eq!(v, vals),
+            other => panic!("expected I16, got {other:?}"),
+        }
+    }
+
+    /// GZIP_2's encoder: byte plane `k` of every element, in turn.
+    fn unshuffle_inverse(data: &[u8], width: usize) -> Vec<u8> {
+        (0..width)
+            .flat_map(|k| data.iter().skip(k).step_by(width).copied())
+            .collect()
+    }
+
+    #[test]
+    fn test_nocompress_reads_raw_pixels() {
+        let vals = [5i16, -6, 7, 300];
+        let (data, hdu) = tiled_hdu(
+            "NOCOMPRESS",
+            16,
+            2,
+            &[("COMPRESSED_DATA", "1PB")],
+            &[vec![i16_be(&vals[..2])], vec![i16_be(&vals[2..])]],
+            None,
+            vec![],
+        );
+        match read_tiled_image(&data, &hdu).unwrap() {
+            ImageData::I16(v) => assert_eq!(v, vals),
+            other => panic!("expected I16, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_empty_tile_falls_back_to_gzip_column() {
+        let pixels: Vec<u8> = [5.0f32, 5.0].iter().flat_map(|v| v.to_be_bytes()).collect();
+        let (data, hdu) = tiled_hdu(
+            "RICE_1",
+            -32,
+            2,
+            &[("COMPRESSED_DATA", "1PB"), ("GZIP_COMPRESSED_DATA", "1PB")],
+            &[vec![vec![], gzip(&pixels)]],
+            Some((0.0, 0.0)),
+            vec![],
+        );
+        match read_tiled_image(&data, &hdu).unwrap() {
+            ImageData::F32(v) => assert_eq!(v, [5.0, 5.0]),
+            other => panic!("expected F32, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_empty_tile_falls_back_to_uncompressed_column() {
+        let (data, hdu) = tiled_hdu(
+            "RICE_1",
+            16,
+            2,
+            &[("COMPRESSED_DATA", "1PB"), ("UNCOMPRESSED_DATA", "1PI")],
+            &[vec![vec![], i16_be(&[-9, 12])]],
+            None,
+            vec![],
+        );
+        match read_tiled_image(&data, &hdu).unwrap() {
+            ImageData::I16(v) => assert_eq!(v, [-9, 12]),
+            other => panic!("expected I16, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_empty_tile_without_fallback_is_an_error() {
+        let (data, hdu) = tiled_hdu(
+            "RICE_1",
+            16,
+            2,
+            &[("COMPRESSED_DATA", "1PB")],
+            &[vec![vec![]]],
+            None,
+            vec![],
+        );
+        assert!(matches!(
+            read_tiled_image(&data, &hdu),
+            Err(Error::DecompressionError(_))
+        ));
+    }
+
+    #[test]
+    fn test_header_zblank_reads_as_nan() {
+        let ints: Vec<u8> = [i32::MIN, 4].iter().flat_map(|v| v.to_be_bytes()).collect();
+        let (data, hdu) = tiled_hdu(
+            "GZIP_1",
+            -32,
+            2,
+            &[("COMPRESSED_DATA", "1PB")],
+            &[vec![gzip(&ints)]],
+            Some((0.5, 10.0)),
+            vec![integer_card("ZBLANK", i32::MIN as i64)],
+        );
+        match read_tiled_image(&data, &hdu).unwrap() {
+            ImageData::F32(v) => {
+                assert!(v[0].is_nan());
+                assert_eq!(v[1], 12.0);
+            }
+            other => panic!("expected F32, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_unsupported_codecs_are_named() {
+        for (zcmptype, msg) in [
+            ("HCOMPRESS_1", "HCOMPRESS_1"),
+            ("PLIO_1", "PLIO_1"),
+            ("RICE_2", "unrecognized ZCMPTYPE"),
+        ] {
+            let (data, hdu) = tiled_hdu(
+                zcmptype,
+                16,
+                1,
+                &[("COMPRESSED_DATA", "1PB")],
+                &[vec![vec![0, 1]]],
+                None,
+                vec![],
+            );
+            match read_tiled_image(&data, &hdu) {
+                Err(Error::UnsupportedCompression(m)) => assert_eq!(m, msg),
+                other => panic!("{zcmptype}: expected UnsupportedCompression, got {other:?}"),
+            }
+        }
     }
 }
