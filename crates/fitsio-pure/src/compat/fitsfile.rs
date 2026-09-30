@@ -21,6 +21,8 @@ pub struct FitsFile {
     data: Vec<u8>,
     filename: PathBuf,
     mode: FileOpenMode,
+    /// No backing file, so `flush` and `Drop` never touch disk.
+    in_memory: bool,
     cached_parse: OnceLock<crate::hdu::FitsData>,
 }
 
@@ -84,6 +86,7 @@ impl FitsFile {
             data,
             filename: path.as_ref().to_path_buf(),
             mode: FileOpenMode::ReadOnly,
+            in_memory: false,
             cached_parse: OnceLock::new(),
         })
     }
@@ -95,6 +98,40 @@ impl FitsFile {
             data,
             filename: path.as_ref().to_path_buf(),
             mode: FileOpenMode::ReadWrite,
+            in_memory: false,
+            cached_parse: OnceLock::new(),
+        })
+    }
+
+    /// Open FITS data that is already in memory, such as an upload, a network
+    /// response or an embedded asset, in read-only mode.
+    ///
+    /// Nothing is written to disk. The data is parsed immediately, so bytes that
+    /// are not a valid FITS file are rejected here rather than on first use.
+    pub fn from_bytes(data: impl Into<Vec<u8>>) -> Result<Self> {
+        let file = FitsFile {
+            data: data.into(),
+            filename: PathBuf::new(),
+            mode: FileOpenMode::ReadOnly,
+            in_memory: true,
+            cached_parse: OnceLock::new(),
+        };
+        file.parsed()?;
+        Ok(file)
+    }
+
+    /// Create a new, writable FITS file that lives only in memory.
+    ///
+    /// It starts with a minimal primary HDU, like [`FitsFile::create`]. Build it
+    /// with the usual methods and take the result with [`FitsFile::into_bytes`];
+    /// `flush` and `Drop` never write it to disk.
+    pub fn create_in_memory() -> Result<Self> {
+        let cards = crate::primary::build_primary_header(8, &[])?;
+        Ok(FitsFile {
+            data: crate::header::serialize_header(&cards)?,
+            filename: PathBuf::new(),
+            mode: FileOpenMode::ReadWrite,
+            in_memory: true,
             cached_parse: OnceLock::new(),
         })
     }
@@ -264,15 +301,27 @@ impl FitsFile {
         self.invalidate_cache();
     }
 
-    /// Flush the in-memory data to disk if opened for writing.
+    /// Flush the in-memory data to disk if opened for writing from a path.
+    /// Does nothing for a file from [`FitsFile::create_in_memory`].
     pub fn flush(&self) -> Result<()> {
-        if self.mode == FileOpenMode::ReadWrite {
+        if self.mode == FileOpenMode::ReadWrite && !self.in_memory {
             std::fs::write(&self.filename, &self.data)?;
         }
         Ok(())
     }
 
-    /// Return the file path.
+    /// Consume the file and return its FITS bytes.
+    ///
+    /// A writable file opened from a path is flushed first, so the file on disk
+    /// matches the returned bytes.
+    pub fn into_bytes(mut self) -> Result<Vec<u8>> {
+        self.flush()?;
+        // The bytes are handed back, so Drop must not write them out again.
+        self.in_memory = true;
+        Ok(std::mem::take(&mut self.data))
+    }
+
+    /// Return the file path. Empty for an in-memory file.
     pub fn filename(&self) -> &Path {
         &self.filename
     }
@@ -285,7 +334,7 @@ impl FitsFile {
 
 impl Drop for FitsFile {
     fn drop(&mut self) {
-        if self.mode == FileOpenMode::ReadWrite {
+        if self.mode == FileOpenMode::ReadWrite && !self.in_memory {
             let _ = std::fs::write(&self.filename, &self.data);
         }
     }
@@ -316,6 +365,7 @@ impl NewFitsFile {
             data: header_bytes,
             filename: self.path,
             mode: FileOpenMode::ReadWrite,
+            in_memory: false,
             cached_parse: OnceLock::new(),
         })
     }
@@ -344,6 +394,77 @@ mod tests {
 
     use super::*;
     use crate::compat::images::ImageType;
+
+    #[test]
+    fn from_bytes_reads_what_open_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.fits");
+        {
+            let mut f = FitsFile::create(&path).open().unwrap();
+            let desc = ImageDescription {
+                data_type: ImageType::Short,
+                dimensions: vec![3, 2],
+            };
+            f.create_image("SCI", &desc).unwrap();
+        }
+
+        let from_disk = FitsFile::open(&path).unwrap();
+        let from_mem = FitsFile::from_bytes(std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(from_mem.mode(), FileOpenMode::ReadOnly);
+        assert_eq!(from_mem.filename(), Path::new(""));
+        assert_eq!(from_mem.data(), from_disk.data());
+        assert_eq!(from_mem.num_hdus().unwrap(), from_disk.num_hdus().unwrap());
+        assert_eq!(
+            from_mem.hdu("SCI").unwrap().hdu_index,
+            from_disk.hdu("SCI").unwrap().hdu_index
+        );
+    }
+
+    #[test]
+    fn from_bytes_rejects_non_fits() {
+        assert!(FitsFile::from_bytes(b"not a FITS file".to_vec()).is_err());
+    }
+
+    #[test]
+    fn in_memory_file_round_trips_through_bytes() {
+        use crate::compat::images::{ReadImage, WriteImage};
+
+        let mut f = FitsFile::create_in_memory().unwrap();
+        assert_eq!(f.mode(), FileOpenMode::ReadWrite);
+        assert_eq!(f.filename(), Path::new(""));
+
+        let desc = ImageDescription {
+            data_type: ImageType::Short,
+            dimensions: vec![3, 2],
+        };
+        let hdu = f.create_image("SCI", &desc).unwrap();
+        let pixels: Vec<i16> = vec![-3, -2, -1, 0, 1, 2];
+        i16::write_image(&mut f, &hdu, &pixels).unwrap();
+        f.flush().unwrap();
+
+        let g = FitsFile::from_bytes(f.into_bytes().unwrap()).unwrap();
+        let hdu = g.hdu("SCI").unwrap();
+        let back: Vec<i16> = i16::read_image(&g, &hdu).unwrap();
+        assert_eq!(back, pixels);
+    }
+
+    #[test]
+    fn into_bytes_flushes_a_file_opened_for_editing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.fits");
+        drop(FitsFile::create(&path).open().unwrap());
+
+        let mut f = FitsFile::edit(&path).unwrap();
+        let desc = ImageDescription {
+            data_type: ImageType::UnsignedByte,
+            dimensions: vec![4],
+        };
+        f.create_image("EXTRA", &desc).unwrap();
+        let bytes = f.into_bytes().unwrap();
+
+        // The file holds the edit, and Drop did not overwrite it with an empty buffer.
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
 
     #[test]
     fn create_and_open() {
