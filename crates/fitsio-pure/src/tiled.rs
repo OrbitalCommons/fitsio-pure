@@ -388,53 +388,11 @@ fn rice_decompress(
 // GZIP decompression
 // ---------------------------------------------------------------------------
 
-/// Strip the gzip header and trailer, returning the raw deflate payload.
-fn strip_gzip_header(data: &[u8]) -> Result<&[u8]> {
-    if data.len() < 18 || data[0] != 0x1f || data[1] != 0x8b || data[2] != 0x08 {
-        return Err(Error::DecompressionError("invalid gzip header"));
-    }
-    let flg = data[3];
-    let mut pos = 10usize;
-    if flg & 0x04 != 0 {
-        // FEXTRA
-        if pos + 2 > data.len() {
-            return Err(Error::DecompressionError("truncated gzip FEXTRA"));
-        }
-        let xlen = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
-        pos += 2 + xlen;
-    }
-    if flg & 0x08 != 0 {
-        // FNAME: skip null-terminated string
-        while pos < data.len() && data[pos] != 0 {
-            pos += 1;
-        }
-        pos += 1; // skip the null terminator
-    }
-    if flg & 0x10 != 0 {
-        // FCOMMENT: skip null-terminated string
-        while pos < data.len() && data[pos] != 0 {
-            pos += 1;
-        }
-        pos += 1;
-    }
-    if flg & 0x02 != 0 {
-        // FHCRC
-        pos += 2;
-    }
-    if pos >= data.len() || data.len() < pos + 8 {
-        return Err(Error::DecompressionError("truncated gzip data"));
-    }
-    // Strip the 8-byte trailer (CRC32 + ISIZE)
-    Ok(&data[pos..data.len() - 8])
-}
-
 /// Inflate gzip-compressed tile data.
 fn gzip_decompress(compressed: &[u8]) -> Result<Vec<u8>> {
     // Try gzip format first (magic bytes 1f 8b), then zlib, then raw deflate.
-    if compressed.len() >= 2 && compressed[0] == 0x1f && compressed[1] == 0x8b {
-        let deflate_payload = strip_gzip_header(compressed)?;
-        return miniz_oxide::inflate::decompress_to_vec(deflate_payload)
-            .map_err(|_| Error::DecompressionError("gzip inflate failed"));
+    if crate::gzip::is_gzip(compressed) {
+        return crate::gzip::decompress(compressed);
     }
     miniz_oxide::inflate::decompress_to_vec_zlib(compressed)
         .or_else(|_| miniz_oxide::inflate::decompress_to_vec(compressed))
