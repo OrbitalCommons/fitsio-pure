@@ -30,13 +30,25 @@ The core library is `no_std` compatible (with `alloc`) and compiles to `wasm32-u
 
 **Header keyword types:** `i64`, `f64`, `bool`, `String`
 
-**Table column types:** `i32`, `i64`, `f32`, `f64`, `String`
+**Table column types:** `u8`, `i8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`, `f32`, `f64`, `bool`, `String`
 
 ## Compat API (drop-in replacement for fitsio)
 
 Enable the `compat` feature to get an API that mirrors the `fitsio` crate. In most cases, switching only requires changing your dependency and `use` paths.
 
 See **[docs/compat-guide.md](docs/compat-guide.md)** for migration instructions, code examples, and a full API comparison table.
+
+### In-memory files
+
+The compat `FitsFile` can also work entirely in memory, which `fitsio` can't: cfitsio needs a file path. Open bytes you already hold, such as an upload, a network response or an embedded asset, with `FitsFile::from_bytes`. Build a new file with `FitsFile::create_in_memory` and take the result with `into_bytes`. Neither touches the filesystem.
+
+```rust
+use fitsio_pure::compat::fitsfile::FitsFile;
+
+let fits = FitsFile::from_bytes(uploaded_bytes)?;
+let hdu = fits.hdu(1)?;
+let prob: Vec<f64> = hdu.read_col(&fits, "PROB")?;
+```
 
 ## Comparison with other Rust FITS libraries
 
