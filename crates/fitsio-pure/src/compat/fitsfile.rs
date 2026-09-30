@@ -49,23 +49,27 @@ impl DescribesHdu for usize {
     }
 }
 
+/// Matches the first HDU whose `EXTNAME`, or failing that `HDUNAME`, equals the
+/// name ignoring case, as cfitsio does.
 impl DescribesHdu for &str {
     fn get_hdu<'a>(
         &self,
         fits_data: &'a crate::hdu::FitsData,
     ) -> Option<(usize, &'a crate::hdu::Hdu)> {
-        for (i, hdu) in fits_data.iter().enumerate() {
-            for card in &hdu.cards {
-                if card.keyword_str() == "EXTNAME" {
-                    if let Some(crate::value::Value::String(ref s)) = card.value {
-                        if s.trim() == *self {
-                            return Some((i, hdu));
-                        }
-                    }
-                }
-            }
-        }
-        None
+        // Like cfitsio, only the first card with the keyword counts.
+        let named = |hdu: &crate::hdu::Hdu, keyword: &str| {
+            matches!(
+                hdu.cards
+                    .iter()
+                    .find(|card| card.keyword_str() == keyword)
+                    .and_then(|card| card.value.as_ref()),
+                Some(crate::value::Value::String(s)) if s.trim().eq_ignore_ascii_case(self)
+            )
+        };
+        fits_data
+            .iter()
+            .enumerate()
+            .find(|(_, hdu)| named(hdu, "EXTNAME") || named(hdu, "HDUNAME"))
     }
 }
 
@@ -602,6 +606,32 @@ mod tests {
         f.create_image("SCI", &desc).unwrap();
         let hdu = f.hdu("SCI").unwrap();
         assert_eq!(hdu.hdu_index, 1);
+    }
+
+    /// cfitsio compares names ignoring case and falls back to HDUNAME, and
+    /// callers rely on it (one pipeline asks for both "Orbit_Attitude" and
+    /// "ORBIT_ATTITUDE").
+    #[test]
+    fn hdu_by_name_ignores_case_and_falls_back_to_hduname() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.fits");
+        let mut f = FitsFile::create(&path).open().unwrap();
+        let desc = ImageDescription {
+            data_type: ImageType::Float,
+            dimensions: vec![10],
+        };
+        f.create_image("Events", &desc).unwrap();
+        let second = f.create_image("WHT", &desc).unwrap();
+        second
+            .write_key(&mut f, "HDUNAME", &"Weights".to_string())
+            .unwrap();
+
+        assert_eq!(f.hdu("Events").unwrap().hdu_index, 1);
+        assert_eq!(f.hdu("EVENTS").unwrap().hdu_index, 1);
+        assert_eq!(f.hdu("events").unwrap().hdu_index, 1);
+        assert_eq!(f.hdu("wht").unwrap().hdu_index, 2);
+        assert_eq!(f.hdu("WEIGHTS").unwrap().hdu_index, 2);
+        assert!(f.hdu("EVENT").is_err());
     }
 
     #[test]
