@@ -182,3 +182,35 @@ fn integer_column_read_as_wider_types_matches_cfitsio() {
     corpus_read_parity::<i64>("rust-fitsio/boolean_columns.fits", 1, "Tile");
     corpus_read_parity::<f64>("rust-fitsio/boolean_columns.fits", 1, "Tile");
 }
+
+#[test]
+fn hdu_lookup_by_name_ignores_case_like_cfitsio() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("names.fits");
+    {
+        let mut f = CFits::create(&path).open().unwrap();
+        let col = CColDesc::new("VAL")
+            .with_type(CColType::Double)
+            .create()
+            .unwrap();
+        f.create_table("Events", &[col]).unwrap();
+    }
+    let lookups = ["Events", "EVENTS", "events", "Event", "Alias"];
+    let agree = |path: &Path| {
+        let mut c = CFits::open(path).unwrap();
+        let p = PureFits::open(path).unwrap();
+        for name in lookups {
+            assert_eq!(p.hdu(name).is_ok(), c.hdu(name).is_ok(), "lookup of {name}");
+        }
+        assert!(p.hdu("events").is_ok());
+    };
+    agree(&path);
+
+    // write_key appends a second EXTNAME card; both libraries honor only the first.
+    {
+        let mut f = CFits::edit(&path).unwrap();
+        let hdu = f.hdu("Events").unwrap();
+        hdu.write_key(&mut f, "EXTNAME", "Alias").unwrap();
+    }
+    agree(&path);
+}
