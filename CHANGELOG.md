@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.13.4
+
+### Fixed
+
+- `compat::FitsFile::hdu("name")` matches names ignoring case and falls back to `HDUNAME`, honoring only the first card of each, as cfitsio does. It previously required an exact `EXTNAME` match, so a lookup that works with `fitsio` could fail with "HDU not found" (#87).
+
 ## 0.13.3
 
 ### Added
