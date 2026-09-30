@@ -80,8 +80,11 @@ impl DescribesHdu for String {
 
 impl FitsFile {
     /// Open an existing FITS file in read-only mode.
+    ///
+    /// A gzip-compressed file (`.fits.gz`, `.fit.gz`) is decompressed
+    /// transparently, as cfitsio does.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let data = std::fs::read(path.as_ref())?;
+        let data = gunzip_if_compressed(std::fs::read(path.as_ref())?)?;
         Ok(FitsFile {
             data,
             filename: path.as_ref().to_path_buf(),
@@ -92,8 +95,17 @@ impl FitsFile {
     }
 
     /// Open an existing FITS file for editing.
+    ///
+    /// A gzip-compressed file is refused, as cfitsio refuses it: saving would
+    /// replace it with uncompressed bytes. Decompress it first to edit it.
     pub fn edit<P: AsRef<Path>>(path: P) -> Result<Self> {
         let data = std::fs::read(path.as_ref())?;
+        if crate::gzip::is_gzip(&data) {
+            return Err(Error::Message(format!(
+                "{} is gzip-compressed and can only be opened read-only",
+                path.as_ref().display()
+            )));
+        }
         Ok(FitsFile {
             data,
             filename: path.as_ref().to_path_buf(),
@@ -106,11 +118,12 @@ impl FitsFile {
     /// Open FITS data that is already in memory, such as an upload, a network
     /// response or an embedded asset, in read-only mode.
     ///
-    /// Nothing is written to disk. The data is parsed immediately, so bytes that
-    /// are not a valid FITS file are rejected here rather than on first use.
+    /// Nothing is written to disk. Gzip-compressed bytes are decompressed. The
+    /// data is parsed immediately, so bytes that are not a valid FITS file are
+    /// rejected here rather than on first use.
     pub fn from_bytes(data: impl Into<Vec<u8>>) -> Result<Self> {
         let file = FitsFile {
-            data: data.into(),
+            data: gunzip_if_compressed(data.into())?,
             filename: PathBuf::new(),
             mode: FileOpenMode::ReadOnly,
             in_memory: true,
@@ -371,6 +384,14 @@ impl NewFitsFile {
     }
 }
 
+fn gunzip_if_compressed(data: Vec<u8>) -> Result<Vec<u8>> {
+    if crate::gzip::is_gzip(&data) {
+        Ok(crate::gzip::decompress(&data)?)
+    } else {
+        Ok(data)
+    }
+}
+
 fn make_keyword(name: &str) -> [u8; 8] {
     let mut kw = [b' '; 8];
     let bytes = name.as_bytes();
@@ -464,6 +485,35 @@ mod tests {
 
         // The file holds the edit, and Drop did not overwrite it with an empty buffer.
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn gzip_compressed_files_open_transparently() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.fits");
+        {
+            let mut f = FitsFile::create(&path).open().unwrap();
+            let desc = ImageDescription {
+                data_type: ImageType::Short,
+                dimensions: vec![3, 2],
+            };
+            f.create_image("SCI", &desc).unwrap();
+        }
+        let plain = std::fs::read(&path).unwrap();
+        let gz = crate::gzip::encode_for_tests(&plain);
+        let gz_path = dir.path().join("test.fits.gz");
+        std::fs::write(&gz_path, &gz).unwrap();
+
+        let from_file = FitsFile::open(&gz_path).unwrap();
+        assert_eq!(from_file.data(), &plain[..]);
+        assert_eq!(from_file.hdu("SCI").unwrap().hdu_index, 1);
+
+        let from_bytes = FitsFile::from_bytes(gz.clone()).unwrap();
+        assert_eq!(from_bytes.data(), &plain[..]);
+
+        // Saving would replace the compressed file with plain bytes, so editing is refused.
+        assert!(FitsFile::edit(&gz_path).is_err());
+        assert_eq!(std::fs::read(&gz_path).unwrap(), gz);
     }
 
     #[test]

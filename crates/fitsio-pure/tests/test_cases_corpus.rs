@@ -7,7 +7,9 @@
 
 use std::path::{Path, PathBuf};
 
-use fitsio_pure::bintable::{parse_binary_table_columns, read_binary_column, BinaryColumnData};
+use fitsio_pure::bintable::{
+    parse_binary_table_columns, read_binary_column, read_binary_column_physical, BinaryColumnData,
+};
 use fitsio_pure::hdu::{parse_fits, FitsData, HduInfo};
 use fitsio_pure::image::{extract_bscale_bzero, read_image_data, read_image_physical, ImageData};
 use fitsio_pure::value::Value;
@@ -1346,4 +1348,58 @@ fn mwa_gpubox_pixel_data() {
         }
         other => panic!("Expected F32 for weights, got {:?}", other),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Gzip-compressed whole file: one hour of Fermi GBM photon events
+// ---------------------------------------------------------------------------
+
+const GBM_TTE: &str = "fermi-gbm/glg_tte_n0_200524_05z_v00.fit.gz";
+
+#[test]
+fn fermi_gbm_tte_gzip() {
+    let path = match corpus_file(GBM_TTE) {
+        Some(p) => p,
+        None => return,
+    };
+    let compressed = std::fs::read(&path).unwrap();
+    assert!(fitsio_pure::gzip::is_gzip(&compressed));
+    let bytes = fitsio_pure::gzip::decompress(&compressed).unwrap();
+    assert_eq!(bytes.len(), 35_389_440);
+
+    let fits = parse_fits(&bytes).unwrap();
+    assert_eq!(fits.len(), 4);
+    let events = fits.get(2).unwrap();
+    match &events.info {
+        HduInfo::BinaryTable { naxis2, .. } => assert_eq!(*naxis2, 3_536_325),
+        other => panic!("Expected BinaryTable, got {:?}", other),
+    }
+
+    // TIME is 1D with TZERO1 = 611989422.9725. Expected values are from astropy 8.0.1.
+    let time = read_binary_column_physical(&bytes, events, 0).unwrap();
+    assert_eq!(time.len(), 3_536_325);
+    assert_eq!(time[0], 611989422.9725);
+    assert_eq!(time[time.len() - 1], 611992804.998994);
+    match read_binary_column(&bytes, events, 1).unwrap() {
+        BinaryColumnData::Short(pha) => assert_eq!(&pha[..5], &[3, 1, 52, 1, 5]),
+        other => panic!("Expected Short PHA, got {:?}", other),
+    }
+}
+
+#[cfg(feature = "compat")]
+#[test]
+fn fermi_gbm_tte_gzip_through_compat_open() {
+    use fitsio_pure::compat::fitsfile::FitsFile;
+
+    let path = match corpus_file(GBM_TTE) {
+        Some(p) => p,
+        None => return,
+    };
+    let f = FitsFile::open(&path).unwrap();
+    let events = f.hdu("EVENTS").unwrap();
+    let time: Vec<f64> = events.read_col(&f, "TIME").unwrap();
+    let pha: Vec<i16> = events.read_col(&f, "PHA").unwrap();
+    assert_eq!(time.len(), 3_536_325);
+    assert_eq!(time[0], 611989422.9725);
+    assert_eq!(&pha[..5], &[3, 1, 52, 1, 5]);
 }
