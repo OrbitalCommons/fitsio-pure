@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.13.1
+
+### Fixed
+
+- Tile-compressed images read with the right pixel values in every case below; each previously returned `Ok` with wrong values (#81):
+  - quantized float tiles written with `SUBTRACTIVE_DITHER_1` or `SUBTRACTIVE_DITHER_2` (the fpack and astropy default) are dithered back correctly, including the reserved zero value of `SUBTRACTIVE_DITHER_2`;
+  - `GZIP_2` tiles are un-shuffled for every `BITPIX` other than 8;
+  - tiles stored uncompressed in the `GZIP_COMPRESSED_DATA` or `UNCOMPRESSED_DATA` fallback column are read from that column instead of as zeros;
+  - `ZBLANK` null pixels decode to NaN instead of a large negative number.
+- `NOCOMPRESS` tiles decode instead of returning an error (#81).
+
+### Changed
+
+- Reading a `HCOMPRESS_1` or `PLIO_1` image still returns `UnsupportedCompression`, and the error now names the algorithm (#81).
+
 ## 0.13.0
 
 ### Added
