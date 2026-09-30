@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.13.2
+
+### Added
+
+- In-memory files in the compat layer, which `fitsio` has no equivalent for (#83):
+  - `FitsFile::from_bytes` opens FITS bytes you already hold, read-only, without writing a temp file;
+  - `FitsFile::create_in_memory` starts a writable file with no backing path;
+  - `FitsFile::into_bytes` returns the bytes, flushing a writable file opened from a path first.
+
+  `flush` and `Drop` never touch disk for an in-memory file.
+
 ## 0.13.1
 
 ### Fixed
