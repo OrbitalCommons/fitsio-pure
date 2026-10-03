@@ -250,6 +250,9 @@ fn merge_continue_cards(cards: &mut Vec<Card>) {
             } else {
                 combined.push_str(&cont_str);
             }
+            if let Some(comment) = continue_comment(&cards[j]) {
+                cards[i].comment = Some(comment);
+            }
             j += 1;
             if !ends_with_amp {
                 break;
@@ -291,6 +294,12 @@ fn extract_continue_string(card: &Card) -> String {
 
 /// Parse a quoted string from CONTINUE card text (bytes 8..80 as a &str).
 fn parse_continue_quoted(text: &str) -> Option<String> {
+    split_continue_quoted(text).map(|(value, _)| value)
+}
+
+/// Split CONTINUE card text into its quoted string and the text after the
+/// closing quote.
+fn split_continue_quoted(text: &str) -> Option<(String, &str)> {
     let bytes = text.as_bytes();
     if bytes.is_empty() || bytes[0] != b'\'' {
         return None;
@@ -307,6 +316,7 @@ fn parse_continue_quoted(text: &str) -> Option<String> {
                 value.push('\'');
                 i += 2;
             } else {
+                i += 1;
                 break;
             }
         } else {
@@ -314,7 +324,18 @@ fn parse_continue_quoted(text: &str) -> Option<String> {
             i += 1;
         }
     }
-    Some(value.trim_end().to_string())
+    Some((value.trim_end().to_string(), &text[i.min(len)..]))
+}
+
+/// The ` / comment` on a CONTINUE card, which is where the comment of a long
+/// string goes.
+fn continue_comment(card: &Card) -> Option<String> {
+    if let Some(Value::String(_)) = &card.value {
+        return card.comment.clone();
+    }
+    let (_, rest) = split_continue_quoted(card.comment.as_deref()?.trim_start())?;
+    let comment = rest.trim_start().strip_prefix('/')?.trim();
+    (!comment.is_empty()).then(|| comment.to_string())
 }
 
 /// Return the number of bytes consumed by the header (always a multiple of BLOCK_SIZE).
@@ -376,6 +397,169 @@ pub fn format_card(card: &Card) -> [u8; CARD_SIZE] {
     }
 
     buf
+}
+
+#[cfg(feature = "compat")]
+const KW_HIERARCH: [u8; 8] = *b"HIERARCH";
+
+/// Whether `name` needs the `HIERARCH` convention: longer than 8 characters
+/// or containing a space, neither of which a standard keyword can hold.
+#[cfg(feature = "compat")]
+pub(crate) fn needs_hierarch(name: &str) -> bool {
+    name.len() > 8 || name.contains(' ')
+}
+
+/// `name` without a leading `HIERARCH ` prefix, if it has one.
+#[cfg(feature = "compat")]
+pub(crate) fn strip_hierarch(name: &str) -> &str {
+    match name.get(..9) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("HIERARCH ") => name[9..].trim_start(),
+        _ => name,
+    }
+}
+
+/// A `HIERARCH name = value` card, laid out as cfitsio writes one: strings
+/// follow `= ` directly, and other values end at column 30 when they fit.
+///
+/// The card keeps the `HIERARCH` keyword, with the rest of its text in
+/// `comment`, the same shape [`parse_card`] gives a `HIERARCH` card it reads.
+/// A card that would not fit in 80 bytes is an error.
+#[cfg(feature = "compat")]
+pub(crate) fn hierarch_card(name: &str, value: &Value) -> Result<Card> {
+    let field = format_value(value);
+    let token = str::from_utf8(&field)
+        .map_err(|_| Error::InvalidHeader("non-UTF8 card data"))?
+        .trim();
+    if let Value::String(s) = value {
+        if escaped_len(s) > MAX_CARD_STRING {
+            return Err(Error::InvalidValue);
+        }
+    }
+    let mut text = alloc::format!("HIERARCH {} = ", strip_hierarch(name));
+    if !matches!(value, Value::String(_)) {
+        while text.len() + token.len() < 30 {
+            text.push(' ');
+        }
+    }
+    text.push_str(token);
+    if text.len() > CARD_SIZE {
+        return Err(Error::InvalidValue);
+    }
+    Ok(Card {
+        keyword: KW_HIERARCH,
+        value: None,
+        comment: Some(String::from(&text[8..])),
+    })
+}
+
+/// The name and value of a `HIERARCH` card, if `card` is one.
+#[cfg(feature = "compat")]
+pub(crate) fn hierarch_entry(card: &Card) -> Option<(&str, Value)> {
+    if card.keyword != KW_HIERARCH || card.value.is_some() {
+        return None;
+    }
+    let text = card.comment.as_deref()?;
+    let eq = text.find('=')?;
+    let (value, _) = parse_value(text[eq + 1..].trim_start().as_bytes())?;
+    Some((text[..eq].trim(), value))
+}
+
+/// The longest string, counting each `'` twice as it is written, that fits in
+/// one card's value field.
+const MAX_CARD_STRING: usize = 68;
+
+/// The same less one byte, for the `&` that marks a continued string.
+const CONTINUED_STRING: usize = MAX_CARD_STRING - 1;
+
+/// Format `card` as one or more 80-byte cards.
+///
+/// A string value too long for one card is split over `CONTINUE` cards in the
+/// long-string convention, laid out as cfitsio's `fits_write_key_longstr`
+/// does: 67 characters and an `&` per card until the rest fits, then the rest,
+/// with any comment on a final `CONTINUE  ''` card.
+fn format_cards(card: &Card) -> Vec<[u8; CARD_SIZE]> {
+    let long = match &card.value {
+        Some(Value::String(s)) if escaped_len(s) > MAX_CARD_STRING => s,
+        _ => return vec![format_card(card)],
+    };
+
+    let mut chunks = Vec::new();
+    let mut rest = long.as_str();
+    while escaped_len(rest) > MAX_CARD_STRING {
+        let split = split_at_escaped(rest, CONTINUED_STRING);
+        chunks.push((&rest[..split], true));
+        rest = &rest[split..];
+    }
+    let comment = card.comment.as_deref().filter(|c| !c.is_empty());
+    chunks.push((rest, comment.is_some()));
+
+    let mut out: Vec<[u8; CARD_SIZE]> = chunks
+        .iter()
+        .enumerate()
+        .map(|(i, (chunk, continued))| {
+            let mut buf = [b' '; CARD_SIZE];
+            if i == 0 {
+                buf[..8].copy_from_slice(&card.keyword);
+                buf[8] = b'=';
+            } else {
+                buf[..8].copy_from_slice(&KW_CONTINUE);
+            }
+            write_quoted(&mut buf[10..], chunk, *continued);
+            buf
+        })
+        .collect();
+
+    if let Some(comment) = comment {
+        let mut buf = [b' '; CARD_SIZE];
+        buf[..8].copy_from_slice(&KW_CONTINUE);
+        buf[10..12].copy_from_slice(b"''");
+        buf[31] = b'/';
+        let bytes = comment.as_bytes();
+        let len = bytes.len().min(CARD_SIZE - 33);
+        buf[33..33 + len].copy_from_slice(&bytes[..len]);
+        out.push(buf);
+    }
+    out
+}
+
+/// The length of `s` as written in a FITS string, where `'` is doubled.
+fn escaped_len(s: &str) -> usize {
+    s.len() + s.bytes().filter(|&b| b == b'\'').count()
+}
+
+/// The largest char boundary of `s` whose prefix is at most `max` bytes once
+/// written, never splitting a doubled quote.
+fn split_at_escaped(s: &str, max: usize) -> usize {
+    let mut written = 0;
+    for (i, ch) in s.char_indices() {
+        let width = if ch == '\'' { 2 } else { ch.len_utf8() };
+        if written + width > max {
+            return i;
+        }
+        written += width;
+    }
+    s.len()
+}
+
+/// Write `'s'` into `field`, doubling quotes, with an `&` before the closing
+/// quote if `continued`.
+fn write_quoted(field: &mut [u8], s: &str, continued: bool) {
+    let mut pos = 0;
+    field[pos] = b'\'';
+    pos += 1;
+    for b in s.bytes() {
+        if b == b'\'' {
+            field[pos] = b'\'';
+            pos += 1;
+        }
+        field[pos] = b;
+        pos += 1;
+    }
+    if continued {
+        field[pos] = b'&';
+        pos += 1;
+    }
+    field[pos] = b'\'';
 }
 
 /// Insert a ` / comment` string into a 70-byte value field.
@@ -463,19 +647,20 @@ pub fn serialize_header(cards: &[Card]) -> Result<Vec<u8>> {
         validate_required_keywords(hdu_type, cards)?;
     }
 
-    let total_cards = cards.len() + 1; // +1 for END
+    let formatted: Vec<[u8; CARD_SIZE]> = cards.iter().flat_map(format_cards).collect();
+
+    let total_cards = formatted.len() + 1; // +1 for END
     let total_blocks = total_cards.div_ceil(CARDS_PER_BLOCK);
     let total_bytes = total_blocks * BLOCK_SIZE;
 
     let mut buf = vec![HEADER_PAD_BYTE; total_bytes];
 
-    for (i, card) in cards.iter().enumerate() {
+    for (i, card) in formatted.iter().enumerate() {
         let offset = i * CARD_SIZE;
-        let formatted = format_card(card);
-        buf[offset..offset + CARD_SIZE].copy_from_slice(&formatted);
+        buf[offset..offset + CARD_SIZE].copy_from_slice(card);
     }
 
-    let end_offset = cards.len() * CARD_SIZE;
+    let end_offset = formatted.len() * CARD_SIZE;
     let end_card = format_end_card();
     buf[end_offset..end_offset + CARD_SIZE].copy_from_slice(&end_card);
 
@@ -1551,5 +1736,118 @@ mod validate_tests {
     fn serialize_skips_validation_for_unknown_first_keyword() {
         let cards = vec![card(b"FOOBAR", Some(Value::Integer(42)))];
         assert!(serialize_header(&cards).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod long_string_tests {
+    use super::*;
+    use alloc::string::String;
+
+    fn string_card(keyword: &[u8], value: &str, comment: Option<&str>) -> Card {
+        Card {
+            keyword: kw(keyword),
+            value: Some(Value::String(String::from(value))),
+            comment: comment.map(String::from),
+        }
+    }
+
+    fn long_value() -> String {
+        (0..150)
+            .map(|i| char::from(b'a' + (i % 26) as u8))
+            .collect()
+    }
+
+    fn written_cards(card: Card) -> Vec<String> {
+        let header = serialize_header(&[card]).unwrap();
+        header
+            .chunks(CARD_SIZE)
+            .map(|c| String::from(str::from_utf8(c).unwrap().trim_end()))
+            .take_while(|c| c != "END")
+            .collect()
+    }
+
+    // Expected cards are what cfitsio 4.3.1's fits_write_key_longstr writes
+    // for the same keywords.
+    #[test]
+    fn long_string_is_continued_like_cfitsio() {
+        assert_eq!(
+            written_cards(string_card(b"LONGVAL", &long_value(), None)),
+            [
+                "LONGVAL = 'abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmno&'",
+                "CONTINUE  'pqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcd&'",
+                "CONTINUE  'efghijklmnopqrst'",
+            ]
+        );
+    }
+
+    #[test]
+    fn quotes_are_doubled_without_splitting_a_pair() {
+        let value =
+            "it's a 'quoted' value that keeps going and going past sixty-eight characters for sure";
+        assert_eq!(
+            written_cards(string_card(b"QUOTES", value, None)),
+            [
+                "QUOTES  = 'it''s a ''quoted'' value that keeps going and going past sixty-eigh&'",
+                "CONTINUE  't characters for sure'",
+            ]
+        );
+    }
+
+    #[test]
+    fn comment_goes_on_a_final_empty_continuation() {
+        assert_eq!(
+            written_cards(string_card(b"WITHCMT", &"x".repeat(90), Some("a comment"))),
+            [
+                "WITHCMT = 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx&'",
+                "CONTINUE  'xxxxxxxxxxxxxxxxxxxxxxx&'",
+                "CONTINUE  ''                   / a comment",
+            ]
+        );
+    }
+
+    #[test]
+    fn long_strings_round_trip_with_their_comments() {
+        let quoted =
+            "it's a 'quoted' value that keeps going and going past sixty-eight characters for sure";
+        let cards = [
+            Card {
+                keyword: kw(b"SIMPLE"),
+                value: Some(Value::Logical(true)),
+                comment: None,
+            },
+            Card {
+                keyword: kw(b"BITPIX"),
+                value: Some(Value::Integer(8)),
+                comment: None,
+            },
+            Card {
+                keyword: kw(b"NAXIS"),
+                value: Some(Value::Integer(0)),
+                comment: None,
+            },
+            string_card(b"LONGVAL", &long_value(), None),
+            string_card(b"QUOTES", quoted, None),
+            string_card(b"WITHCMT", &"x".repeat(90), Some("a comment")),
+            string_card(b"SHORT", "fits on one card", Some("kept")),
+        ];
+        let parsed = parse_header_blocks(&serialize_header(&cards).unwrap()).unwrap();
+        let find = |name: &str| parsed.iter().find(|c| c.keyword_str() == name).unwrap();
+        assert_eq!(find("LONGVAL").value, Some(Value::String(long_value())));
+        assert_eq!(
+            find("QUOTES").value,
+            Some(Value::String(String::from(quoted)))
+        );
+        assert_eq!(find("WITHCMT").value, Some(Value::String("x".repeat(90))));
+        assert_eq!(find("WITHCMT").comment.as_deref(), Some("a comment"));
+        assert_eq!(find("SHORT").comment.as_deref(), Some("kept"));
+        assert!(parsed.iter().all(|c| c.keyword != KW_CONTINUE));
+    }
+
+    #[test]
+    fn a_68_character_string_still_fits_one_card() {
+        let value = "y".repeat(68);
+        let cards = written_cards(string_card(b"EXACT", &value, None));
+        assert_eq!(cards.len(), 1);
     }
 }

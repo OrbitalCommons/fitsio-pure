@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.13.5
+
+### Fixed
+
+Three writes that lost data and reported success:
+
+- **Writing past the end of a table extends it, as in cfitsio.** Compat `write_col` on a table created by `create_table` (which starts with 0 rows) returned `Ok` and wrote nothing. Now new rows are added, zero-filled, and `NAXIS2` is updated; a heap after the rows moves down with `THEAP`. (#99)
+  - Writing fewer values than the table has rows fills those rows and leaves the rest, where it used to panic.
+  - Data that ends partway through a row is an error.
+  - Core `bintable::write_binary_column` writes as many rows as the data fills, and returns an error rather than dropping values that don't fit. The new `bintable::column_data_rows` gives the row count.
+- **String values longer than 68 characters are written in full** using `CONTINUE` cards, laid out byte-for-byte as cfitsio's `fits_write_key_longstr` writes them. They were cut at 68 characters. A comment on the last `CONTINUE` card is now read back as the keyword's comment. (#93)
+- **Compat keyword names longer than 8 characters, or containing spaces, use the `HIERARCH` convention**, as cfitsio does. `write_key("ESO DET CHIP1 ID", …)` used to write the illegal card `ESO DET = …`, merging names that share 8 characters. `read_key` now finds `HIERARCH` keys by name, ignoring case, with or without the `HIERARCH ` prefix. A `HIERARCH` card too long for 80 bytes is an error. (#102)
+
+  The core `Card` type is unchanged: a `HIERARCH` card still has the keyword `HIERARCH`, with the rest of its text in `comment`.
+
 ## 0.13.4
 
 ### Fixed

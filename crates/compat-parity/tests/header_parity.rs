@@ -65,3 +65,206 @@ fn header_keys_cfitsio_to_pure() {
     assert_eq!(flt_read, FLT_VAL);
     assert_eq!(str_read.trim(), STR_VAL);
 }
+
+/// Long string values use the CONTINUE convention. cfitsio's own long-string
+/// calls (`fits_write_key_longstr` / `fits_read_key_longstr`) are the
+/// reference; `fitsio`'s `write_key` and `read_key` truncate at 68 characters.
+mod long_strings {
+    use std::ffi::{CStr, CString};
+    use std::path::Path;
+
+    use super::*;
+
+    const KEY: &str = "LONGVAL";
+    const COMMENT: &str = "a comment";
+
+    fn value() -> String {
+        let quoted = "it's 'quoted' and ";
+        (0..4)
+            .map(|i| format!("{quoted}{}", "abcdefghij".repeat(i + 1)))
+            .collect()
+    }
+
+    fn c_read(path: &Path) -> (String, String) {
+        let mut f = CFits::open(path).unwrap();
+        let key = CString::new(KEY).unwrap();
+        let mut status = 0;
+        let mut comment = [0 as std::os::raw::c_char; 81];
+        unsafe {
+            let mut value: *mut std::os::raw::c_char = std::ptr::null_mut();
+            fitsio::sys::ffgkls(
+                f.as_raw(),
+                key.as_ptr(),
+                &mut value,
+                comment.as_mut_ptr(),
+                &mut status,
+            );
+            assert_eq!(status, 0, "cfitsio could not read {KEY}");
+            let read = CStr::from_ptr(value).to_string_lossy().into_owned();
+            fitsio::sys::fffree(value as *mut _, &mut status);
+            (
+                read,
+                CStr::from_ptr(comment.as_ptr())
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        }
+    }
+
+    #[test]
+    fn long_string_pure_to_cfitsio() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pure.fits");
+        {
+            let mut f = PureFits::create(&path).open().unwrap();
+            let hdu = f.primary_hdu().unwrap();
+            <String as PureWritesKey>::write_key(&mut f, &hdu, KEY, &value()).unwrap();
+        }
+        assert_eq!(c_read(&path).0, value());
+    }
+
+    fn c_write(path: &Path, comment: &str) {
+        let mut f = CFits::create(path).open().unwrap();
+        let (key, val, cmt) = (
+            CString::new(KEY).unwrap(),
+            CString::new(value()).unwrap(),
+            CString::new(comment).unwrap(),
+        );
+        let mut status = 0;
+        unsafe {
+            fitsio::sys::ffpkls(
+                f.as_raw(),
+                key.as_ptr(),
+                val.as_ptr(),
+                cmt.as_ptr(),
+                &mut status,
+            )
+        };
+        assert_eq!(status, 0);
+    }
+
+    /// The keyword's card and its CONTINUE cards, as written.
+    fn long_string_cards(path: &Path) -> Vec<String> {
+        let bytes = std::fs::read(path).unwrap();
+        let cards: Vec<String> = bytes[..2880]
+            .chunks(80)
+            .map(|c| String::from_utf8_lossy(c).into_owned())
+            .collect();
+        let start = cards.iter().position(|c| c.starts_with(KEY)).unwrap();
+        cards[start..]
+            .iter()
+            .take_while(|c| c.starts_with(KEY) || c.starts_with("CONTINUE"))
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn long_string_cards_match_cfitsio() {
+        let dir = tempfile::tempdir().unwrap();
+        let by_c = dir.path().join("c.fits");
+        c_write(&by_c, "");
+        let by_pure = dir.path().join("pure.fits");
+        {
+            let mut f = PureFits::create(&by_pure).open().unwrap();
+            let hdu = f.primary_hdu().unwrap();
+            <String as PureWritesKey>::write_key(&mut f, &hdu, KEY, &value()).unwrap();
+        }
+        assert_eq!(long_string_cards(&by_pure), long_string_cards(&by_c));
+    }
+
+    #[test]
+    fn long_string_cfitsio_to_pure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.fits");
+        c_write(&path, COMMENT);
+        assert_eq!(c_read(&path), (value(), COMMENT.to_string()));
+
+        let f = PureFits::open(&path).unwrap();
+        let hdu = f.primary_hdu().unwrap();
+        assert_eq!(
+            <String as PureReadsKey>::read_key(&f, &hdu, KEY).unwrap(),
+            value()
+        );
+        let cards =
+            fitsio_pure::header::parse_header_blocks(&std::fs::read(&path).unwrap()).unwrap();
+        let card = cards.iter().find(|c| c.keyword_str() == KEY).unwrap();
+        assert_eq!(card.comment.as_deref(), Some(COMMENT));
+    }
+}
+
+/// Keywords longer than 8 characters use the HIERARCH convention, which
+/// cfitsio writes automatically and reads by any spelling of the name.
+mod hierarch {
+    use super::*;
+
+    const NAMES: [(&str, &str); 2] = [
+        ("ESO DET CHIP1 ID", "CCD-42"),
+        ("ESO INS FILT1 NAME", "R_SPECIAL"),
+    ];
+
+    #[test]
+    fn hierarch_pure_to_cfitsio() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pure.fits");
+        {
+            let mut f = PureFits::create(&path).open().unwrap();
+            let hdu = f.primary_hdu().unwrap();
+            for (name, value) in NAMES {
+                <String as PureWritesKey>::write_key(&mut f, &hdu, name, &value.to_string())
+                    .unwrap();
+            }
+            <f64 as PureWritesKey>::write_key(&mut f, &hdu, "ESO TEL TEMP", &FLT_VAL).unwrap();
+            <i64 as PureWritesKey>::write_key(&mut f, &hdu, "ESO DET NDIT", &INT_VAL).unwrap();
+        }
+        let mut f = CFits::open(&path).unwrap();
+        let hdu = f.primary_hdu().unwrap();
+        for (name, value) in NAMES {
+            for spelling in [
+                name.to_string(),
+                format!("HIERARCH {name}"),
+                name.to_lowercase(),
+            ] {
+                let read: String = hdu.read_key(&mut f, &spelling).unwrap();
+                assert_eq!(read, value, "cfitsio reading {spelling:?}");
+            }
+        }
+        let temp: f64 = hdu.read_key(&mut f, "ESO TEL TEMP").unwrap();
+        let ndit: i64 = hdu.read_key(&mut f, "ESO DET NDIT").unwrap();
+        assert_eq!((temp, ndit), (FLT_VAL, INT_VAL));
+    }
+
+    #[test]
+    fn hierarch_cfitsio_to_pure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.fits");
+        {
+            let mut f = CFits::create(&path).open().unwrap();
+            let hdu = f.primary_hdu().unwrap();
+            for (name, value) in NAMES {
+                hdu.write_key(&mut f, name, value).unwrap();
+            }
+            hdu.write_key(&mut f, "ESO TEL TEMP", FLT_VAL).unwrap();
+            hdu.write_key(&mut f, "ESO DET NDIT", INT_VAL).unwrap();
+        }
+        let f = PureFits::open(&path).unwrap();
+        let hdu = f.primary_hdu().unwrap();
+        for (name, value) in NAMES {
+            for spelling in [
+                name.to_string(),
+                format!("HIERARCH {name}"),
+                name.to_lowercase(),
+            ] {
+                let read = <String as PureReadsKey>::read_key(&f, &hdu, &spelling).unwrap();
+                assert_eq!(read, value, "fitsio-pure reading {spelling:?}");
+            }
+        }
+        assert_eq!(
+            <f64 as PureReadsKey>::read_key(&f, &hdu, "ESO TEL TEMP").unwrap(),
+            FLT_VAL
+        );
+        assert_eq!(
+            <i64 as PureReadsKey>::read_key(&f, &hdu, "ESO DET NDIT").unwrap(),
+            INT_VAL
+        );
+    }
+}

@@ -214,3 +214,59 @@ fn hdu_lookup_by_name_ignores_case_like_cfitsio() {
     }
     agree(&path);
 }
+
+/// Writing past the last row extends the table, in fitsio-pure as in cfitsio.
+/// Starting from cfitsio's empty table, the same writes through each library
+/// must leave tables cfitsio reads identically.
+#[test]
+fn write_col_extends_the_table_like_cfitsio() {
+    let dir = tempfile::tempdir().unwrap();
+    let create = |path: &Path| {
+        let mut f = CFits::create(path).open().unwrap();
+        let a = CColDesc::new("A")
+            .with_type(CColType::Int)
+            .create()
+            .unwrap();
+        let b = CColDesc::new("B")
+            .with_type(CColType::Double)
+            .create()
+            .unwrap();
+        f.create_table("DATA", &[a, b]).unwrap();
+    };
+    let a = [1i32, 2, 3, 4, 5];
+    let b = [0.5f64, 1.5, 2.5];
+
+    let by_cfitsio = dir.path().join("cfitsio.fits");
+    create(&by_cfitsio);
+    {
+        let mut f = CFits::edit(&by_cfitsio).unwrap();
+        let hdu = f.hdu("DATA").unwrap();
+        hdu.write_col(&mut f, "A", &a).unwrap();
+        hdu.write_col(&mut f, "B", &b).unwrap();
+    }
+
+    let by_pure = dir.path().join("pure.fits");
+    create(&by_pure);
+    {
+        let mut f = PureFits::edit(&by_pure).unwrap();
+        let hdu = f.hdu("DATA").unwrap();
+        hdu.write_col(&mut f, "A", &a).unwrap();
+        hdu.write_col(&mut f, "B", &b).unwrap();
+        f.flush().unwrap();
+    }
+
+    let read = |path: &Path| {
+        let mut f = CFits::open(path).unwrap();
+        let hdu = f.hdu("DATA").unwrap();
+        let rows = match &hdu.info {
+            fitsio::hdu::HduInfo::TableInfo { num_rows, .. } => *num_rows,
+            other => panic!("not a table: {other:?}"),
+        };
+        let a: Vec<i32> = hdu.read_col(&mut f, "A").unwrap();
+        let b: Vec<f64> = hdu.read_col(&mut f, "B").unwrap();
+        (rows, a, b)
+    };
+    let expected = read(&by_cfitsio);
+    assert_eq!(expected, (5, a.to_vec(), vec![0.5, 1.5, 2.5, 0.0, 0.0]));
+    assert_eq!(read(&by_pure), expected);
+}
