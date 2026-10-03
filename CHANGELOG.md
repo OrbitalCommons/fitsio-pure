@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Breaking: compat image dimensions use `fitsio`'s axis order.** `ImageDescription.dimensions` and the `shape` in `HduInfo::ImageInfo` are row-major, slowest axis first, as in `fitsio`: `[rows, columns]` for a 2-D image, the reverse of FITS `NAXISn` order. They were in `NAXISn` order, so code ported from `fitsio` wrote and read every non-square image at the wrong width, silently. `create_image(…, &ImageDescription { dimensions: vec![5, 7], .. })` now writes `NAXIS1 = 7`, `NAXIS2 = 5`, as cfitsio does. (#103)
+
+  Code written against the old order must reverse its dimensions and shapes. `ndarray` reads (`ArrayD::read_image`) already returned row-major arrays and are unchanged. `read_region` ranges stay `NAXIS1` first, as in cfitsio. The core (non-compat) API keeps FITS `NAXISn` order.
+
 ## 0.13.5
 
 ### Fixed

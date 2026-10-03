@@ -16,6 +16,8 @@ pub struct FitsHdu {
 #[derive(Debug, Clone, PartialEq)]
 pub enum HduInfo {
     ImageInfo {
+        /// Axis lengths in row-major order, slowest axis first, as `fitsio`
+        /// gives them: the reverse of the FITS `NAXISn` order.
         shape: Vec<usize>,
         image_type: super::images::ImageType,
     },
@@ -24,6 +26,12 @@ pub enum HduInfo {
         row_count: usize,
     },
     AnyInfo,
+}
+
+/// FITS `NAXISn` order (fastest axis first) reversed into the row-major order
+/// `fitsio` uses for image shapes and dimensions.
+pub(crate) fn row_major(naxes: &[usize]) -> Vec<usize> {
+    naxes.iter().rev().copied().collect()
 }
 
 impl FitsHdu {
@@ -81,14 +89,14 @@ impl FitsHdu {
             crate::hdu::HduInfo::Primary { bitpix, naxes } => {
                 let image_type = super::images::ImageType::equivalent(*bitpix, bscale, bzero)?;
                 Ok(HduInfo::ImageInfo {
-                    shape: naxes.clone(),
+                    shape: row_major(naxes),
                     image_type,
                 })
             }
             crate::hdu::HduInfo::Image { bitpix, naxes } => {
                 let image_type = super::images::ImageType::equivalent(*bitpix, bscale, bzero)?;
                 Ok(HduInfo::ImageInfo {
-                    shape: naxes.clone(),
+                    shape: row_major(naxes),
                     image_type,
                 })
             }
@@ -107,7 +115,7 @@ impl FitsHdu {
             crate::hdu::HduInfo::RandomGroups { bitpix, naxes, .. } => {
                 let image_type = super::images::ImageType::equivalent(*bitpix, bscale, bzero)?;
                 Ok(HduInfo::ImageInfo {
-                    shape: naxes.clone(),
+                    shape: row_major(naxes),
                     image_type,
                 })
             }
@@ -116,7 +124,7 @@ impl FitsHdu {
             } => {
                 let image_type = super::images::ImageType::equivalent(*zbitpix, bscale, bzero)?;
                 Ok(HduInfo::ImageInfo {
-                    shape: znaxes.clone(),
+                    shape: row_major(znaxes),
                     image_type,
                 })
             }

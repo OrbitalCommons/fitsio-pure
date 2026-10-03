@@ -6,6 +6,9 @@ use super::hdu::FitsHdu;
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImageDescription {
     pub data_type: ImageType,
+    /// Axis lengths in row-major order, slowest axis first, as in `fitsio`:
+    /// `[rows, columns]` for a 2-D image. FITS stores them reversed, so the
+    /// last entry becomes `NAXIS1`.
     pub dimensions: Vec<usize>,
 }
 

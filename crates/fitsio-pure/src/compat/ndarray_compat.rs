@@ -11,9 +11,8 @@ use super::images::{ReadImage, WriteImage};
 /// The array is flattened in row-major (C) order — which is FITS storage order
 /// (NAXIS1 fastest-varying) — and written via the element type's
 /// [`WriteImage`] impl. The target HDU must already be created with a matching
-/// total pixel count; per `create_image`'s convention the `dimensions` are
-/// given in FITS axis order (NAXIS1 first), i.e. the reverse of the array's
-/// `(.., NAXIS2, NAXIS1)` shape.
+/// total pixel count; `create_image`'s `dimensions` are row-major, so they are
+/// the array's shape.
 pub trait WriteImageArray {
     /// Flatten and write this array's elements into `hdu`.
     fn write_image_array(&self, file: &mut FitsFile, hdu: &FitsHdu) -> Result<()>;
@@ -39,12 +38,9 @@ where
 {
     fn read_image(file: &FitsFile, hdu: &FitsHdu) -> Result<Vec<Self>> {
         let data: Vec<T> = T::read_image(file, hdu)?;
-        // FITS stores NAXIS1 as the fastest-varying axis, but ndarray is
-        // row-major (last axis fastest). Reverse the FITS axis order so the
-        // flat NAXIS1-fastest buffer maps to a (.., NAXIS2, NAXIS1) shape;
-        // without this, any non-square image is transposed/mis-strided.
-        let mut shape = image_shape(file, hdu)?;
-        shape.reverse();
+        // The image shape is row-major, (.., NAXIS2, NAXIS1), which is how
+        // ndarray lays out the flat NAXIS1-fastest buffer.
+        let shape = image_shape(file, hdu)?;
         let arr = Array::from_shape_vec(shape, data)
             .map_err(|e| super::errors::Error::Message(e.to_string()))?;
         Ok(vec![arr])
@@ -70,12 +66,11 @@ where
     ) -> Result<Vec<Self>> {
         let data: Vec<T> = T::read_rows(file, hdu, start_row, num_rows)?;
         let full_shape = image_shape(file, hdu)?;
-        // A "row" in FITS is one slice along NAXIS1 (the first/fastest axis).
-        // read_image_rows returns num_rows * naxes[0] elements.
-        let row_length = if !full_shape.is_empty() {
-            full_shape[0]
-        } else {
-            data.len() / num_rows
+        // A "row" in FITS is one slice along NAXIS1, the fastest axis, which
+        // is last in the row-major shape.
+        let row_length = match full_shape.last() {
+            Some(&naxis1) => naxis1,
+            None => data.len() / num_rows,
         };
         let shape = if num_rows == 1 {
             vec![row_length]
@@ -128,10 +123,10 @@ mod tests {
         // Logical 4-row x 3-col array; values encode row*10 + col.
         let arr = Array::from_shape_fn((4, 3), |(r, c)| (r * 10 + c) as f32);
 
-        // create_image takes FITS axis order (NAXIS1 first): cols then rows.
+        // create_image takes row-major dimensions, like the array: rows, cols.
         let desc = ImageDescription {
             data_type: ImageType::Float,
-            dimensions: vec![3, 4],
+            dimensions: vec![4, 3],
         };
         let hdu = f.create_image("SCI", &desc).unwrap();
         arr.write_image_array(&mut f, &hdu).unwrap();
@@ -177,7 +172,7 @@ mod tests {
         // view logical order: [1,4, 2,5, 3,6]
         let desc = ImageDescription {
             data_type: ImageType::Double,
-            dimensions: vec![2, 3], // NAXIS1=2, NAXIS2=3 to match view shape (3, 2)
+            dimensions: vec![3, 2], // the view's shape: NAXIS2=3, NAXIS1=2
         };
         let hdu = f.create_image("T", &desc).unwrap();
         view.write_image_array(&mut f, &hdu).unwrap();
@@ -194,7 +189,7 @@ mod tests {
 
         let desc = ImageDescription {
             data_type: ImageType::Float,
-            dimensions: vec![3, 4],
+            dimensions: vec![4, 3],
         };
         let hdu = f.create_image("SCI", &desc).unwrap();
         let pixels: Vec<f32> = (0..12).map(|i| i as f32).collect();
@@ -203,7 +198,7 @@ mod tests {
         let result: Vec<ArrayD<f32>> = ArrayD::<f32>::read_image(&f, &hdu).unwrap();
         assert_eq!(result.len(), 1);
         let arr = &result[0];
-        // dimensions [3, 4] => NAXIS1=3, NAXIS2=4; shape is (NAXIS2, NAXIS1).
+        // dimensions [4, 3] => NAXIS2=4, NAXIS1=3; the shape is the same.
         assert_eq!(arr.shape(), &[4, 3]);
         assert_eq!(arr[[0, 0]], 0.0);
         assert_eq!(arr[[3, 2]], 11.0);
@@ -217,7 +212,7 @@ mod tests {
 
         let desc = ImageDescription {
             data_type: ImageType::Double,
-            dimensions: vec![2, 3, 4],
+            dimensions: vec![4, 3, 2],
         };
         let hdu = f.create_image("CUBE", &desc).unwrap();
         let pixels: Vec<f64> = (0..24).map(|i| i as f64).collect();
@@ -226,8 +221,8 @@ mod tests {
         let result: Vec<ArrayD<f64>> = ArrayD::<f64>::read_image(&f, &hdu).unwrap();
         assert_eq!(result.len(), 1);
         let arr = &result[0];
-        // dimensions [2, 3, 4] => NAXIS1=2, NAXIS2=3, NAXIS3=4; shape reverses
-        // to (NAXIS3, NAXIS2, NAXIS1).
+        // dimensions [4, 3, 2] => NAXIS3=4, NAXIS2=3, NAXIS1=2; the shape is
+        // the same.
         assert_eq!(arr.shape(), &[4, 3, 2]);
         assert_eq!(arr[[0, 0, 0]], 0.0);
         assert_eq!(arr[[3, 2, 1]], 23.0);
@@ -241,7 +236,7 @@ mod tests {
 
         let desc = ImageDescription {
             data_type: ImageType::Float,
-            dimensions: vec![3, 4],
+            dimensions: vec![4, 3],
         };
         let hdu = f.create_image("SCI", &desc).unwrap();
         let pixels: Vec<f32> = (0..12).map(|i| i as f32).collect();
@@ -261,10 +256,10 @@ mod tests {
         let path = dir.path().join("rows.fits");
         let mut f = FitsFile::create(&path).open().unwrap();
 
-        // dimensions [5, 4] means NAXIS1=5 (columns), NAXIS2=4 (rows)
+        // dimensions [4, 5] means 4 rows (NAXIS2) of 5 columns (NAXIS1)
         let desc = ImageDescription {
             data_type: ImageType::Float,
-            dimensions: vec![5, 4],
+            dimensions: vec![4, 5],
         };
         let hdu = f.create_image("SCI", &desc).unwrap();
         let pixels: Vec<f32> = (0..20).map(|i| i as f32).collect();
@@ -287,7 +282,7 @@ mod tests {
 
         let desc = ImageDescription {
             data_type: ImageType::Float,
-            dimensions: vec![5, 4],
+            dimensions: vec![4, 5],
         };
         let hdu = f.create_image("SCI", &desc).unwrap();
         let pixels: Vec<f32> = (0..20).map(|i| i as f32).collect();
@@ -329,7 +324,7 @@ mod tests {
 
         let desc = ImageDescription {
             data_type: ImageType::Short,
-            dimensions: vec![2, 3],
+            dimensions: vec![3, 2],
         };
         let hdu = f.create_image("SCI", &desc).unwrap();
         let pixels: Vec<i16> = vec![1, 2, 3, 4, 5, 6];
@@ -339,7 +334,7 @@ mod tests {
         let result: Vec<ArrayD<f32>> = ArrayD::<f32>::read_image(&f, &hdu).unwrap();
         assert_eq!(result.len(), 1);
         let arr = &result[0];
-        // dimensions [2, 3] => NAXIS1=2, NAXIS2=3; shape is (NAXIS2, NAXIS1).
+        // dimensions [3, 2] => NAXIS2=3, NAXIS1=2; the shape is the same.
         assert_eq!(arr.shape(), &[3, 2]);
         assert_eq!(arr[[0, 0]], 1.0);
         assert_eq!(arr[[2, 1]], 6.0);
@@ -353,10 +348,10 @@ mod tests {
         let path = dir.path().join("nonsquare.fits");
         let mut f = FitsFile::create(&path).open().unwrap();
 
-        // NAXIS1 = 3 (columns, fastest), NAXIS2 = 4 (rows).
+        // 4 rows (NAXIS2) of 3 columns (NAXIS1, fastest).
         let desc = ImageDescription {
             data_type: ImageType::Float,
-            dimensions: vec![3, 4],
+            dimensions: vec![4, 3],
         };
         let hdu = f.create_image("SCI", &desc).unwrap();
 
