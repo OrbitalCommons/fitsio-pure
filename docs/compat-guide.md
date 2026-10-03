@@ -58,6 +58,8 @@ let pixels: Vec<f32> = vec![0.0; 100 * 100];
 f32::write_image(&mut fitsfile, &hdu, &pixels).unwrap();
 ```
 
+As in `fitsio`, `dimensions` and the `shape` that `info()` reports are row-major, slowest axis first: `[rows, columns]` for a 2-D image, the reverse of FITS `NAXISn` order. `read_region` ranges are the exception and, as in cfitsio, list `NAXIS1` (columns) first.
+
 ### Reading image data
 
 ```rust
