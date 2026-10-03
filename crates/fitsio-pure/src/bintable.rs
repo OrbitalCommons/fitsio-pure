@@ -399,10 +399,45 @@ pub fn read_binary_column_range(
     read_column_cells(fits_data, row_data_start, naxis1, num_rows, col, col_offset)
 }
 
+/// The number of table rows `data` fills in column `col`.
+///
+/// Strings, bit arrays and variable-length arrays hold one row per element;
+/// every other type holds `repeat` elements per row. Data that ends partway
+/// through a row is an error.
+pub fn column_data_rows(col: &BinaryColumnDescriptor, data: &BinaryColumnData) -> Result<usize> {
+    let per_row = |len: usize| {
+        if col.repeat == 0 || !len.is_multiple_of(col.repeat) {
+            Err(Error::InvalidValue)
+        } else {
+            Ok(len / col.repeat)
+        }
+    };
+    match data {
+        BinaryColumnData::Ascii(v) => Ok(v.len()),
+        BinaryColumnData::Bit(v) | BinaryColumnData::VarByte(v) => Ok(v.len()),
+        BinaryColumnData::VarShort(v) => Ok(v.len()),
+        BinaryColumnData::VarInt(v) => Ok(v.len()),
+        BinaryColumnData::VarLong(v) => Ok(v.len()),
+        BinaryColumnData::VarFloat(v) => Ok(v.len()),
+        BinaryColumnData::VarDouble(v) => Ok(v.len()),
+        BinaryColumnData::Logical(v) => per_row(v.len()),
+        BinaryColumnData::Byte(v) => per_row(v.len()),
+        BinaryColumnData::Short(v) => per_row(v.len()),
+        BinaryColumnData::Int(v) => per_row(v.len()),
+        BinaryColumnData::Long(v) => per_row(v.len()),
+        BinaryColumnData::Float(v) => per_row(v.len()),
+        BinaryColumnData::Double(v) => per_row(v.len()),
+        BinaryColumnData::ComplexFloat(v) => per_row(v.len()),
+        BinaryColumnData::ComplexDouble(v) => per_row(v.len()),
+    }
+}
+
 /// Write column data into an existing binary table HDU in-place.
 ///
-/// Writes `data` values into column `col_index` for all rows. The data
-/// length must match `naxis2 * repeat` for the column.
+/// Writes `data` into column `col_index`, starting at the first row, for as
+/// many rows as `data` fills (see [`column_data_rows`]); later rows are left
+/// unchanged. The table cannot grow in place, so data for more rows than the
+/// table has is an error.
 pub fn write_binary_column(
     fits_data: &mut [u8],
     hdu: &Hdu,
@@ -420,7 +455,12 @@ pub fn write_binary_column(
     let col_offset = offsets[col_index];
     let data_start = hdu.data_start;
 
-    for row in 0..naxis2 {
+    let rows = column_data_rows(col, data)?;
+    if rows > naxis2 {
+        return Err(Error::InvalidValue);
+    }
+
+    for row in 0..rows {
         let cell_bytes = serialize_binary_column_value(&col.col_type, col.repeat, data, row)?;
         let base = data_start + row * naxis1 + col_offset;
         fits_data[base..base + cell_bytes.len()].copy_from_slice(&cell_bytes);

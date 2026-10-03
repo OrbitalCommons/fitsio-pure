@@ -33,6 +33,16 @@ fn find_card_value(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<crate::
             }
         }
     }
+    // Like cfitsio, find HIERARCH keywords by name ignoring case, with or
+    // without the `HIERARCH ` prefix.
+    let name = crate::header::strip_hierarch(name);
+    for card in &core_hdu.cards {
+        if let Some((key, value)) = crate::header::hierarch_entry(card) {
+            if key.eq_ignore_ascii_case(name) {
+                return Ok(value);
+            }
+        }
+    }
     Err(Error::Message(format!("keyword '{name}' not found")))
 }
 
@@ -98,31 +108,45 @@ fn write_key_to_file(
             hdu.hdu_index
         )))?;
 
-    let keyword = make_keyword(name);
-    let mut found = false;
-    for card in &mut core_hdu.cards {
-        if card.keyword_str() == name {
-            card.value = Some(value.clone());
-            found = true;
-            break;
+    if crate::header::needs_hierarch(name) {
+        // A name a standard 8-byte keyword can't hold becomes a HIERARCH
+        // card, as cfitsio writes it, instead of being truncated.
+        let wanted = crate::header::strip_hierarch(name);
+        let existing = core_hdu.cards.iter().enumerate().find_map(|(i, card)| {
+            let (key, _) = crate::header::hierarch_entry(card)?;
+            key.eq_ignore_ascii_case(wanted)
+                .then(|| (i, key.to_string()))
+        });
+        // An existing key keeps the name as the file spells it.
+        let key = existing.as_ref().map_or(wanted, |(_, key)| key.as_str());
+        let card = crate::header::hierarch_card(key, &value).map_err(|_| {
+            Error::Message(format!(
+                "keyword '{name}' and its value don't fit on one card"
+            ))
+        })?;
+        match existing {
+            Some((i, _)) => core_hdu.cards[i] = card,
+            None => insert_before_end(&mut core_hdu.cards, card),
         }
-    }
-
-    if !found {
-        let end_idx = core_hdu.cards.iter().position(|c| c.is_end());
-        let new_card = crate::header::Card {
-            keyword,
+    } else if let Some(card) = core_hdu.cards.iter_mut().find(|c| c.keyword_str() == name) {
+        card.value = Some(value);
+    } else {
+        let card = crate::header::Card {
+            keyword: make_keyword(name),
             value: Some(value),
             comment: None,
         };
-        if let Some(idx) = end_idx {
-            core_hdu.cards.insert(idx, new_card);
-        } else {
-            core_hdu.cards.push(new_card);
-        }
+        insert_before_end(&mut core_hdu.cards, card);
     }
 
     rebuild_fits_data(file, &fits_data)
+}
+
+fn insert_before_end(cards: &mut Vec<crate::header::Card>, card: crate::header::Card) {
+    match cards.iter().position(|c| c.is_end()) {
+        Some(idx) => cards.insert(idx, card),
+        None => cards.push(card),
+    }
 }
 
 fn rebuild_fits_data(file: &mut FitsFile, fits_data: &crate::hdu::FitsData) -> Result<()> {
@@ -240,5 +264,102 @@ mod tests {
         };
         assert_eq!(hv.value, 42);
         assert_eq!(hv.comment.as_deref(), Some("the answer"));
+    }
+}
+
+#[cfg(test)]
+mod hierarch_tests {
+    use super::*;
+    use crate::compat::fitsfile::FitsFile;
+
+    fn header_cards(f: FitsFile) -> Vec<String> {
+        let bytes = f.into_bytes().unwrap();
+        bytes[..2880]
+            .chunks(80)
+            .map(|c| String::from_utf8_lossy(c).trim_end().to_string())
+            .filter(|c| c.starts_with("HIERARCH"))
+            .collect()
+    }
+
+    // Expected cards are what fitsio 0.21 / cfitsio 4.3.1 write for the same
+    // keys, except that floats keep fitsio-pure's usual formatting (cfitsio
+    // writes `1.234`).
+    #[test]
+    fn long_keywords_are_written_as_hierarch_like_cfitsio() {
+        let mut f = FitsFile::create_in_memory().unwrap();
+        let hdu = f.primary_hdu().unwrap();
+        String::write_key(&mut f, &hdu, "ESO DET CHIP1 ID", &"CCD-42".to_string()).unwrap();
+        f64::write_key(&mut f, &hdu, "ESO TEL TEMP", &1.234).unwrap();
+        i64::write_key(&mut f, &hdu, "ESO DET NDIT", &42).unwrap();
+        i64::write_key(&mut f, &hdu, "LONGNAME9", &7).unwrap();
+        assert_eq!(
+            header_cards(f),
+            [
+                "HIERARCH ESO DET CHIP1 ID = 'CCD-42  '",
+                "HIERARCH ESO TEL TEMP = 1.234000000000000E0",
+                "HIERARCH ESO DET NDIT =     42",
+                "HIERARCH LONGNAME9 =         7",
+            ]
+        );
+    }
+
+    #[test]
+    fn hierarch_keys_are_found_by_any_spelling() {
+        let mut f = FitsFile::create_in_memory().unwrap();
+        let hdu = f.primary_hdu().unwrap();
+        String::write_key(&mut f, &hdu, "ESO DET CHIP1 ID", &"CCD-42".to_string()).unwrap();
+        f64::write_key(&mut f, &hdu, "HIERARCH ESO TEL TEMP", &1.234).unwrap();
+        for name in [
+            "ESO DET CHIP1 ID",
+            "HIERARCH ESO DET CHIP1 ID",
+            "eso det chip1 id",
+        ] {
+            assert_eq!(
+                String::read_key(&f, &hdu, name).unwrap(),
+                "CCD-42",
+                "{name}"
+            );
+        }
+        assert_eq!(f64::read_key(&f, &hdu, "ESO TEL TEMP").unwrap(), 1.234);
+    }
+
+    #[test]
+    fn rewriting_a_hierarch_key_updates_it_in_place() {
+        let mut f = FitsFile::create_in_memory().unwrap();
+        let hdu = f.primary_hdu().unwrap();
+        String::write_key(&mut f, &hdu, "ESO DET CHIP1 ID", &"CCD-42".to_string()).unwrap();
+        String::write_key(&mut f, &hdu, "eso det chip1 id", &"CCD-43".to_string()).unwrap();
+        assert_eq!(
+            String::read_key(&f, &hdu, "ESO DET CHIP1 ID").unwrap(),
+            "CCD-43"
+        );
+        assert_eq!(header_cards(f), ["HIERARCH ESO DET CHIP1 ID = 'CCD-43  '"]);
+    }
+
+    #[test]
+    fn names_sharing_eight_characters_stay_distinct() {
+        let mut f = FitsFile::create_in_memory().unwrap();
+        let hdu = f.primary_hdu().unwrap();
+        i64::write_key(&mut f, &hdu, "ESO DET CHIP1 NX", &2048).unwrap();
+        i64::write_key(&mut f, &hdu, "ESO DET CHIP1 NY", &4096).unwrap();
+        assert_eq!(i64::read_key(&f, &hdu, "ESO DET CHIP1 NX").unwrap(), 2048);
+        assert_eq!(i64::read_key(&f, &hdu, "ESO DET CHIP1 NY").unwrap(), 4096);
+    }
+
+    #[test]
+    fn a_hierarch_card_that_does_not_fit_is_an_error() {
+        let mut f = FitsFile::create_in_memory().unwrap();
+        let hdu = f.primary_hdu().unwrap();
+        let value = "v".repeat(60);
+        assert!(String::write_key(&mut f, &hdu, "ESO A VERY LONG KEYWORD NAME", &value).is_err());
+    }
+
+    #[test]
+    fn eight_character_keywords_are_unchanged() {
+        let mut f = FitsFile::create_in_memory().unwrap();
+        let hdu = f.primary_hdu().unwrap();
+        String::write_key(&mut f, &hdu, "OBSERVER", &"Edwin".to_string()).unwrap();
+        assert_eq!(String::read_key(&f, &hdu, "OBSERVER").unwrap(), "Edwin");
+        assert!(header_cards(f).is_empty());
     }
 }

@@ -507,14 +507,25 @@ fn write_col_inner(
     name: &str,
     col_data: &crate::bintable::BinaryColumnData,
 ) -> Result<()> {
-    let (idx, col_idx) = {
+    let (idx, col_idx, rows, naxis2) = {
         let idx = validate_hdu_index(file, hdu)?;
         let parsed = file.parsed()?;
         let core_hdu = &parsed.hdus[idx];
         let tfields = get_tfields(core_hdu)?;
         let col_idx = find_column_index(&core_hdu.cards, name, tfields)?;
-        (idx, col_idx)
+        let columns = crate::bintable::parse_binary_table_columns(&core_hdu.cards, tfields)?;
+        let rows = crate::bintable::column_data_rows(&columns[col_idx], col_data)?;
+        let naxis2 = match core_hdu.info {
+            crate::hdu::HduInfo::BinaryTable { naxis2, .. } => naxis2,
+            _ => return Err(Error::Message("HDU is not a binary table".to_string())),
+        };
+        (idx, col_idx, rows, naxis2)
     };
+
+    // As in cfitsio, writing past the last row extends the table.
+    if rows > naxis2 {
+        grow_table(file, idx, rows)?;
+    }
 
     // Clone the HDU so nothing borrows `file` when we write back below.
     let core_hdu = file.parsed()?.hdus[idx].clone();
@@ -522,6 +533,50 @@ fn write_col_inner(
     let mut data = file.data().to_vec();
     crate::bintable::write_binary_column(&mut data, &core_hdu, col_idx, col_data)?;
     file.set_data(data);
+    Ok(())
+}
+
+/// Extends binary table HDU `idx` to `rows` rows. The new rows are zeroed and
+/// inserted after the last row, so a heap after the rows moves down with
+/// `THEAP`, and `NAXIS2` records the new count.
+fn grow_table(file: &mut FitsFile, idx: usize, rows: usize) -> Result<()> {
+    let mut fits_data = crate::hdu::parse_fits(file.data())?;
+    let hdu = &mut fits_data.hdus[idx];
+    let (naxis1, naxis2) = match hdu.info {
+        crate::hdu::HduInfo::BinaryTable { naxis1, naxis2, .. } => (naxis1, naxis2),
+        _ => return Err(Error::Message("HDU is not a binary table".to_string())),
+    };
+    let added = (rows - naxis2) * naxis1;
+    for card in &mut hdu.cards {
+        match (card.keyword_str(), &card.value) {
+            ("NAXIS2", _) => card.value = Some(crate::value::Value::Integer(rows as i64)),
+            ("THEAP", Some(crate::value::Value::Integer(theap))) => {
+                card.value = Some(crate::value::Value::Integer(theap + added as i64))
+            }
+            _ => {}
+        }
+    }
+
+    let mut out = Vec::with_capacity(file.data().len() + added + crate::BLOCK_SIZE);
+    for (i, hdu) in fits_data.hdus.iter().enumerate() {
+        let cards: Vec<_> = hdu.cards.iter().filter(|c| !c.is_end()).cloned().collect();
+        out.extend_from_slice(&crate::header::serialize_header(&cards)?);
+        let raw = file
+            .data()
+            .get(hdu.data_start..hdu.data_start + hdu.data_len)
+            .ok_or_else(|| Error::Message("HDU data runs past the end of the file".to_string()))?;
+        let start = out.len();
+        if i == idx {
+            let (table, heap) = raw.split_at(naxis1 * naxis2);
+            out.extend_from_slice(table);
+            out.resize(out.len() + added, 0);
+            out.extend_from_slice(heap);
+        } else {
+            out.extend_from_slice(raw);
+        }
+        out.resize(start + crate::block::padded_byte_len(out.len() - start), 0);
+    }
+    file.set_data(out);
     Ok(())
 }
 
@@ -749,6 +804,110 @@ mod tests {
             .unwrap();
         let read_back: Vec<i32> = hdu.read_col(&f, "ID").unwrap();
         assert_eq!(read_back, vec![99, 88, 77, 66, 55]);
+    }
+
+    fn column(
+        name: &str,
+        col_type: BinaryColumnType,
+        byte_width: usize,
+    ) -> crate::bintable::BinaryColumnDescriptor {
+        crate::bintable::BinaryColumnDescriptor {
+            name: Some(name.to_string()),
+            repeat: 1,
+            col_type,
+            byte_width,
+            tdim: None,
+        }
+    }
+
+    #[test]
+    fn write_col_grows_a_new_table() {
+        let mut f = FitsFile::create_in_memory().unwrap();
+        let hdu = f
+            .create_table(
+                "T",
+                &[
+                    column("A", BinaryColumnType::Int, 4),
+                    column("B", BinaryColumnType::Double, 8),
+                ],
+            )
+            .unwrap();
+        hdu.write_col(&mut f, "A", &[1i32, 2, 3, 4, 5]).unwrap();
+        hdu.write_col(&mut f, "B", &[0.5f64, 1.5, 2.5]).unwrap();
+
+        let a: Vec<i32> = hdu.read_col(&f, "A").unwrap();
+        let b: Vec<f64> = hdu.read_col(&f, "B").unwrap();
+        assert_eq!(a, vec![1, 2, 3, 4, 5]);
+        assert_eq!(b, vec![0.5, 1.5, 2.5, 0.0, 0.0]);
+        assert_eq!(
+            hdu.info(&f).unwrap(),
+            crate::compat::hdu::HduInfo::TableInfo {
+                column_count: 2,
+                row_count: 5
+            }
+        );
+    }
+
+    #[test]
+    fn write_col_with_fewer_values_than_rows_leaves_later_rows() {
+        let mut f = FitsFile::create_in_memory().unwrap();
+        let hdu = make_test_table(&mut f);
+        hdu.write_col(&mut f, "ID", &[7i32, 8]).unwrap();
+        let ids: Vec<i32> = hdu.read_col(&f, "ID").unwrap();
+        assert_eq!(ids, vec![7, 8, 30, 40, 50]);
+    }
+
+    #[test]
+    fn write_col_rejects_a_partial_row() {
+        let mut f = FitsFile::create_in_memory().unwrap();
+        let mut wide = column("V", BinaryColumnType::Int, 12);
+        wide.repeat = 3;
+        let hdu = f.create_table("T", &[wide]).unwrap();
+        assert!(hdu.write_col(&mut f, "V", &[1i32, 2, 3, 4]).is_err());
+        hdu.write_col(&mut f, "V", &[1i32, 2, 3, 4, 5, 6]).unwrap();
+        let v: Vec<i32> = hdu.read_col(&f, "V").unwrap();
+        assert_eq!(v, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn growing_a_table_keeps_its_heap() {
+        let mut f = FitsFile::create_in_memory().unwrap();
+        let columns = vec![
+            column("ID", BinaryColumnType::Int, 4),
+            column("SPEC", BinaryColumnType::VarArrayP('J'), 8),
+        ];
+        // Two rows of (ID, P descriptor), then a heap holding [1, 2, 3] and [4].
+        let rows: [(i32, i32, i32); 2] = [(10, 3, 0), (20, 1, 12)];
+        let heap: Vec<u8> = [1i32, 2, 3, 4]
+            .iter()
+            .flat_map(|v| v.to_be_bytes())
+            .collect();
+        let mut table: Vec<u8> = rows
+            .iter()
+            .flat_map(|(id, count, offset)| [id, count, offset].map(|v| v.to_be_bytes()).concat())
+            .collect();
+        table.extend_from_slice(&heap);
+        table.resize(crate::block::padded_byte_len(table.len()), 0);
+        let cards = crate::bintable::build_binary_table_cards(&columns, 2, heap.len()).unwrap();
+        let mut data = f.data().to_vec();
+        data.extend_from_slice(&crate::header::serialize_header(&cards).unwrap());
+        data.extend_from_slice(&table);
+        f.set_data(data);
+        let hdu = f.hdu(1usize).unwrap();
+        let parsed = f.parsed().unwrap();
+        let spec = crate::bintable::read_binary_column_vla(f.data(), &parsed.hdus[1], 1).unwrap();
+        assert_eq!(spec, BinaryColumnData::VarInt(vec![vec![1, 2, 3], vec![4]]));
+
+        hdu.write_col(&mut f, "ID", &[10i32, 20, 30, 40]).unwrap();
+
+        let ids: Vec<i32> = hdu.read_col(&f, "ID").unwrap();
+        assert_eq!(ids, vec![10, 20, 30, 40]);
+        let parsed = f.parsed().unwrap();
+        let spec = crate::bintable::read_binary_column_vla(f.data(), &parsed.hdus[1], 1).unwrap();
+        assert_eq!(
+            spec,
+            BinaryColumnData::VarInt(vec![vec![1, 2, 3], vec![4], vec![], vec![]])
+        );
     }
 
     #[test]
