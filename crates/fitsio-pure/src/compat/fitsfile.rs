@@ -29,6 +29,7 @@ pub struct FitsFile {
 /// Builder for creating a new FITS file.
 pub struct NewFitsFile {
     path: PathBuf,
+    image_description: Option<ImageDescription>,
     overwrite: bool,
 }
 
@@ -143,9 +144,21 @@ impl FitsFile {
     /// with the usual methods and take the result with [`FitsFile::into_bytes`];
     /// `flush` and `Drop` never write it to disk.
     pub fn create_in_memory() -> Result<Self> {
-        let cards = crate::primary::build_primary_header(8, &[])?;
+        Self::new_in_memory(primary_hdu_bytes(None)?)
+    }
+
+    /// Create a new, writable in-memory FITS file whose primary HDU is an image
+    /// described by `desc`, the in-memory twin of
+    /// [`NewFitsFile::with_custom_primary`].
+    ///
+    /// Write its pixels through [`FitsFile::primary_hdu`].
+    pub fn create_in_memory_with_custom_primary(desc: &ImageDescription) -> Result<Self> {
+        Self::new_in_memory(primary_hdu_bytes(Some(desc))?)
+    }
+
+    fn new_in_memory(data: Vec<u8>) -> Result<Self> {
         Ok(FitsFile {
-            data: crate::header::serialize_header(&cards)?,
+            data,
             filename: PathBuf::new(),
             mode: FileOpenMode::ReadWrite,
             in_memory: true,
@@ -177,6 +190,7 @@ impl FitsFile {
     pub fn create<P: AsRef<Path>>(path: P) -> NewFitsFile {
         NewFitsFile {
             path: path.as_ref().to_path_buf(),
+            image_description: None,
             overwrite: false,
         }
     }
@@ -211,48 +225,16 @@ impl FitsFile {
 
     /// Create a new image extension HDU with the given name and description.
     pub fn create_image(&mut self, extname: &str, desc: &ImageDescription) -> Result<FitsHdu> {
-        let bitpix = desc.data_type.to_bitpix();
         // `dimensions` are row-major, as in `fitsio`; FITS lists NAXIS1 first.
-        let naxes = super::hdu::row_major(&desc.dimensions);
-
-        let mut cards = crate::extension::build_extension_header(
+        let cards = crate::extension::build_extension_header(
             crate::extension::ExtensionType::Image,
-            bitpix,
-            &naxes,
+            desc.data_type.to_bitpix(),
+            &super::hdu::row_major(&desc.dimensions),
             0,
             1,
         )?;
-
-        // For unsigned pixel types, record the cfitsio storage convention
-        // (signed BITPIX offset by BZERO) so readers recover unsigned values.
-        if let Some(bzero) = desc.data_type.unsigned_bzero() {
-            cards.push(crate::header::Card {
-                keyword: make_keyword("BZERO"),
-                value: Some(bzero),
-                comment: None,
-            });
-            cards.push(crate::header::Card {
-                keyword: make_keyword("BSCALE"),
-                value: Some(crate::value::Value::Integer(1)),
-                comment: None,
-            });
-        }
-
-        let extname_card = crate::header::Card {
-            keyword: make_keyword("EXTNAME"),
-            value: Some(crate::value::Value::String(extname.to_string())),
-            comment: None,
-        };
-        cards.push(extname_card);
-
-        let header_bytes = crate::header::serialize_header(&cards)?;
-
-        let data_bytes = desc.dimensions.iter().copied().product::<usize>()
-            * ((bitpix.unsigned_abs() as usize) / 8);
-        let padded_data = crate::block::padded_byte_len(data_bytes);
-
-        self.data.extend_from_slice(&header_bytes);
-        self.data.resize(self.data.len() + padded_data, 0u8);
+        self.data
+            .extend_from_slice(&image_hdu_bytes(cards, extname, desc)?);
 
         self.invalidate_cache();
         let fits_data = self.parsed()?;
@@ -365,7 +347,15 @@ impl NewFitsFile {
         self
     }
 
-    /// Finalize creation: write a minimal primary HDU and return an open `FitsFile`.
+    /// Make the primary HDU an image described by `description` instead of an
+    /// empty one, so its pixels can be written through [`FitsFile::primary_hdu`].
+    pub fn with_custom_primary(mut self, description: &ImageDescription) -> Self {
+        self.image_description = Some(description.clone());
+        self
+    }
+
+    /// Finalize creation: write the primary HDU (minimal unless
+    /// [`NewFitsFile::with_custom_primary`] was given) and return an open `FitsFile`.
     pub fn open(self) -> Result<FitsFile> {
         if !self.overwrite && self.path.exists() {
             return Err(Error::Message(format!(
@@ -374,19 +364,77 @@ impl NewFitsFile {
             )));
         }
 
-        let cards = crate::primary::build_primary_header(8, &[])?;
-        let header_bytes = crate::header::serialize_header(&cards)?;
+        let data = primary_hdu_bytes(self.image_description.as_ref())?;
 
-        std::fs::write(&self.path, &header_bytes)?;
+        std::fs::write(&self.path, &data)?;
 
         Ok(FitsFile {
-            data: header_bytes,
+            data,
             filename: self.path,
             mode: FileOpenMode::ReadWrite,
             in_memory: false,
             cached_parse: OnceLock::new(),
         })
     }
+}
+
+/// The bytes of a new primary HDU: minimal when `desc` is `None`, otherwise an
+/// image named `_PRIMARY` (as rust-fitsio names it) with zeroed pixels.
+fn primary_hdu_bytes(desc: Option<&ImageDescription>) -> Result<Vec<u8>> {
+    match desc {
+        None => {
+            let cards = crate::primary::build_primary_header(8, &[])?;
+            Ok(crate::header::serialize_header(&cards)?)
+        }
+        Some(desc) => {
+            // `dimensions` are row-major, as in `fitsio`; FITS lists NAXIS1 first.
+            let cards = crate::primary::build_primary_header(
+                desc.data_type.to_bitpix(),
+                &super::hdu::row_major(&desc.dimensions),
+            )?;
+            image_hdu_bytes(cards, "_PRIMARY", desc)
+        }
+    }
+}
+
+/// Finish an image HDU from its structural `cards`: add the unsigned-type
+/// scaling and `EXTNAME`, then serialize it with a zeroed data unit.
+fn image_hdu_bytes(
+    mut cards: Vec<crate::header::Card>,
+    extname: &str,
+    desc: &ImageDescription,
+) -> Result<Vec<u8>> {
+    // For unsigned pixel types, record the cfitsio storage convention
+    // (signed BITPIX offset by BZERO) so readers recover unsigned values.
+    if let Some(bzero) = desc.data_type.unsigned_bzero() {
+        cards.push(crate::header::Card {
+            keyword: make_keyword("BZERO"),
+            value: Some(bzero),
+            comment: None,
+        });
+        cards.push(crate::header::Card {
+            keyword: make_keyword("BSCALE"),
+            value: Some(crate::value::Value::Integer(1)),
+            comment: None,
+        });
+    }
+
+    cards.push(crate::header::Card {
+        keyword: make_keyword("EXTNAME"),
+        value: Some(crate::value::Value::String(extname.to_string())),
+        comment: None,
+    });
+
+    let mut bytes = crate::header::serialize_header(&cards)?;
+
+    // NAXIS = 0 means no data unit, not the empty product's one pixel.
+    let pixels = match desc.dimensions.as_slice() {
+        [] => 0,
+        dims => dims.iter().product::<usize>(),
+    };
+    let data_bytes = pixels * ((desc.data_type.to_bitpix().unsigned_abs() as usize) / 8);
+    bytes.resize(bytes.len() + crate::block::padded_byte_len(data_bytes), 0u8);
+    Ok(bytes)
 }
 
 fn gunzip_if_compressed(data: Vec<u8>) -> Result<Vec<u8>> {
@@ -665,5 +713,135 @@ mod tests {
         f.create_image("EXT2", &desc).unwrap();
         let hdus = f.iter().unwrap();
         assert_eq!(hdus.len(), 3);
+    }
+
+    #[test]
+    fn custom_primary_holds_the_image() {
+        use crate::compat::hdu::HduInfo;
+        use crate::compat::images::{ReadImage, WriteImage};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.fits");
+        let desc = ImageDescription {
+            data_type: ImageType::Float,
+            dimensions: vec![5, 7],
+        };
+        let pixels: Vec<f32> = (0..35).map(|i| i as f32 * 0.5 - 3.0).collect();
+        {
+            let mut f = FitsFile::create(&path)
+                .with_custom_primary(&desc)
+                .open()
+                .unwrap();
+            assert_eq!(f.num_hdus().unwrap(), 1);
+            let hdu = f.primary_hdu().unwrap();
+            f32::write_image(&mut f, &hdu, &pixels).unwrap();
+        }
+
+        let f = FitsFile::open(&path).unwrap();
+        assert_eq!(f.num_hdus().unwrap(), 1);
+        let hdu = f.hdu(0usize).unwrap();
+        assert_eq!(
+            hdu.info(&f).unwrap(),
+            HduInfo::ImageInfo {
+                shape: vec![5, 7],
+                image_type: ImageType::Float,
+            }
+        );
+        // Row-major [5, 7] is 5 rows of 7: NAXIS1 = 7, NAXIS2 = 5.
+        assert_eq!(hdu.read_key::<i64>(&f, "NAXIS1").unwrap(), 7);
+        assert_eq!(hdu.read_key::<i64>(&f, "NAXIS2").unwrap(), 5);
+        assert_eq!(f32::read_image(&f, &hdu).unwrap(), pixels);
+        assert_eq!(f.hdu("_PRIMARY").unwrap().hdu_index, 0);
+    }
+
+    #[test]
+    fn custom_primary_unsigned_keeps_bzero() {
+        use crate::compat::images::{ReadImage, WriteImage};
+
+        let desc = ImageDescription {
+            data_type: ImageType::UnsignedShort,
+            dimensions: vec![5, 7],
+        };
+        let pixels: Vec<u16> = (0..35).map(|i| i * 1871).collect();
+        let mut f = FitsFile::create_in_memory_with_custom_primary(&desc).unwrap();
+        let hdu = f.primary_hdu().unwrap();
+        u16::write_image(&mut f, &hdu, &pixels).unwrap();
+
+        let g = FitsFile::from_bytes(f.into_bytes().unwrap()).unwrap();
+        let hdu = g.primary_hdu().unwrap();
+        assert_eq!(hdu.read_key::<i64>(&g, "BITPIX").unwrap(), 16);
+        assert_eq!(hdu.read_key::<i64>(&g, "BZERO").unwrap(), 32_768);
+        assert_eq!(u16::read_image(&g, &hdu).unwrap(), pixels);
+    }
+
+    #[test]
+    fn custom_primary_comes_before_extensions() {
+        use crate::compat::images::{ReadImage, WriteImage};
+
+        let primary = ImageDescription {
+            data_type: ImageType::Short,
+            dimensions: vec![5, 7],
+        };
+        let mut f = FitsFile::create_in_memory_with_custom_primary(&primary).unwrap();
+        let ext = f
+            .create_image(
+                "SCI",
+                &ImageDescription {
+                    data_type: ImageType::Double,
+                    dimensions: vec![3],
+                },
+            )
+            .unwrap();
+        // Writing the primary after an extension exists must not disturb it.
+        let pixels: Vec<i16> = (0..35).map(|i| i * 100 - 1700).collect();
+        f64::write_image(&mut f, &ext, &[1.5, -2.5, 3.5]).unwrap();
+        let primary_hdu = f.primary_hdu().unwrap();
+        i16::write_image(&mut f, &primary_hdu, &pixels).unwrap();
+
+        assert_eq!(f.num_hdus().unwrap(), 2);
+        assert_eq!(i16::read_image(&f, &primary_hdu).unwrap(), pixels);
+        let ext = f.hdu("SCI").unwrap();
+        assert_eq!(f64::read_image(&f, &ext).unwrap(), vec![1.5, -2.5, 3.5]);
+    }
+
+    #[test]
+    fn custom_primary_chains_with_overwrite_in_either_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.fits");
+        let desc = ImageDescription {
+            data_type: ImageType::Short,
+            dimensions: vec![2, 3],
+        };
+        FitsFile::create(&path).open().unwrap();
+        assert!(FitsFile::create(&path)
+            .with_custom_primary(&desc)
+            .open()
+            .is_err());
+
+        let f = FitsFile::create(&path)
+            .with_custom_primary(&desc)
+            .overwrite()
+            .open()
+            .unwrap();
+        assert_eq!(f.data().len(), 2 * 2880);
+        drop(f);
+        let f = FitsFile::create(&path)
+            .overwrite()
+            .with_custom_primary(&desc)
+            .open()
+            .unwrap();
+        assert_eq!(f.data().len(), 2 * 2880);
+    }
+
+    #[test]
+    fn custom_primary_without_axes_has_no_data_unit() {
+        let desc = ImageDescription {
+            data_type: ImageType::Float,
+            dimensions: vec![],
+        };
+        let mut f = FitsFile::create_in_memory_with_custom_primary(&desc).unwrap();
+        assert_eq!(f.data().len(), 2880);
+        f.create_image("SCI", &desc).unwrap();
+        assert_eq!(f.num_hdus().unwrap(), 2);
     }
 }
