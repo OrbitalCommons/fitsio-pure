@@ -212,12 +212,13 @@ impl FitsFile {
     /// Create a new image extension HDU with the given name and description.
     pub fn create_image(&mut self, extname: &str, desc: &ImageDescription) -> Result<FitsHdu> {
         let bitpix = desc.data_type.to_bitpix();
-        let naxes = &desc.dimensions;
+        // `dimensions` are row-major, as in `fitsio`; FITS lists NAXIS1 first.
+        let naxes = super::hdu::row_major(&desc.dimensions);
 
         let mut cards = crate::extension::build_extension_header(
             crate::extension::ExtensionType::Image,
             bitpix,
-            naxes,
+            &naxes,
             0,
             1,
         )?;
