@@ -117,3 +117,74 @@ fn read_region_ranges_are_naxis1_first_like_cfitsio() {
     // Rows 2..4 of a 7-wide image, columns 1..6.
     assert_eq!(&ours[..5], &[15, 16, 17, 18, 19]);
 }
+
+/// A custom primary image: the same description through each library gives
+/// the same NAXISn, and each reads the other's pixels.
+#[test]
+fn custom_primary_matches_fitsio() {
+    use fitsio_pure::compat::FitsFile as RootFits;
+
+    let dir = tempfile::tempdir().unwrap();
+    for (i, dims) in SHAPES.into_iter().enumerate() {
+        let by_c = dir.path().join(format!("c{i}.fits"));
+        let by_pure = dir.path().join(format!("pure{i}.fits"));
+        {
+            let desc = CImageDesc {
+                data_type: CImageType::Long,
+                dimensions: dims,
+            };
+            let mut f = CFits::create(&by_c)
+                .with_custom_primary(&desc)
+                .open()
+                .unwrap();
+            let hdu = f.primary_hdu().unwrap();
+            hdu.write_image(&mut f, &pixels(dims)).unwrap();
+        }
+        {
+            let desc = PureImageDesc {
+                data_type: PureImageType::Long,
+                dimensions: dims.to_vec(),
+            };
+            let mut f = RootFits::create(&by_pure)
+                .with_custom_primary(&desc)
+                .open()
+                .unwrap();
+            let hdu = f.primary_hdu().unwrap();
+            i32::write_image(&mut f, &hdu, &pixels(dims)).unwrap();
+        }
+
+        let primary_naxes = |path: &Path| -> Vec<i64> {
+            let mut f = CFits::open(path).unwrap();
+            let hdu = f.primary_hdu().unwrap();
+            (1..=dims.len())
+                .map(|n| hdu.read_key(&mut f, &format!("NAXIS{n}")).unwrap())
+                .collect()
+        };
+        assert_eq!(
+            primary_naxes(&by_pure),
+            primary_naxes(&by_c),
+            "NAXISn for {dims:?}"
+        );
+
+        let mut c = CFits::open(&by_pure).unwrap();
+        let hdu = c.primary_hdu().unwrap();
+        let read: Vec<i32> = hdu.read_image(&mut c).unwrap();
+        assert_eq!(
+            read,
+            pixels(dims),
+            "cfitsio reading fitsio-pure's {dims:?} primary"
+        );
+
+        let p = PureFits::open(&by_c).unwrap();
+        let hdu = p.primary_hdu().unwrap();
+        assert_eq!(
+            i32::read_image(&p, &hdu).unwrap(),
+            pixels(dims),
+            "fitsio-pure reading cfitsio's {dims:?} primary"
+        );
+        match hdu.info(&p).unwrap() {
+            PureHduInfo::ImageInfo { shape, .. } => assert_eq!(shape, dims),
+            other => panic!("not an image: {other:?}"),
+        }
+    }
+}

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.14.1
+
+### Added
+
+- `FitsFile::create(path).with_custom_primary(&desc)` and `FitsFile::create_in_memory_with_custom_primary(&desc)` make the primary HDU an image, as in `fitsio`, so pixels can be written through `primary_hdu()` instead of an extension. The image is named `_PRIMARY`, as rust-fitsio names it. Its dimensions are row-major, like `create_image`'s, and unsigned types get `BZERO`/`BSCALE`. NAXIS, pixels and shapes match cfitsio's for 2-D and 3-D non-square images in both directions.
+- `FitsFile`, `FileOpenMode` and `HeaderValue` are re-exported at `fitsio_pure::compat`, mirroring `fitsio`'s crate root, so `use fitsio::FitsFile;` ports as `use fitsio_pure::compat::FitsFile;`.
+
+### Fixed
+
+- An image HDU with `NAXIS = 0` no longer gets a one-pixel data unit.
+
 ## 0.14.0
 
 ### Changed
