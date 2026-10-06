@@ -1,14 +1,16 @@
 //! Streaming image HDU writer.
 //!
-//! [`ImageWriter`] writes an image HDU to any [`Write`] sink without holding
+//! [`ImageWriter`](crate::image_writer::ImageWriter) writes an image HDU to
+//! any [`Write`](crate::io::Write) sink without holding
 //! the whole data unit in memory: the header goes out first, then samples are
 //! converted to big-endian through a fixed-size buffer as they arrive, and
-//! [`ImageWriter::finish`] checks the sample count against `NAXISn` and writes
+//! [`ImageWriter::finish`](crate::image_writer::ImageWriter::finish) checks the sample count against `NAXISn` and writes
 //! the zero padding to the 2880-byte block boundary.
 //!
 //! The bytes are identical to those of [`crate::image::build_image_hdu`] (for
 //! a primary HDU) or [`crate::image::build_image_hdu_with_scaling`] (via
-//! [`ImageWriter::write_physical`]) for the same header and pixels.
+//! [`ImageWriter::write_physical`](crate::image_writer::ImageWriter::write_physical))
+//! for the same header and pixels.
 //!
 //! ```
 //! use fitsio_pure::image_writer::ImageWriter;
@@ -22,7 +24,7 @@
 //! ```
 //!
 //! Several HDUs can be streamed into one file by handing the sink returned by
-//! `finish` to [`ImageWriter::image_extension`].
+//! `finish` to [`ImageWriter::image_extension`](crate::image_writer::ImageWriter::image_extension).
 //!
 //! With the `std` feature, wrap an [`AtomicFile`](crate::io::AtomicFile) to
 //! write a file that only replaces its target once it is complete:
