@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.15.3
+
+### Fixed
+
+- `FitsReader::read_image` and `read_image_into_f32`/`_f64` decode about 1.3× faster from other crates. The per-pixel big-endian conversion wasn't inlinable across crates, so each pixel was a function call and the loop couldn't vectorize. A 24-megapixel `BITPIX = -32` frame loaded in 101 ms and now loads in 76 ms; a 61-megapixel `BITPIX = 16` frame went from 195 ms to 118 ms.
+
 ## 0.15.2
 
 ### Fixed

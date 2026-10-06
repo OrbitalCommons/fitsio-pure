@@ -535,12 +535,14 @@ trait Output: Copy {
 }
 
 impl Output for f32 {
+    #[inline]
     fn from_pixel<T: Pixel>(p: T) -> Self {
         p.to_f32()
     }
 }
 
 impl Output for f64 {
+    #[inline]
     fn from_pixel<T: Pixel>(p: T) -> Self {
         p.to_f64()
     }
@@ -550,14 +552,17 @@ macro_rules! pixel {
     ($($t:ty),*) => {$(
         impl Pixel for $t {
             const SIZE: usize = core::mem::size_of::<$t>();
+            #[inline]
             fn from_be(bytes: &[u8]) -> Self {
                 let mut b = [0u8; core::mem::size_of::<$t>()];
                 b.copy_from_slice(bytes);
                 <$t>::from_be_bytes(b)
             }
+            #[inline]
             fn to_f32(self) -> f32 {
                 self as f32
             }
+            #[inline]
             fn to_f64(self) -> f64 {
                 self as f64
             }
