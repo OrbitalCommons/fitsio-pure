@@ -81,11 +81,12 @@ pub fn parse_card(card_bytes: &[u8; CARD_SIZE]) -> Result<Card> {
     let mut keyword = [b' '; 8];
     keyword.copy_from_slice(&card_bytes[..8]);
 
-    for &b in &keyword {
-        match b {
-            b'A'..=b'Z' | b'0'..=b'9' | b' ' | b'-' | b'_' => {}
-            _ => return Err(Error::InvalidKeyword),
-        }
+    // The standard allows only `A-Z 0-9 - _` in a keyword, but files from
+    // capture software sometimes use lowercase or other printable ASCII.
+    // Read those as written, as cfitsio and astropy do, rather than reject
+    // the whole header; only non-printable bytes are an error.
+    if !keyword.iter().all(|b| (b' '..=b'~').contains(b)) {
+        return Err(Error::InvalidKeyword);
     }
 
     if &keyword == b"END     " {
@@ -125,9 +126,12 @@ pub fn parse_card(card_bytes: &[u8; CARD_SIZE]) -> Result<Card> {
                 let field_str = str::from_utf8(value_field)
                     .map_err(|_| Error::InvalidHeader("non-UTF8 card data"))?;
                 let comment = extract_comment_from_empty_value(field_str);
+                // A blank value field (nothing but a comment) is FITS's
+                // undefined value; anything else is a value we can't parse.
+                let blank = field_str.split(" /").next().unwrap_or("").trim().is_empty();
                 Ok(Card {
                     keyword,
-                    value: None,
+                    value: blank.then_some(Value::Undefined),
                     comment,
                 })
             }
@@ -923,23 +927,69 @@ mod parse_tests {
     }
 
     #[test]
-    fn parse_card_invalid_keyword_lowercase() {
-        let card = make_card("bitpix  =                    16");
-        assert!(matches!(parse_card(&card), Err(Error::InvalidKeyword)));
+    fn parse_card_lowercase_keyword_is_read_as_written() {
+        let card = make_card("date-obs= '2026-10-06'");
+        let c = parse_card(&card).unwrap();
+        assert_eq!(c.keyword_str(), "date-obs");
+        assert_eq!(c.value, Some(Value::String(String::from("2026-10-06"))));
     }
 
     #[test]
-    fn parse_card_invalid_keyword_special_chars() {
+    fn parse_card_printable_special_chars_are_read() {
         let card = make_card("FOO@BAR =                    16");
-        assert!(parse_card(&card).is_err());
+        assert_eq!(parse_card(&card).unwrap().keyword_str(), "FOO@BAR");
+    }
+
+    #[test]
+    fn parse_card_non_printable_keyword_is_rejected() {
+        let mut card = make_card("FOO     =                    16");
+        card[1] = 0x07;
+        assert!(matches!(parse_card(&card), Err(Error::InvalidKeyword)));
     }
 
     #[test]
     fn parse_card_empty_value_with_comment() {
         let card = make_card("BLANK   =                      / undefined value");
         let c = parse_card(&card).unwrap();
-        assert!(c.value.is_none());
+        assert_eq!(c.value, Some(Value::Undefined));
         assert_eq!(c.comment, Some(String::from("undefined value")));
+    }
+
+    #[test]
+    fn undefined_value_round_trips_and_differs_from_empty_string() {
+        for text in ["FILTER  =                      / no filter", "FILTER  ="] {
+            let card = make_card(text);
+            assert_eq!(format_card(&parse_card(&card).unwrap()), card, "{text}");
+        }
+        // An empty string is written padded to 8 characters, so compare values.
+        let empty = parse_card(&make_card("FILTER  = ''")).unwrap();
+        assert_eq!(parse_card(&format_card(&empty)).unwrap(), empty);
+        let undefined = parse_card(&make_card("FILTER  =")).unwrap();
+        assert_ne!(undefined.value, empty.value);
+    }
+
+    #[test]
+    fn unparseable_value_still_has_no_value() {
+        let c = parse_card(&make_card("BAD     = not a value")).unwrap();
+        assert_eq!(c.value, None);
+    }
+
+    #[test]
+    fn a_lowercase_keyword_no_longer_blocks_the_header() {
+        let cards: Vec<[u8; CARD_SIZE]> = [
+            "SIMPLE  =                    T",
+            "BITPIX  =                   16",
+            "NAXIS   =                    0",
+            "date-obs= '2026-10-06'",
+            "END",
+        ]
+        .iter()
+        .map(|t| make_card(t))
+        .collect();
+        let mut block: Vec<u8> = cards.concat();
+        block.resize(BLOCK_SIZE, b' ');
+        let parsed = parse_header_blocks(&block).unwrap();
+        assert!(parsed.iter().any(|c| c.keyword_str() == "date-obs"));
     }
 
     #[test]
