@@ -8,6 +8,11 @@
 #[allow(unused_imports)]
 pub use std::io::{Cursor, Read, Result, Seek, SeekFrom, Write};
 
+#[cfg(feature = "std")]
+mod atomic;
+#[cfg(feature = "std")]
+pub use atomic::{write_atomic, AtomicFile};
+
 // ── no_std: provide our own implementations ──
 
 #[cfg(not(feature = "std"))]

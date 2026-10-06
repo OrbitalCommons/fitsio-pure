@@ -32,7 +32,10 @@ pub mod hdu;
 pub mod header;
 /// Image pixel data reading and type conversion.
 pub mod image;
-/// Minimal `Read`/`Write`/`Seek` traits for `no_std` environments.
+/// Streaming image HDU writer over any `Write` sink.
+pub mod image_writer;
+/// Minimal `Read`/`Write`/`Seek` traits for `no_std` environments, and
+/// atomic file replacement under `std`.
 pub mod io;
 /// Primary HDU header parsing and construction.
 pub mod primary;

@@ -4,6 +4,7 @@ use std::sync::OnceLock;
 use super::errors::{Error, Result};
 use super::hdu::FitsHdu;
 use super::images::ImageDescription;
+use crate::io::write_atomic;
 
 /// Whether a file is opened for reading or writing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -303,9 +304,12 @@ impl FitsFile {
 
     /// Flush the in-memory data to disk if opened for writing from a path.
     /// Does nothing for a file from [`FitsFile::create_in_memory`].
+    ///
+    /// The file is replaced atomically with [`crate::io::write_atomic`], so a
+    /// failed or interrupted flush leaves the previous file intact.
     pub fn flush(&self) -> Result<()> {
         if self.mode == FileOpenMode::ReadWrite && !self.in_memory {
-            std::fs::write(&self.filename, &self.data)?;
+            write_atomic(&self.filename, &self.data)?;
         }
         Ok(())
     }
@@ -335,7 +339,7 @@ impl FitsFile {
 impl Drop for FitsFile {
     fn drop(&mut self) {
         if self.mode == FileOpenMode::ReadWrite && !self.in_memory {
-            let _ = std::fs::write(&self.filename, &self.data);
+            let _ = write_atomic(&self.filename, &self.data);
         }
     }
 }
@@ -366,7 +370,7 @@ impl NewFitsFile {
 
         let data = primary_hdu_bytes(self.image_description.as_ref())?;
 
-        std::fs::write(&self.path, &data)?;
+        write_atomic(&self.path, &data)?;
 
         Ok(FitsFile {
             data,
@@ -567,6 +571,46 @@ mod tests {
         // Saving would replace the compressed file with plain bytes, so editing is refused.
         assert!(FitsFile::edit(&gz_path).is_err());
         assert_eq!(std::fs::read(&gz_path).unwrap(), gz);
+    }
+
+    #[test]
+    fn flush_replaces_the_file_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.fits");
+        drop(FitsFile::create(&path).open().unwrap());
+
+        let mut f = FitsFile::edit(&path).unwrap();
+        let desc = ImageDescription {
+            data_type: ImageType::Float,
+            dimensions: vec![2, 3],
+        };
+        f.create_image("SCI", &desc).unwrap();
+        f.flush().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), f.data());
+        drop(f);
+
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [std::ffi::OsString::from("test.fits")]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn flush_keeps_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.fits");
+        drop(FitsFile::create(&path).open().unwrap());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        let f = FitsFile::edit(&path).unwrap();
+        f.flush().unwrap();
+        drop(f);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o640);
     }
 
     #[test]
