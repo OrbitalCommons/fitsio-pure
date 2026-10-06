@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.15.1
+
+### Fixed
+
+- String values that start after column 11 (`OBJECT  =        'M31'`), which free-format FITS allows and seiza's writer, among others, produces, are read. `parse_value` only recognized a string whose opening quote was the first byte of the value field, so these cards parsed with no value and compat `read_key` reported the keyword missing. They now read as cfitsio and astropy read them.
+
 ## 0.15.0
 
 ### Added

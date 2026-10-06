@@ -160,13 +160,11 @@ fn parse_float_str(s: &str) -> Option<f64> {
 /// The caller is responsible for checking that bytes 8..10 of the card are
 /// `= ` (the value indicator) before calling this function.
 pub fn parse_value(value_bytes: &[u8]) -> Option<(Value, Option<&str>)> {
-    if value_bytes.is_empty() {
-        return None;
-    }
-
-    // 1. String values: first non-space byte is a single quote.
-    if value_bytes[0] == b'\'' {
-        return parse_string(value_bytes);
+    // 1. String values: first non-space byte is a single quote. Free-format
+    //    cards may put it after column 11, as cfitsio and astropy accept.
+    let start = value_bytes.iter().position(|&b| b != b' ')?;
+    if value_bytes[start] == b'\'' {
+        return parse_string(&value_bytes[start..]);
     }
 
     // For all other types, split off the comment first.
@@ -461,6 +459,18 @@ mod tests {
         let field = make_field("'SIMPLE  '");
         let (val, _) = parse_value(&field).unwrap();
         assert_eq!(val, Value::String(String::from("SIMPLE")));
+    }
+
+    #[test]
+    fn parse_string_after_column_eleven() {
+        let field = make_field("               'M31' / target");
+        let (val, comment) = parse_value(&field).unwrap();
+        assert_eq!(val, Value::String(String::from("M31")));
+        assert_eq!(comment.unwrap(), "target");
+
+        let field = make_field("                  ''");
+        let (val, _) = parse_value(&field).unwrap();
+        assert_eq!(val, Value::String(String::new()));
     }
 
     #[test]
