@@ -125,7 +125,7 @@ fn update<F: Read + Write + Seek>(
     if !commentary {
         let existing = cards[..end]
             .iter()
-            .position(|c| c[..8].eq_ignore_ascii_case(&card.keyword) && &c[8..10] == b"= ");
+            .position(|c| c[..8].eq_ignore_ascii_case(&card.keyword) && c[8] == b'=');
         if let Some(slot) = existing {
             if cards.get(slot + 1).is_some_and(|c| &c[..8] == b"CONTINUE") {
                 return Err(Error::InvalidHeader(

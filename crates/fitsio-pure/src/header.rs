@@ -114,8 +114,11 @@ pub fn parse_card(card_bytes: &[u8; CARD_SIZE]) -> Result<Card> {
         });
     }
 
-    if card_bytes[8] == b'=' && card_bytes[9] == b' ' {
-        let value_field = &card_bytes[10..CARD_SIZE];
+    // The value indicator is `= `, but some writers omit the space
+    // (`CTYPE1  ='RA---TAN'`); cfitsio reads those values, and so do we.
+    if card_bytes[8] == b'=' {
+        let value_start = if card_bytes[9] == b' ' { 10 } else { 9 };
+        let value_field = &card_bytes[value_start..CARD_SIZE];
         match parse_value(value_field) {
             Some((val, comment)) => Ok(Card {
                 keyword,
@@ -831,6 +834,15 @@ mod parse_tests {
         assert_eq!(c.keyword_str(), "TELESCOP");
         assert_eq!(c.value, Some(Value::String(String::from("Hubble"))));
         assert_eq!(c.comment, Some(String::from("telescope name")));
+    }
+
+    #[test]
+    fn parse_card_value_indicator_without_space() {
+        let card = parse_card(&make_card("CTYPE1  ='RA---TAN'")).unwrap();
+        assert_eq!(card.value, Some(Value::String(String::from("RA---TAN"))));
+        let card = parse_card(&make_card("EQUINOX =2000.0 / epoch")).unwrap();
+        assert_eq!(card.value, Some(Value::Float(2000.0)));
+        assert_eq!(card.comment.as_deref(), Some("epoch"));
     }
 
     #[test]

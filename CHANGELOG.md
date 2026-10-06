@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.15.2
+
+### Fixed
+
+- Cards whose value indicator lacks the space after `=` (`CTYPE1  ='RA---TAN'`) are read with their value, as cfitsio reads them. They parsed as having no value, so the keyword read as missing. `edit::update_card` replaces such a card instead of inserting a duplicate.
+
 ## 0.15.1
 
 ### Fixed
