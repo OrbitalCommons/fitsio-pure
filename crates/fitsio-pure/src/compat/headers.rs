@@ -26,10 +26,18 @@ fn find_card_value(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<crate::
         hdu.hdu_index
     )))?;
 
+    // Like cfitsio, match keywords ignoring case, and refuse to read an
+    // undefined value as any type.
     for card in &core_hdu.cards {
-        if card.keyword_str() == name {
-            if let Some(ref v) = card.value {
-                return Ok(v.clone());
+        if card.keyword_str().eq_ignore_ascii_case(name) {
+            match card.value {
+                Some(crate::value::Value::Undefined) => {
+                    return Err(Error::Message(format!(
+                        "keyword '{name}' value is undefined"
+                    )))
+                }
+                Some(ref v) => return Ok(v.clone()),
+                None => {}
             }
         }
     }

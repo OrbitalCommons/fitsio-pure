@@ -268,3 +268,58 @@ mod hierarch {
         );
     }
 }
+
+/// An undefined value (`KEY =` with nothing after it) and a non-standard
+/// lowercase keyword, read the way cfitsio reads them.
+#[test]
+fn undefined_values_and_lowercase_keywords_match_cfitsio() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("odd.fits");
+    let mut bytes: Vec<u8> = Vec::new();
+    for text in [
+        "SIMPLE  =                    T",
+        "BITPIX  =                    8",
+        "NAXIS   =                    0",
+        "FILTER  =                      / no filter",
+        "date-obs= '2026-10-06'",
+        "END",
+    ] {
+        bytes.extend_from_slice(format!("{text:<80}").as_bytes());
+    }
+    bytes.resize(2880, b' ');
+    std::fs::write(&path, &bytes).unwrap();
+
+    let mut c = CFits::open(&path).unwrap();
+    let c_hdu = c.primary_hdu().unwrap();
+    let p = PureFits::open(&path).unwrap();
+    let p_hdu = p.primary_hdu().unwrap();
+
+    let c_undefined: Result<String, _> = c_hdu.read_key(&mut c, "FILTER");
+    let p_undefined = <String as PureReadsKey>::read_key(&p, &p_hdu, "FILTER");
+    assert!(c_undefined.is_err() && p_undefined.is_err());
+    assert!(p_undefined.unwrap_err().to_string().contains("undefined"));
+
+    for name in ["date-obs", "DATE-OBS"] {
+        let c_value: String = c_hdu.read_key(&mut c, name).unwrap();
+        let p_value = <String as PureReadsKey>::read_key(&p, &p_hdu, name).unwrap();
+        assert_eq!(p_value, c_value, "{name}");
+    }
+
+    // Writing the header back keeps the undefined card intact.
+    let cards = fitsio_pure::header::parse_header_blocks(&bytes).unwrap();
+    let rewritten = fitsio_pure::header::serialize_header(
+        &cards
+            .into_iter()
+            .filter(|c| !c.is_end())
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let filter_card = rewritten
+        .chunks(80)
+        .find(|c| c.starts_with(b"FILTER"))
+        .unwrap();
+    assert_eq!(
+        std::str::from_utf8(filter_card).unwrap().trim_end(),
+        "FILTER  =                      / no filter"
+    );
+}

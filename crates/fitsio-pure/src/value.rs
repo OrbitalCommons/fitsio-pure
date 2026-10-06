@@ -17,6 +17,9 @@ pub enum Value {
     ComplexInt(i64, i64),
     /// FITS complex float `(real, imaginary)`.
     ComplexFloat(f64, f64),
+    /// An undefined value: a value indicator (`= `) with nothing after it
+    /// but an optional comment. Distinct from the empty string `''`.
+    Undefined,
 }
 
 /// Split a value field at the comment separator.
@@ -246,6 +249,7 @@ pub fn format_value(value: &Value) -> [u8; 70] {
             let s = alloc::format!("({}, {})", re_s, im_s);
             right_justify(s.as_bytes(), &mut buf[..50]);
         }
+        Value::Undefined => {}
     }
 
     buf
