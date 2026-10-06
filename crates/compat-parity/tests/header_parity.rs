@@ -323,3 +323,37 @@ fn undefined_values_and_lowercase_keywords_match_cfitsio() {
         "FILTER  =                      / no filter"
     );
 }
+
+/// Free-format string values may start after column 11, as seiza's writer and
+/// other software write them right-justified.
+#[test]
+fn indented_string_values_read_as_cfitsio_reads_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("indented.fits");
+    let mut bytes: Vec<u8> = [
+        "SIMPLE  =                    T",
+        "BITPIX  =                    8",
+        "NAXIS   =                    0",
+        "OBJECT  =                'M31' / target",
+        "EMPTY   =                   ''",
+        "END",
+    ]
+    .iter()
+    .flat_map(|card| format!("{card:<80}").into_bytes())
+    .collect();
+    bytes.resize(2880, b' ');
+    std::fs::write(&path, &bytes).unwrap();
+
+    let mut fptr = CFits::open(&path).unwrap();
+    let chdu = fptr.primary_hdu().unwrap();
+    let c_object: String = chdu.read_key(&mut fptr, "OBJECT").unwrap();
+    let c_empty: String = chdu.read_key(&mut fptr, "EMPTY").unwrap();
+
+    let f = PureFits::open(&path).unwrap();
+    let hdu = f.primary_hdu().unwrap();
+    let object = <String as PureReadsKey>::read_key(&f, &hdu, "OBJECT").unwrap();
+    let empty = <String as PureReadsKey>::read_key(&f, &hdu, "EMPTY").unwrap();
+
+    assert_eq!(c_object, "M31");
+    assert_eq!((object, empty), (c_object, c_empty));
+}
