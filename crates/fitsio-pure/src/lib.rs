@@ -18,6 +18,9 @@ pub mod bintable;
 pub mod block;
 /// HDU checksum computation and encoding (CHECKSUM/DATASUM).
 pub mod checksum;
+/// Updating header cards of a file in place, without rewriting its data.
+#[cfg(feature = "std")]
+pub mod edit;
 /// Big-endian byte conversion helpers for FITS data types.
 pub mod endian;
 /// Error types used throughout the crate.
@@ -39,6 +42,9 @@ pub mod image_writer;
 pub mod io;
 /// Primary HDU header parsing and construction.
 pub mod primary;
+/// Streaming HDU-at-a-time reading over `std::io::Read`.
+#[cfg(feature = "std")]
+pub mod stream;
 /// ASCII table (TABLE) column parsing and data extraction.
 pub mod table;
 /// Tile-compressed image decompression (RICE_1, GZIP_1).

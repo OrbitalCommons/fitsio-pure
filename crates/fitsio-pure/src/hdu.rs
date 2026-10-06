@@ -176,14 +176,14 @@ fn card_logical_value(cards: &[Card], keyword: &str) -> Option<bool> {
     })
 }
 
-fn is_primary_hdu(cards: &[Card]) -> bool {
+pub(crate) fn is_primary_hdu(cards: &[Card]) -> bool {
     cards
         .first()
         .map(|c| c.keyword_str() == "SIMPLE")
         .unwrap_or(false)
 }
 
-fn compute_data_byte_len(cards: &[Card], is_primary: bool) -> Result<usize> {
+pub(crate) fn compute_data_byte_len(cards: &[Card], is_primary: bool) -> Result<usize> {
     let bitpix = card_integer_value(cards, "BITPIX").ok_or(Error::MissingKeyword("BITPIX"))?;
     let naxis = card_integer_value(cards, "NAXIS").ok_or(Error::MissingKeyword("NAXIS"))?;
     let naxis = naxis as usize;
@@ -267,7 +267,7 @@ fn compute_data_byte_len(cards: &[Card], is_primary: bool) -> Result<usize> {
     Ok(data_bytes)
 }
 
-fn parse_hdu_info(cards: &[Card], is_primary: bool) -> Result<HduInfo> {
+pub(crate) fn parse_hdu_info(cards: &[Card], is_primary: bool) -> Result<HduInfo> {
     if is_primary {
         let bitpix = card_integer_value(cards, "BITPIX").ok_or(Error::MissingKeyword("BITPIX"))?;
         let naxis =
