@@ -22,6 +22,9 @@ pub enum Error {
     /// An I/O error from the standard library.
     #[cfg(feature = "std")]
     Io(std::io::Error),
+    /// An I/O error from a [`crate::io::Write`] sink in `no_std` builds.
+    #[cfg(not(feature = "std"))]
+    Io(crate::io::IoError),
 }
 
 /// Convenience alias used throughout the crate.
@@ -41,7 +44,6 @@ impl core::fmt::Display for Error {
                 write!(f, "unsupported compression algorithm: {ctx}")
             }
             Error::DecompressionError(ctx) => write!(f, "decompression error: {ctx}"),
-            #[cfg(feature = "std")]
             Error::Io(e) => write!(f, "I/O error: {e}"),
         }
     }
@@ -60,6 +62,13 @@ impl std::error::Error for Error {
 #[cfg(feature = "std")]
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
+        Error::Io(e)
+    }
+}
+
+#[cfg(not(feature = "std"))]
+impl From<crate::io::IoError> for Error {
+    fn from(e: crate::io::IoError) -> Self {
         Error::Io(e)
     }
 }
