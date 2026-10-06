@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.15.4
+
+### Fixed
+
+- `ImageWriter` encodes samples about 3× faster from other crates. As with the reader in 0.15.3, the per-sample big-endian conversion wasn't inlinable across crates. Writing a 24-megapixel `f32` image to a sink went from 38 ms to 12 ms.
+
 ## 0.15.3
 
 ### Fixed

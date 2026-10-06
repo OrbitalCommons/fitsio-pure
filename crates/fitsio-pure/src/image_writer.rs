@@ -92,6 +92,7 @@ macro_rules! impl_sample {
         impl Sample for $t {
             const BITPIX: i64 = $bitpix;
             const SIZE: usize = core::mem::size_of::<$t>();
+            #[inline]
             fn write_be(self, dst: &mut [u8]) {
                 dst.copy_from_slice(&self.to_be_bytes());
             }
