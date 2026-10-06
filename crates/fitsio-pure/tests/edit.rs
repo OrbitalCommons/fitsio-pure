@@ -184,6 +184,30 @@ fn matches_keywords_ignoring_case() {
 }
 
 #[test]
+fn replaces_a_card_written_without_the_space_after_equals() {
+    let mut bytes = file_with(vec![card("CTYPE1", Value::String("RA".into()))]);
+    let slot = bytes[..BLOCK_SIZE]
+        .chunks(80)
+        .position(|c| c.starts_with(b"CTYPE1  = "))
+        .unwrap();
+    let mut squeezed = [b' '; 80];
+    squeezed[..19].copy_from_slice(b"CTYPE1  ='RA---TAN'");
+    bytes[slot * 80..(slot + 1) * 80].copy_from_slice(&squeezed);
+
+    let mut file = Cursor::new(bytes);
+    let ctype = card("CTYPE1", Value::String("DEC--TAN".into()));
+    assert_eq!(
+        update_card(&mut file, 0, &ctype).unwrap(),
+        CardUpdate::Replaced
+    );
+    let fits = parse_fits(file.get_ref()).unwrap();
+    assert_eq!(
+        value_of(&fits, 0, "CTYPE1"),
+        Some(Value::String("DEC--TAN".into()))
+    );
+}
+
+#[test]
 fn commentary_cards_are_always_inserted() {
     let mut file = Cursor::new(sample());
     let history = commentary("HISTORY", "calibrated");

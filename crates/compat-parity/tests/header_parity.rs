@@ -357,3 +357,39 @@ fn indented_string_values_read_as_cfitsio_reads_them() {
     assert_eq!(c_object, "M31");
     assert_eq!((object, empty), (c_object, c_empty));
 }
+
+/// Some writers omit the space after `=`; cfitsio still reads the value.
+#[test]
+fn value_indicator_without_space_reads_as_cfitsio_reads_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nospace.fits");
+    let mut bytes: Vec<u8> = [
+        "SIMPLE  =                    T",
+        "BITPIX  =                    8",
+        "NAXIS   =                    0",
+        "CTYPE1  ='RA---TAN'",
+        "DATE-OBS='                 '",
+        "EQUINOX =2000.0",
+        "END",
+    ]
+    .iter()
+    .flat_map(|card| format!("{card:<80}").into_bytes())
+    .collect();
+    bytes.resize(2880, b' ');
+    std::fs::write(&path, &bytes).unwrap();
+
+    let mut fptr = CFits::open(&path).unwrap();
+    let chdu = fptr.primary_hdu().unwrap();
+    let c_ctype: String = chdu.read_key(&mut fptr, "CTYPE1").unwrap();
+    let c_date: String = chdu.read_key(&mut fptr, "DATE-OBS").unwrap();
+    let c_equinox: f64 = chdu.read_key(&mut fptr, "EQUINOX").unwrap();
+
+    let f = PureFits::open(&path).unwrap();
+    let hdu = f.primary_hdu().unwrap();
+    let ctype = <String as PureReadsKey>::read_key(&f, &hdu, "CTYPE1").unwrap();
+    let date = <String as PureReadsKey>::read_key(&f, &hdu, "DATE-OBS").unwrap();
+    let equinox = <f64 as PureReadsKey>::read_key(&f, &hdu, "EQUINOX").unwrap();
+
+    assert_eq!(c_ctype, "RA---TAN");
+    assert_eq!((ctype, date, equinox), (c_ctype, c_date, c_equinox));
+}
