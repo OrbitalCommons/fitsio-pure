@@ -483,6 +483,23 @@ mod tests {
     }
 
     #[test]
+    fn caller_cards_serialize_like_serialize_header() {
+        let extra = [
+            card("FILTER", Value::Undefined),
+            card("OBJECT", Value::String("M 31".into())),
+            card("EXPTIME", Value::Float(30.0)),
+        ];
+        let mut cards = build_primary_header(16, &[2, 2]).unwrap();
+        cards.extend_from_slice(&extra);
+        let mut expected = serialize_header(&cards).unwrap();
+        expected.extend_from_slice(&serialize_image(&ImageData::I16(vec![1, 2, 3, 4])));
+
+        let mut w = ImageWriter::primary(Vec::new(), 16, &[2, 2], &extra).unwrap();
+        w.write_samples(&[1i16, 2, 3, 4]).unwrap();
+        assert_eq!(w.finish().unwrap(), expected);
+    }
+
+    #[test]
     fn empty_image_writes_header_only() {
         let w = ImageWriter::primary(Vec::new(), 8, &[], &[]).unwrap();
         assert_eq!(w.samples_expected(), 0);

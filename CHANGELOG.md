@@ -2,7 +2,14 @@
 
 ## Unreleased
 
+### Added
+
+- **Streaming image writer.** `image_writer::ImageWriter` writes an image HDU to any `Write` without building the data unit in memory. It writes the header, converts samples to big-endian through a fixed 1 MiB buffer as they arrive (`write_samples`, `write_iter`, or `write_physical` to apply the header's `BSCALE`/`BZERO`), and `finish()` checks the count against `NAXISn`, pads to the block boundary and returns the sink. Writing more or fewer samples than the header declares, or samples of the wrong type for `BITPIX`, is an error. `ImageWriter::image_extension` starts an `XTENSION = 'IMAGE'` HDU on the returned sink, so multi-HDU files stream too. The bytes are identical to `build_image_hdu`'s for every `BITPIX`. It also works with the crate's `io::Write` under `no_std`, where `Error` gains an `Io(io::IoError)` variant. (#109)
+- **Atomic file writes.** `io::AtomicFile` writes to a temporary file next to the target and, on `commit()`, flushes, `sync_all`s, renames it over the target and fsyncs the directory, so a crash or error mid-write never leaves a partial file. Dropping it uncommitted removes the temporary file. Replacing a file keeps its permissions on Unix. `io::write_atomic(path, bytes)` does it in one call. It composes with `ImageWriter`: stream into an `AtomicFile`, then `finish()?.commit()?`. (#100)
+
 ### Changed
+
+- Compat `FitsFile` saves (`flush`, `Drop`, and `create(..).open()`) go through `io::write_atomic`, so an interrupted save leaves the previous file intact instead of a truncated one. (#100)
 
 - **Breaking: `Value::Undefined`** represents a card with a value indicator and nothing after it (`FILTER  =    / no filter`), which FITS treats as an undefined value, distinct from the empty string `''`. `parse_card` used to return `value: None` for these, and `format_card` then wrote `FILTER  no filter`, dropping the `=` and the comment slash. Undefined cards now round-trip exactly. Exhaustive `match`es on `Value` need a new arm. Compat `read_key` on an undefined value returns an error for every type, as cfitsio does. (#108)
 - Header keywords may contain any printable ASCII. A single lowercase or otherwise non-standard keyword (such as `date-obs`) used to fail the whole header with `InvalidKeyword`; it is now read as written, as cfitsio and astropy do. Only non-printable bytes are rejected. Compat `read_key` matches keywords ignoring case, as cfitsio does. (#111)
