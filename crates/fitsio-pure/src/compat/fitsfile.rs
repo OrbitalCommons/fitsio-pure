@@ -715,9 +715,7 @@ mod tests {
         };
         f.create_image("Events", &desc).unwrap();
         let second = f.create_image("WHT", &desc).unwrap();
-        second
-            .write_key(&mut f, "HDUNAME", &"Weights".to_string())
-            .unwrap();
+        second.write_key(&mut f, "HDUNAME", "Weights").unwrap();
 
         assert_eq!(f.hdu("Events").unwrap().hdu_index, 1);
         assert_eq!(f.hdu("EVENTS").unwrap().hdu_index, 1);

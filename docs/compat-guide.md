@@ -75,18 +75,26 @@ let pixels: Vec<f32> = f32::read_image(&fitsfile, &hdu).unwrap();
 ### Reading and writing header keywords
 
 ```rust
-use fitsio_pure::compat::fitsfile::FitsFile;
-use fitsio_pure::compat::headers::{ReadsKey, WritesKey};
+use fitsio_pure::compat::{FitsFile, HeaderValue};
 
 let mut fitsfile = FitsFile::edit("data.fits").unwrap();
 let hdu = fitsfile.primary_hdu().unwrap();
 
-// Write a keyword
-hdu.write_key(&mut fitsfile, "OBJECT", &"NGC 1234".to_string()).unwrap();
+// Write keywords, by value as in fitsio
+hdu.write_key(&mut fitsfile, "OBJECT", "NGC 1234").unwrap();
+hdu.write_key(&mut fitsfile, "NPOLS", 4u32).unwrap();
+hdu.write_key(&mut fitsfile, "EXPTIME", (30.0, "seconds")).unwrap();
 
-// Read it back
+// Read them back
 let object: String = hdu.read_key(&fitsfile, "OBJECT").unwrap();
+let exptime: HeaderValue<f64> = hdu.read_key(&fitsfile, "EXPTIME").unwrap();
+assert_eq!(exptime.comment.as_deref(), Some("seconds"));
 ```
+
+`write_key` accepts the value types `fitsio` does: every integer type from `i8` to `u64`, `f32`, `f64`, `bool`, `&str` and `String`, each
+on its own or as `(value, comment)`. `read_key` returns `i32`, `i64`, `f32`, `f64`, `bool` and `String`, or `HeaderValue` of any of
+these to get the comment too. A reference to a value also works, so code written for releases before 0.16, which passed `&value`,
+still compiles.
 
 ### Reading table columns
 

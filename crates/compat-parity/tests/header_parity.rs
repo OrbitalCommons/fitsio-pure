@@ -393,3 +393,124 @@ fn value_indicator_without_space_reads_as_cfitsio_reads_it() {
     assert_eq!(c_ctype, "RA---TAN");
     assert_eq!((ctype, date, equinox), (c_ctype, c_date, c_equinox));
 }
+
+/// The same upstream-style calls, compiled against both libraries: values by
+/// value, `&str`, narrow integers, `f32`, and `(value, comment)` tuples
+/// (fitsio-pure#89, #90).
+macro_rules! write_upstream_keys {
+    ($hdu:expr, $f:expr) => {{
+        $hdu.write_key($f, "FOO", 1i64).unwrap();
+        $hdu.write_key($f, "TELESCOP", "MWA").unwrap();
+        $hdu.write_key($f, "OBSERVER", String::from("Edwin")).unwrap();
+        $hdu.write_key($f, "NPOLS", 4u32).unwrap();
+        $hdu.write_key($f, "NCHANS", 768i32).unwrap();
+        $hdu.write_key($f, "SCALE", 0.1f32).unwrap();
+        $hdu.write_key($f, "EXPTIME", (30.5f64, "seconds")).unwrap();
+        $hdu.write_key($f, "GAIN", (100i64, "e-/ADU")).unwrap();
+        $hdu.write_key($f, "FILTER", ("R", "band")).unwrap();
+    }};
+}
+
+/// What both libraries must read back from either file.
+fn check_upstream_keys(
+    ints: [(&str, i64); 3],
+    narrow: i32,
+    scale: f32,
+    strings: [(&str, String); 2],
+    commented: [(&str, String, Option<String>); 3],
+) {
+    assert_eq!(ints, [("FOO", 1), ("NPOLS", 4), ("GAIN", 100)]);
+    assert_eq!(narrow, 768);
+    assert_eq!(scale, 0.1f32);
+    assert_eq!(
+        strings,
+        [("TELESCOP", "MWA".to_string()), ("OBSERVER", "Edwin".to_string())]
+    );
+    assert_eq!(
+        commented,
+        [
+            ("EXPTIME", "30.5".to_string(), Some("seconds".to_string())),
+            ("GAIN", "100".to_string(), Some("e-/ADU".to_string())),
+            ("FILTER", "R".to_string(), Some("band".to_string())),
+        ]
+    );
+}
+
+#[test]
+fn upstream_write_key_calls_round_trip_pure_to_cfitsio() {
+    use fitsio::headers::HeaderValue as CHeaderValue;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("upstream_calls_pure.fits");
+    {
+        let mut f = PureFits::create(&path).open().unwrap();
+        let hdu = f.primary_hdu().unwrap();
+        write_upstream_keys!(hdu, &mut f);
+        f.flush().unwrap();
+    }
+
+    let mut f = CFits::open(&path).unwrap();
+    let hdu = f.primary_hdu().unwrap();
+    let int = |f: &mut CFits, k| hdu.read_key::<i64>(f, k).unwrap();
+    let ints = [
+        ("FOO", int(&mut f, "FOO")),
+        ("NPOLS", int(&mut f, "NPOLS")),
+        ("GAIN", int(&mut f, "GAIN")),
+    ];
+    let narrow: i32 = hdu.read_key(&mut f, "NCHANS").unwrap();
+    let scale: f32 = hdu.read_key(&mut f, "SCALE").unwrap();
+    let strings = [
+        ("TELESCOP", hdu.read_key::<String>(&mut f, "TELESCOP").unwrap()),
+        ("OBSERVER", hdu.read_key::<String>(&mut f, "OBSERVER").unwrap()),
+    ];
+    let exptime: CHeaderValue<f64> = hdu.read_key(&mut f, "EXPTIME").unwrap();
+    let gain: CHeaderValue<i64> = hdu.read_key(&mut f, "GAIN").unwrap();
+    let filter: CHeaderValue<String> = hdu.read_key(&mut f, "FILTER").unwrap();
+    check_upstream_keys(
+        ints,
+        narrow,
+        scale,
+        strings,
+        [
+            ("EXPTIME", exptime.value.to_string(), exptime.comment),
+            ("GAIN", gain.value.to_string(), gain.comment),
+            ("FILTER", filter.value, filter.comment),
+        ],
+    );
+}
+
+#[test]
+fn upstream_write_key_calls_round_trip_cfitsio_to_pure() {
+    use fitsio_pure::compat::HeaderValue;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("upstream_calls_cfitsio.fits");
+    {
+        let mut f = CFits::create(&path).open().unwrap();
+        let hdu = f.primary_hdu().unwrap();
+        write_upstream_keys!(hdu, &mut f);
+    }
+
+    let f = PureFits::open(&path).unwrap();
+    let hdu = f.primary_hdu().unwrap();
+    let int = |k| hdu.read_key::<i64>(&f, k).unwrap();
+    let ints = [("FOO", int("FOO")), ("NPOLS", int("NPOLS")), ("GAIN", int("GAIN"))];
+    let narrow: i32 = hdu.read_key(&f, "NCHANS").unwrap();
+    let scale: f32 = hdu.read_key(&f, "SCALE").unwrap();
+    let strings = [
+        ("TELESCOP", hdu.read_key::<String>(&f, "TELESCOP").unwrap()),
+        ("OBSERVER", hdu.read_key::<String>(&f, "OBSERVER").unwrap()),
+    ];
+    let exptime: HeaderValue<f64> = hdu.read_key(&f, "EXPTIME").unwrap();
+    let gain: HeaderValue<i64> = hdu.read_key(&f, "GAIN").unwrap();
+    let filter: HeaderValue<String> = hdu.read_key(&f, "FILTER").unwrap();
+    check_upstream_keys(
+        ints,
+        narrow,
+        scale,
+        strings,
+        [
+            ("EXPTIME", exptime.value.to_string(), exptime.comment),
+            ("GAIN", gain.value.to_string(), gain.comment),
+            ("FILTER", filter.value, filter.comment),
+        ],
+    );
+}

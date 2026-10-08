@@ -622,8 +622,8 @@ mod tests {
         };
         let hdu = f.create_image("SCI", &desc).unwrap();
         i16::write_image(&mut f, &hdu, &[0, 1, 2]).unwrap();
-        hdu.write_key(&mut f, "BSCALE", &2i64).unwrap();
-        hdu.write_key(&mut f, "BZERO", &100i64).unwrap();
+        hdu.write_key(&mut f, "BSCALE", 2i64).unwrap();
+        hdu.write_key(&mut f, "BZERO", 100i64).unwrap();
 
         assert_eq!(i32::read_image(&f, &hdu).unwrap(), vec![100, 102, 104]);
         assert_eq!(
