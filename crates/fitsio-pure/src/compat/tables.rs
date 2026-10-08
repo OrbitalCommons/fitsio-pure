@@ -90,13 +90,13 @@ pub enum Column {
 
 fn validate_hdu_index(file: &FitsFile, hdu: &FitsHdu) -> Result<usize> {
     let fits_data = file.parsed()?;
-    if hdu.hdu_index >= fits_data.len() {
+    if hdu.number >= fits_data.len() {
         return Err(Error::Message(format!(
             "HDU index {} out of range",
-            hdu.hdu_index
+            hdu.number
         )));
     }
-    Ok(hdu.hdu_index)
+    Ok(hdu.number)
 }
 
 /// Trait for types that can be read from a table column.
