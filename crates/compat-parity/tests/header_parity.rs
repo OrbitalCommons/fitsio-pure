@@ -528,3 +528,80 @@ fn upstream_write_key_calls_round_trip_cfitsio_to_pure() {
         ],
     );
 }
+
+/// The keyword names on each card of `path`'s primary header, as written.
+fn card_names(path: &std::path::Path) -> Vec<String> {
+    let bytes = std::fs::read(path).unwrap();
+    let mut names = Vec::new();
+    for card in bytes.chunks(80) {
+        let text = std::str::from_utf8(card).unwrap();
+        let name = match text.strip_prefix("HIERARCH ") {
+            Some(rest) => format!("HIERARCH {}", rest.split('=').next().unwrap().trim()),
+            None => text[..8].trim_end().to_string(),
+        };
+        if name == "END" {
+            break;
+        }
+        names.push(name);
+    }
+    names
+}
+
+/// Keyword names padded to 8 bytes, as a card holds them, or in lower case,
+/// are matched and written as cfitsio does: blanks ignored, standard keywords
+/// upper-cased, an existing card updated whatever its case.
+#[test]
+fn keyword_names_are_normalised_as_cfitsio_does() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut bytes: Vec<u8> = Vec::new();
+    for text in [
+        "SIMPLE  =                    T",
+        "BITPIX  =                    8",
+        "NAXIS   =                    0",
+        "CRVAL1  =                218.0",
+        "date-obs= '2026-10-06'",
+        "END",
+    ] {
+        bytes.extend_from_slice(format!("{text:<80}").as_bytes());
+    }
+    bytes.resize(2880, b' ');
+    let c_path = dir.path().join("c.fits");
+    let p_path = dir.path().join("p.fits");
+    std::fs::write(&c_path, &bytes).unwrap();
+    std::fs::write(&p_path, &bytes).unwrap();
+
+    let writes: [(&str, f64); 5] = [
+        ("CRVAL2  ", 34.5),
+        ("cdelt1", -0.5),
+        (" Bscale ", 2.0),
+        ("date-obs", 1.0),
+        ("HIERARCH My.Long.Key", 3.0),
+    ];
+    {
+        let mut c = CFits::edit(&c_path).unwrap();
+        let hdu = c.primary_hdu().unwrap();
+        for (name, value) in writes {
+            hdu.write_key(&mut c, name, value).unwrap();
+        }
+    }
+    {
+        let mut p = PureFits::edit(&p_path).unwrap();
+        let hdu = p.primary_hdu().unwrap();
+        for (name, value) in writes {
+            hdu.write_key(&mut p, name, value).unwrap();
+        }
+    }
+    assert_eq!(card_names(&p_path), card_names(&c_path));
+
+    let mut c = CFits::open(&c_path).unwrap();
+    let c_hdu = c.primary_hdu().unwrap();
+    let p = PureFits::open(&p_path).unwrap();
+    let p_hdu = p.primary_hdu().unwrap();
+    for name in [
+        "CRVAL1  ", "crval1", " CRVAL1", "CRVAL2", "CDELT1", "BSCALE",
+    ] {
+        let c_value: f64 = c_hdu.read_key(&mut c, name).unwrap();
+        let p_value: f64 = p_hdu.read_key(&p, name).unwrap();
+        assert_eq!(p_value, c_value, "{name:?}");
+    }
+}

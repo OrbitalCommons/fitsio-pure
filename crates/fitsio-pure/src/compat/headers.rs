@@ -34,6 +34,9 @@ fn find_card(
     hdu: &FitsHdu,
     name: &str,
 ) -> Result<(crate::value::Value, Option<String>)> {
+    // cfitsio ignores blanks around the name, so a name padded to 8 bytes
+    // as it sits on the card still matches.
+    let name = name.trim();
     let fits_data = file.parsed()?;
     let core_hdu = fits_data.get(hdu.number).ok_or(Error::Message(format!(
         "HDU index {} not found",
@@ -196,6 +199,9 @@ fn write_key_to_file(
             hdu.number
         )))?;
 
+    // As cfitsio does, ignore blanks around the name and write it in upper
+    // case.
+    let name = &name.trim().to_ascii_uppercase();
     if crate::header::needs_hierarch(name) {
         // A name a standard 8-byte keyword can't hold becomes a HIERARCH
         // card, as cfitsio writes it, instead of being truncated.
