@@ -35,7 +35,7 @@ fn write_pure(path: &Path, dims: &[usize]) {
     let mut f = PureFits::create(path).open().unwrap();
     let desc = PureImageDesc {
         data_type: PureImageType::Long,
-        dimensions: dims.to_vec(),
+        dimensions: dims,
     };
     let hdu = f.create_image("IMG", &desc).unwrap();
     i32::write_image(&mut f, &hdu, &pixels(dims)).unwrap();
@@ -143,7 +143,7 @@ fn custom_primary_matches_fitsio() {
         {
             let desc = PureImageDesc {
                 data_type: PureImageType::Long,
-                dimensions: dims.to_vec(),
+                dimensions: dims,
             };
             let mut f = RootFits::create(&by_pure)
                 .with_custom_primary(&desc)

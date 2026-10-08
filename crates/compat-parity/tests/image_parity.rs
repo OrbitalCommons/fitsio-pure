@@ -57,7 +57,7 @@ fn roundtrip_pure_to_cfitsio<T>(
         let mut f = PureFits::create(&path).open().unwrap();
         let desc = PureImageDesc {
             data_type: pure_ty,
-            dimensions: dims.to_vec(),
+            dimensions: dims,
         };
         let hdu = f.create_image("SCI", &desc).unwrap();
         <T as PureWriteImage>::write_image(&mut f, &hdu, data).unwrap();

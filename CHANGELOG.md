@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.17.0
+
+### Changed
+
+- **Breaking: compat image creation matches `fitsio`'s signatures.** (#101)
+  - `ImageDescription<'a>` borrows its dimensions, `dimensions: &'a [usize]`, as upstream's does. Upstream code such as `dimensions: &[100, 100]` or `dimensions: &dims` now compiles unchanged; code written for earlier compat releases changes `vec![…]` to `&[…]`.
+  - `create_image` takes any name that converts into a `String`, so `create_image("EXTNAME".to_string(), &desc)` compiles as well as `"EXTNAME"`.
+  - `NewFitsFile` gains the description's lifetime, so `with_custom_primary` takes `&ImageDescription<'a>`, as in `fitsio`.
+  - `fitsio`'s `create_image` and `with_custom_primary` rustdoc examples, expanded against both libraries in compat-parity, write HDUs that cfitsio reads with the same names, `BITPIX` and `NAXISn`.
+
 ## 0.16.0
 
 ### Changed

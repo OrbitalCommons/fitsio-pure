@@ -126,7 +126,7 @@ mod tests {
         // create_image takes row-major dimensions, like the array: rows, cols.
         let desc = ImageDescription {
             data_type: ImageType::Float,
-            dimensions: vec![4, 3],
+            dimensions: &[4, 3],
         };
         let hdu = f.create_image("SCI", &desc).unwrap();
         arr.write_image_array(&mut f, &hdu).unwrap();
@@ -149,7 +149,7 @@ mod tests {
         let arr = Array::from_vec(vec![10i32, 20, 30, 40, 50]);
         let desc = ImageDescription {
             data_type: ImageType::Long,
-            dimensions: vec![5],
+            dimensions: &[5],
         };
         let hdu = f.create_image("DATA", &desc).unwrap();
         arr.write_image_array(&mut f, &hdu).unwrap();
@@ -172,7 +172,7 @@ mod tests {
         // view logical order: [1,4, 2,5, 3,6]
         let desc = ImageDescription {
             data_type: ImageType::Double,
-            dimensions: vec![3, 2], // the view's shape: NAXIS2=3, NAXIS1=2
+            dimensions: &[3, 2], // the view's shape: NAXIS2=3, NAXIS1=2
         };
         let hdu = f.create_image("T", &desc).unwrap();
         view.write_image_array(&mut f, &hdu).unwrap();
@@ -189,7 +189,7 @@ mod tests {
 
         let desc = ImageDescription {
             data_type: ImageType::Float,
-            dimensions: vec![4, 3],
+            dimensions: &[4, 3],
         };
         let hdu = f.create_image("SCI", &desc).unwrap();
         let pixels: Vec<f32> = (0..12).map(|i| i as f32).collect();
@@ -212,7 +212,7 @@ mod tests {
 
         let desc = ImageDescription {
             data_type: ImageType::Double,
-            dimensions: vec![4, 3, 2],
+            dimensions: &[4, 3, 2],
         };
         let hdu = f.create_image("CUBE", &desc).unwrap();
         let pixels: Vec<f64> = (0..24).map(|i| i as f64).collect();
@@ -236,7 +236,7 @@ mod tests {
 
         let desc = ImageDescription {
             data_type: ImageType::Float,
-            dimensions: vec![4, 3],
+            dimensions: &[4, 3],
         };
         let hdu = f.create_image("SCI", &desc).unwrap();
         let pixels: Vec<f32> = (0..12).map(|i| i as f32).collect();
@@ -259,7 +259,7 @@ mod tests {
         // dimensions [4, 5] means 4 rows (NAXIS2) of 5 columns (NAXIS1)
         let desc = ImageDescription {
             data_type: ImageType::Float,
-            dimensions: vec![4, 5],
+            dimensions: &[4, 5],
         };
         let hdu = f.create_image("SCI", &desc).unwrap();
         let pixels: Vec<f32> = (0..20).map(|i| i as f32).collect();
@@ -282,7 +282,7 @@ mod tests {
 
         let desc = ImageDescription {
             data_type: ImageType::Float,
-            dimensions: vec![4, 5],
+            dimensions: &[4, 5],
         };
         let hdu = f.create_image("SCI", &desc).unwrap();
         let pixels: Vec<f32> = (0..20).map(|i| i as f32).collect();
@@ -302,7 +302,7 @@ mod tests {
 
         let desc = ImageDescription {
             data_type: ImageType::Long,
-            dimensions: vec![6],
+            dimensions: &[6],
         };
         let hdu = f.create_image("DATA", &desc).unwrap();
         let pixels: Vec<i32> = vec![10, 20, 30, 40, 50, 60];
@@ -324,7 +324,7 @@ mod tests {
 
         let desc = ImageDescription {
             data_type: ImageType::Short,
-            dimensions: vec![3, 2],
+            dimensions: &[3, 2],
         };
         let hdu = f.create_image("SCI", &desc).unwrap();
         let pixels: Vec<i16> = vec![1, 2, 3, 4, 5, 6];
@@ -351,7 +351,7 @@ mod tests {
         // 4 rows (NAXIS2) of 3 columns (NAXIS1, fastest).
         let desc = ImageDescription {
             data_type: ImageType::Float,
-            dimensions: vec![4, 3],
+            dimensions: &[4, 3],
         };
         let hdu = f.create_image("SCI", &desc).unwrap();
 

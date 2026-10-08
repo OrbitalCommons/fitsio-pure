@@ -38,7 +38,7 @@ mod pure_backend {
             let mut f = FitsFile::create(path).overwrite().open().unwrap();
             let desc = ImageDescription {
                 data_type: ImageType::Float,
-                dimensions: shape.to_vec(),
+                dimensions: shape,
             };
             let hdu = f.create_image("DATA", &desc).unwrap();
             f32::write_image(&mut f, &hdu, data).unwrap();
@@ -48,7 +48,7 @@ mod pure_backend {
             let mut f = FitsFile::create(path).overwrite().open().unwrap();
             let desc = ImageDescription {
                 data_type: ImageType::Double,
-                dimensions: shape.to_vec(),
+                dimensions: shape,
             };
             let hdu = f.create_image("DATA", &desc).unwrap();
             f64::write_image(&mut f, &hdu, data).unwrap();
@@ -58,7 +58,7 @@ mod pure_backend {
             let mut f = FitsFile::create(path).overwrite().open().unwrap();
             let desc = ImageDescription {
                 data_type: ImageType::Long,
-                dimensions: shape.to_vec(),
+                dimensions: shape,
             };
             let hdu = f.create_image("DATA", &desc).unwrap();
             i32::write_image(&mut f, &hdu, data).unwrap();

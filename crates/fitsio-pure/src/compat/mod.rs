@@ -40,7 +40,7 @@ mod tests {
             let mut f = FitsFile::create(&path).open().unwrap();
             let desc = ImageDescription {
                 data_type: ImageType::Short,
-                dimensions: vec![2, 3],
+                dimensions: &[2, 3],
             };
             let hdu = f.create_image("SCI", &desc).unwrap();
             hdu.write_key(&mut f, "EXPTIME", 42i64).unwrap();

@@ -3,13 +3,17 @@ use super::fitsfile::FitsFile;
 use super::hdu::FitsHdu;
 
 /// Describes the shape and type of an image HDU.
+///
+/// Borrows its dimensions, as `fitsio`'s does, so upstream code such as
+/// `ImageDescription { data_type: ImageType::Float, dimensions: &[100, 200] }`
+/// or `dimensions: &dims` compiles unchanged.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ImageDescription {
+pub struct ImageDescription<'a> {
     pub data_type: ImageType,
     /// Axis lengths in row-major order, slowest axis first, as in `fitsio`:
     /// `[rows, columns]` for a 2-D image. FITS stores them reversed, so the
     /// last entry becomes `NAXIS1`.
-    pub dimensions: Vec<usize>,
+    pub dimensions: &'a [usize],
 }
 
 /// The pixel data type for an image HDU.
@@ -462,7 +466,7 @@ mod tests {
 
         let desc = ImageDescription {
             data_type: ImageType::Float,
-            dimensions: vec![4],
+            dimensions: &[4],
         };
         let hdu = f.create_image("SCI", &desc).unwrap();
         let pixels: Vec<f32> = vec![1.0, 2.5, 3.125, 4.75];
@@ -480,7 +484,7 @@ mod tests {
 
         let desc = ImageDescription {
             data_type: ImageType::Double,
-            dimensions: vec![3],
+            dimensions: &[3],
         };
         let hdu = f.create_image("DATA", &desc).unwrap();
         let pixels: Vec<f64> = vec![1.5, -2.625, 0.0];
@@ -498,7 +502,7 @@ mod tests {
 
         let desc = ImageDescription {
             data_type: ImageType::UnsignedByte,
-            dimensions: vec![4],
+            dimensions: &[4],
         };
         let hdu = f.create_image("RAW", &desc).unwrap();
         let pixels: Vec<u8> = vec![0, 127, 200, 255];
@@ -518,7 +522,7 @@ mod tests {
 
         let desc = ImageDescription {
             data_type,
-            dimensions: vec![pixels.len()],
+            dimensions: &[pixels.len()],
         };
         let hdu = f.create_image("SCI", &desc).unwrap();
         <T as WriteImage>::write_image(&mut f, &hdu, &pixels).unwrap();
@@ -568,7 +572,7 @@ mod tests {
         let mut f = FitsFile::create(&path).open().unwrap();
         let desc = ImageDescription {
             data_type: ImageType::UnsignedShort,
-            dimensions: vec![3],
+            dimensions: &[3],
         };
         let hdu = f.create_image("SCI", &desc).unwrap();
         u16::write_image(&mut f, &hdu, &[0u16, 32768, 65535]).unwrap();
@@ -618,7 +622,7 @@ mod tests {
         let mut f = FitsFile::create(&path).open().unwrap();
         let desc = ImageDescription {
             data_type: ImageType::Short,
-            dimensions: vec![3],
+            dimensions: &[3],
         };
         let hdu = f.create_image("SCI", &desc).unwrap();
         i16::write_image(&mut f, &hdu, &[0, 1, 2]).unwrap();
@@ -651,7 +655,7 @@ mod tests {
 
         let desc = ImageDescription {
             data_type: ImageType::Float,
-            dimensions: vec![4],
+            dimensions: &[4],
         };
         let hdu = f.create_image("SCI", &desc).unwrap();
         let pixels: Vec<f32> = vec![1.0, 2.5, 3.125, 4.75];
@@ -670,7 +674,7 @@ mod tests {
 
         let desc = ImageDescription {
             data_type: ImageType::Double,
-            dimensions: vec![3],
+            dimensions: &[3],
         };
         let hdu = f.create_image("DATA", &desc).unwrap();
         let pixels: Vec<f64> = vec![1.5, -2.625, 0.0];
@@ -689,7 +693,7 @@ mod tests {
 
         let desc = ImageDescription {
             data_type: ImageType::Float,
-            dimensions: vec![4],
+            dimensions: &[4],
         };
         let hdu = f.create_image("SCI", &desc).unwrap();
         let pixels: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
@@ -707,7 +711,7 @@ mod tests {
 
         let desc = ImageDescription {
             data_type: ImageType::Short,
-            dimensions: vec![3],
+            dimensions: &[3],
         };
         let hdu = f.create_image("SCI", &desc).unwrap();
         let pixels: Vec<i16> = vec![100, 200, 300];
