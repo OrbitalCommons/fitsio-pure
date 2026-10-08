@@ -244,6 +244,7 @@ pub trait WriteImage: Sized {
 
     /// Write `data` to a rectangular region. `ranges` has one range per axis,
     /// `NAXIS1` first, as `read_region` takes them; `data` is `NAXIS1`-fastest.
+    /// Trailing `0..1` ranges for axes the image doesn't have are ignored.
     /// As in `fitsio`, values past the region's size are ignored; fewer than
     /// it holds is an error.
     fn write_region(
@@ -256,6 +257,19 @@ pub trait WriteImage: Sized {
 
 fn ranges_to_tuples(ranges: &[std::ops::Range<usize>]) -> Vec<(usize, usize)> {
     ranges.iter().map(|r| (r.start, r.end)).collect()
+}
+
+/// Region ranges for an image with `naxis` axes. cfitsio reads only the
+/// first `NAXIS` ranges, so `fitsio` callers can pass ranges for axes the
+/// image doesn't have, such as a `0..1` per degenerate Stokes and frequency
+/// axis on a 2-D radio image. Those are accepted when they are `0..1`, the
+/// only index of an absent axis; any other trailing range stays an error.
+fn trim_absent_axes(naxis: usize, ranges: &[std::ops::Range<usize>]) -> &[std::ops::Range<usize>] {
+    if ranges.len() > naxis && ranges[naxis..].iter().all(|r| *r == (0..1)) {
+        &ranges[..naxis]
+    } else {
+        ranges
+    }
 }
 
 /// Pixel values with `BSCALE`/`BZERO` applied, as cfitsio returns them.
@@ -400,6 +414,12 @@ macro_rules! impl_read_image {
                 hdu: &FitsHdu,
                 ranges: &[std::ops::Range<usize>],
             ) -> Result<Vec<Self>> {
+                let ranges = match &hdu.info {
+                    crate::compat::hdu::HduInfo::ImageInfo { shape, .. } => {
+                        trim_absent_axes(shape.len(), ranges)
+                    }
+                    _ => ranges,
+                };
                 let tuples = ranges_to_tuples(ranges);
                 narrow(read_physical(file, hdu, |d, h| {
                     crate::image::read_image_region(d, h, &tuples)
@@ -678,7 +698,8 @@ macro_rules! impl_write_image {
                 ranges: &[std::ops::Range<usize>],
                 data: &[Self],
             ) -> Result<()> {
-                let runs = region_runs(&naxes(file, hdu)?, ranges)?;
+                let naxes = naxes(file, hdu)?;
+                let runs = region_runs(&naxes, trim_absent_axes(naxes.len(), ranges))?;
                 let count: usize = runs.iter().map(|&(_, n)| n).sum();
                 if data.len() < count {
                     return Err(Error::Message(format!(

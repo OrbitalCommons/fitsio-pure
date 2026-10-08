@@ -358,6 +358,24 @@ mod tests {
     }
 
     #[test]
+    fn trailing_ranges_must_be_absent_axes() {
+        let mut f = FitsFile::create_in_memory().unwrap();
+        let hdu = image(&mut f, ImageType::Long, &[2, 3]);
+        hdu.write_region(&mut f, &[&(1..3), &(1..2), &(0..1)], &[7i32, 8])
+            .unwrap();
+        let region: Vec<i32> = hdu
+            .read_region(&f, &[&(1..3), &(1..2), &(0..1), &(0..1)])
+            .unwrap();
+        assert_eq!(region, [7, 8]);
+        assert!(hdu
+            .write_region(&mut f, &[&(1..3), &(1..2), &(1..2)], &[7i32, 8])
+            .is_err());
+        assert!(hdu
+            .read_region::<Vec<i32>>(&f, &[&(1..3), &(1..2), &(0..2)])
+            .is_err());
+    }
+
+    #[test]
     fn writing_to_a_table_is_an_error() {
         let mut f = FitsFile::create_in_memory().unwrap();
         let columns = [crate::bintable::BinaryColumnDescriptor {

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.18.1
+
+### Fixed
+
+- **Compat region reads and writes accept `0..1` ranges for axes the image doesn't have.** cfitsio reads only the first `NAXIS` ranges, so `fitsio` code can pass a `0..1` for each degenerate Stokes or frequency axis named in the header of a 2-D image. FastFitsCutter does this, and compat rejected it with `InvalidValue`. Trailing `0..1` ranges are now dropped. Any other trailing range is still an error: `fitsio` would return padding for it, or crash on an empty one. A compat-parity test checks the reads and writes against `fitsio`.
+- **Compat keyword names are normalised as cfitsio normalises them.** Blanks around a name are ignored and written names are upper-cased, `HIERARCH` names included. Before, `read_key("CRVAL1  ")` failed on a name padded to 8 bytes as it sits on a card. `write_key` with that name returned `Ok` but wrote a card nothing could find, and a lower-case name wrote a lower-case keyword, which isn't valid FITS. FastFitsCutter copies keys by their padded card names, so its cutouts lost `CRVAL1`/`CRVAL2`. A compat-parity test compares the card names and values written against cfitsio.
+
 ## 0.18.0
 
 ### Added
