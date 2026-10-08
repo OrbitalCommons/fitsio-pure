@@ -41,13 +41,13 @@ impl FitsHdu {
     }
 
     /// Write a header keyword value to this HDU.
-    pub fn write_key<T: WritesKey>(
-        &self,
-        file: &mut FitsFile,
-        name: &str,
-        value: &T,
-    ) -> Result<()> {
-        T::write_key(file, self, name, value)
+    ///
+    /// Takes the value by value, as `fitsio` does, so upstream calls such as
+    /// `hdu.write_key(&mut f, "TELESCOP", "MWA")` or
+    /// `hdu.write_key(&mut f, "EXPTIME", (30.0, "seconds"))` compile unchanged.
+    /// A reference to a value works too.
+    pub fn write_key<T: WritesKey>(&self, file: &mut FitsFile, name: &str, value: T) -> Result<()> {
+        T::write_key(file, self, name, &value)
     }
 
     /// Read a column from a binary table HDU.
@@ -158,7 +158,7 @@ mod tests {
         let path = dir.path().join("test.fits");
         let mut f = FitsFile::create(&path).open().unwrap();
         let hdu = f.primary_hdu().unwrap();
-        hdu.write_key(&mut f, "TESTVAL", &42i64).unwrap();
+        hdu.write_key(&mut f, "TESTVAL", 42i64).unwrap();
         let val: i64 = hdu.read_key(&f, "TESTVAL").unwrap();
         assert_eq!(val, 42);
     }

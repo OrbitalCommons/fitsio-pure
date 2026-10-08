@@ -43,7 +43,7 @@ mod tests {
                 dimensions: vec![2, 3],
             };
             let hdu = f.create_image("SCI", &desc).unwrap();
-            hdu.write_key(&mut f, "EXPTIME", &42i64).unwrap();
+            hdu.write_key(&mut f, "EXPTIME", 42i64).unwrap();
         }
 
         let f = FitsFile::open(&path).unwrap();

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.16.0
+
+### Changed
+
+- **Compat `write_key` takes the value by value, as `fitsio` does.** `hdu.write_key(&mut f, "GAIN", 100i64)` used to be `E0308: expected &_` at 308 call sites in the graph's `fitsio` repos, including upstream's own documented example. A reference still works, so callers that passed `&value` compile unchanged. Only a `write_key::<T>` turbofish with a borrowed argument breaks. (#89)
+
+### Added
+
+- **Compat header key types match `fitsio`'s.** (#90)
+  - `write_key` accepts every integer type from `i8` to `u64`, `f32`, `&str` and `String`, alongside `i64`, `f64` and `bool`, each on its own or paired with a comment as `(value, &str)` or `(value, String)`. `&str` alone was 61 call sites in 12 repos.
+  - Narrow integers widen to the one FITS integer type. A `u64` above `i64::MAX` is an error.
+  - An `f32` is written as the shortest decimal that reads back as it, so `0.1f32` is written as 0.1.
+  - A comment replaces the card's comment. A write without one keeps the existing comment. A `HIERARCH` card carries the comment after its value, cut to fit the card, as cfitsio writes it.
+- Compat `read_key` returns `i32` and `f32` alongside `i64`, `f64`, `bool` and `String`, or `HeaderValue<T>` of any of them to get the card's comment as well. An `i32` read of a value that doesn't fit is an error.
+- The same `write_key` calls, compiled against `fitsio` and against `fitsio_pure::compat`, write files that the other library reads back with the same values and comments, in both directions (compat-parity).
+
 ## 0.15.4
 
 ### Fixed
