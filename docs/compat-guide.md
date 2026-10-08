@@ -49,7 +49,7 @@ let mut fitsfile = FitsFile::create("output.fits")
 
 let description = ImageDescription {
     data_type: ImageType::Float,
-    dimensions: vec![100, 100],
+    dimensions: &[100, 100],
 };
 
 let hdu = fitsfile.create_image("SCI", &description).unwrap();
@@ -58,7 +58,7 @@ let pixels: Vec<f32> = vec![0.0; 100 * 100];
 f32::write_image(&mut fitsfile, &hdu, &pixels).unwrap();
 ```
 
-As in `fitsio`, `dimensions` and the `shape` that `info()` reports are row-major, slowest axis first: `[rows, columns]` for a 2-D image, the reverse of FITS `NAXISn` order. `read_region` ranges are the exception and, as in cfitsio, list `NAXIS1` (columns) first.
+As in `fitsio`, `ImageDescription` borrows its `dimensions` (`&[100, 100]`, or `&dims` for a `Vec`), and `create_image` takes any name that converts into a `String`. `dimensions` and the `shape` that `info()` reports are row-major, slowest axis first: `[rows, columns]` for a 2-D image, the reverse of FITS `NAXISn` order. `read_region` ranges are the exception and, as in cfitsio, list `NAXIS1` (columns) first.
 
 ### Reading image data
 

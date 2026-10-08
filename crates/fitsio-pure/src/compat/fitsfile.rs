@@ -28,9 +28,9 @@ pub struct FitsFile {
 }
 
 /// Builder for creating a new FITS file.
-pub struct NewFitsFile {
+pub struct NewFitsFile<'a> {
     path: PathBuf,
-    image_description: Option<ImageDescription>,
+    image_description: Option<ImageDescription<'a>>,
     overwrite: bool,
 }
 
@@ -188,7 +188,7 @@ impl FitsFile {
     }
 
     /// Return a builder for creating a new FITS file.
-    pub fn create<P: AsRef<Path>>(path: P) -> NewFitsFile {
+    pub fn create<'a, P: AsRef<Path>>(path: P) -> NewFitsFile<'a> {
         NewFitsFile {
             path: path.as_ref().to_path_buf(),
             image_description: None,
@@ -225,17 +225,25 @@ impl FitsFile {
     }
 
     /// Create a new image extension HDU with the given name and description.
-    pub fn create_image(&mut self, extname: &str, desc: &ImageDescription) -> Result<FitsHdu> {
+    ///
+    /// The name is anything that converts into a `String`, as in `fitsio`, so
+    /// both `"SCI"` and `"SCI".to_string()` work.
+    pub fn create_image<T: Into<String>>(
+        &mut self,
+        extname: T,
+        desc: &ImageDescription,
+    ) -> Result<FitsHdu> {
         // `dimensions` are row-major, as in `fitsio`; FITS lists NAXIS1 first.
         let cards = crate::extension::build_extension_header(
             crate::extension::ExtensionType::Image,
             desc.data_type.to_bitpix(),
-            &super::hdu::row_major(&desc.dimensions),
+            &super::hdu::row_major(desc.dimensions),
             0,
             1,
         )?;
+        let extname = extname.into();
         self.data
-            .extend_from_slice(&image_hdu_bytes(cards, extname, desc)?);
+            .extend_from_slice(&image_hdu_bytes(cards, &extname, desc)?);
 
         self.invalidate_cache();
         let fits_data = self.parsed()?;
@@ -344,7 +352,7 @@ impl Drop for FitsFile {
     }
 }
 
-impl NewFitsFile {
+impl<'a> NewFitsFile<'a> {
     /// Set whether to overwrite an existing file.
     pub fn overwrite(mut self) -> Self {
         self.overwrite = true;
@@ -353,7 +361,7 @@ impl NewFitsFile {
 
     /// Make the primary HDU an image described by `description` instead of an
     /// empty one, so its pixels can be written through [`FitsFile::primary_hdu`].
-    pub fn with_custom_primary(mut self, description: &ImageDescription) -> Self {
+    pub fn with_custom_primary(mut self, description: &ImageDescription<'a>) -> Self {
         self.image_description = Some(description.clone());
         self
     }
@@ -394,7 +402,7 @@ fn primary_hdu_bytes(desc: Option<&ImageDescription>) -> Result<Vec<u8>> {
             // `dimensions` are row-major, as in `fitsio`; FITS lists NAXIS1 first.
             let cards = crate::primary::build_primary_header(
                 desc.data_type.to_bitpix(),
-                &super::hdu::row_major(&desc.dimensions),
+                &super::hdu::row_major(desc.dimensions),
             )?;
             image_hdu_bytes(cards, "_PRIMARY", desc)
         }
@@ -432,7 +440,7 @@ fn image_hdu_bytes(
     let mut bytes = crate::header::serialize_header(&cards)?;
 
     // NAXIS = 0 means no data unit, not the empty product's one pixel.
-    let pixels = match desc.dimensions.as_slice() {
+    let pixels = match desc.dimensions {
         [] => 0,
         dims => dims.iter().product::<usize>(),
     };
@@ -481,7 +489,7 @@ mod tests {
             let mut f = FitsFile::create(&path).open().unwrap();
             let desc = ImageDescription {
                 data_type: ImageType::Short,
-                dimensions: vec![3, 2],
+                dimensions: &[3, 2],
             };
             f.create_image("SCI", &desc).unwrap();
         }
@@ -513,7 +521,7 @@ mod tests {
 
         let desc = ImageDescription {
             data_type: ImageType::Short,
-            dimensions: vec![3, 2],
+            dimensions: &[3, 2],
         };
         let hdu = f.create_image("SCI", &desc).unwrap();
         let pixels: Vec<i16> = vec![-3, -2, -1, 0, 1, 2];
@@ -535,7 +543,7 @@ mod tests {
         let mut f = FitsFile::edit(&path).unwrap();
         let desc = ImageDescription {
             data_type: ImageType::UnsignedByte,
-            dimensions: vec![4],
+            dimensions: &[4],
         };
         f.create_image("EXTRA", &desc).unwrap();
         let bytes = f.into_bytes().unwrap();
@@ -552,7 +560,7 @@ mod tests {
             let mut f = FitsFile::create(&path).open().unwrap();
             let desc = ImageDescription {
                 data_type: ImageType::Short,
-                dimensions: vec![3, 2],
+                dimensions: &[3, 2],
             };
             f.create_image("SCI", &desc).unwrap();
         }
@@ -582,7 +590,7 @@ mod tests {
         let mut f = FitsFile::edit(&path).unwrap();
         let desc = ImageDescription {
             data_type: ImageType::Float,
-            dimensions: vec![2, 3],
+            dimensions: &[2, 3],
         };
         f.create_image("SCI", &desc).unwrap();
         f.flush().unwrap();
@@ -680,7 +688,7 @@ mod tests {
         let mut f = FitsFile::create(&path).open().unwrap();
         let desc = ImageDescription {
             data_type: ImageType::Float,
-            dimensions: vec![10, 10],
+            dimensions: &[10, 10],
         };
         let hdu = f.create_image("SCI", &desc).unwrap();
         assert_eq!(hdu.hdu_index, 1);
@@ -694,7 +702,7 @@ mod tests {
         let mut f = FitsFile::create(&path).open().unwrap();
         let desc = ImageDescription {
             data_type: ImageType::Float,
-            dimensions: vec![10],
+            dimensions: &[10],
         };
         f.create_image("SCI", &desc).unwrap();
         let hdu = f.hdu("SCI").unwrap();
@@ -711,7 +719,7 @@ mod tests {
         let mut f = FitsFile::create(&path).open().unwrap();
         let desc = ImageDescription {
             data_type: ImageType::Float,
-            dimensions: vec![10],
+            dimensions: &[10],
         };
         f.create_image("Events", &desc).unwrap();
         let second = f.create_image("WHT", &desc).unwrap();
@@ -749,7 +757,7 @@ mod tests {
         let mut f = FitsFile::create(&path).open().unwrap();
         let desc = ImageDescription {
             data_type: ImageType::Short,
-            dimensions: vec![5],
+            dimensions: &[5],
         };
         f.create_image("EXT1", &desc).unwrap();
         f.create_image("EXT2", &desc).unwrap();
@@ -766,7 +774,7 @@ mod tests {
         let path = dir.path().join("test.fits");
         let desc = ImageDescription {
             data_type: ImageType::Float,
-            dimensions: vec![5, 7],
+            dimensions: &[5, 7],
         };
         let pixels: Vec<f32> = (0..35).map(|i| i as f32 * 0.5 - 3.0).collect();
         {
@@ -802,7 +810,7 @@ mod tests {
 
         let desc = ImageDescription {
             data_type: ImageType::UnsignedShort,
-            dimensions: vec![5, 7],
+            dimensions: &[5, 7],
         };
         let pixels: Vec<u16> = (0..35).map(|i| i * 1871).collect();
         let mut f = FitsFile::create_in_memory_with_custom_primary(&desc).unwrap();
@@ -822,7 +830,7 @@ mod tests {
 
         let primary = ImageDescription {
             data_type: ImageType::Short,
-            dimensions: vec![5, 7],
+            dimensions: &[5, 7],
         };
         let mut f = FitsFile::create_in_memory_with_custom_primary(&primary).unwrap();
         let ext = f
@@ -830,7 +838,7 @@ mod tests {
                 "SCI",
                 &ImageDescription {
                     data_type: ImageType::Double,
-                    dimensions: vec![3],
+                    dimensions: &[3],
                 },
             )
             .unwrap();
@@ -852,7 +860,7 @@ mod tests {
         let path = dir.path().join("test.fits");
         let desc = ImageDescription {
             data_type: ImageType::Short,
-            dimensions: vec![2, 3],
+            dimensions: &[2, 3],
         };
         FitsFile::create(&path).open().unwrap();
         assert!(FitsFile::create(&path)
@@ -879,7 +887,7 @@ mod tests {
     fn custom_primary_without_axes_has_no_data_unit() {
         let desc = ImageDescription {
             data_type: ImageType::Float,
-            dimensions: vec![],
+            dimensions: &[],
         };
         let mut f = FitsFile::create_in_memory_with_custom_primary(&desc).unwrap();
         assert_eq!(f.data().len(), 2880);

@@ -401,7 +401,8 @@ macro_rules! write_upstream_keys {
     ($hdu:expr, $f:expr) => {{
         $hdu.write_key($f, "FOO", 1i64).unwrap();
         $hdu.write_key($f, "TELESCOP", "MWA").unwrap();
-        $hdu.write_key($f, "OBSERVER", String::from("Edwin")).unwrap();
+        $hdu.write_key($f, "OBSERVER", String::from("Edwin"))
+            .unwrap();
         $hdu.write_key($f, "NPOLS", 4u32).unwrap();
         $hdu.write_key($f, "NCHANS", 768i32).unwrap();
         $hdu.write_key($f, "SCALE", 0.1f32).unwrap();
@@ -424,7 +425,10 @@ fn check_upstream_keys(
     assert_eq!(scale, 0.1f32);
     assert_eq!(
         strings,
-        [("TELESCOP", "MWA".to_string()), ("OBSERVER", "Edwin".to_string())]
+        [
+            ("TELESCOP", "MWA".to_string()),
+            ("OBSERVER", "Edwin".to_string())
+        ]
     );
     assert_eq!(
         commented,
@@ -459,8 +463,14 @@ fn upstream_write_key_calls_round_trip_pure_to_cfitsio() {
     let narrow: i32 = hdu.read_key(&mut f, "NCHANS").unwrap();
     let scale: f32 = hdu.read_key(&mut f, "SCALE").unwrap();
     let strings = [
-        ("TELESCOP", hdu.read_key::<String>(&mut f, "TELESCOP").unwrap()),
-        ("OBSERVER", hdu.read_key::<String>(&mut f, "OBSERVER").unwrap()),
+        (
+            "TELESCOP",
+            hdu.read_key::<String>(&mut f, "TELESCOP").unwrap(),
+        ),
+        (
+            "OBSERVER",
+            hdu.read_key::<String>(&mut f, "OBSERVER").unwrap(),
+        ),
     ];
     let exptime: CHeaderValue<f64> = hdu.read_key(&mut f, "EXPTIME").unwrap();
     let gain: CHeaderValue<i64> = hdu.read_key(&mut f, "GAIN").unwrap();
@@ -492,7 +502,11 @@ fn upstream_write_key_calls_round_trip_cfitsio_to_pure() {
     let f = PureFits::open(&path).unwrap();
     let hdu = f.primary_hdu().unwrap();
     let int = |k| hdu.read_key::<i64>(&f, k).unwrap();
-    let ints = [("FOO", int("FOO")), ("NPOLS", int("NPOLS")), ("GAIN", int("GAIN"))];
+    let ints = [
+        ("FOO", int("FOO")),
+        ("NPOLS", int("NPOLS")),
+        ("GAIN", int("GAIN")),
+    ];
     let narrow: i32 = hdu.read_key(&f, "NCHANS").unwrap();
     let scale: f32 = hdu.read_key(&f, "SCALE").unwrap();
     let strings = [
