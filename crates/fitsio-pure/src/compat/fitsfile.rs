@@ -198,7 +198,7 @@ impl FitsFile {
 
     /// Return a handle to the primary HDU (index 0).
     pub fn primary_hdu(&self) -> Result<FitsHdu> {
-        Ok(FitsHdu { hdu_index: 0 })
+        FitsHdu::at(self, 0)
     }
 
     /// Return a handle to the HDU described by `desc` (index or name).
@@ -207,7 +207,7 @@ impl FitsFile {
         let (idx, _) = desc
             .get_hdu(fits_data)
             .ok_or(Error::Message("HDU not found".to_string()))?;
-        Ok(FitsHdu { hdu_index: idx })
+        FitsHdu::at(self, idx)
     }
 
     /// Return the number of HDUs in this file.
@@ -218,10 +218,8 @@ impl FitsFile {
 
     /// Return handles to all HDUs in the file.
     pub fn iter(&self) -> Result<Vec<FitsHdu>> {
-        let fits_data = self.parsed()?;
-        Ok((0..fits_data.len())
-            .map(|i| FitsHdu { hdu_index: i })
-            .collect())
+        let count = self.parsed()?.len();
+        (0..count).map(|i| FitsHdu::at(self, i)).collect()
     }
 
     /// Create a new image extension HDU with the given name and description.
@@ -248,7 +246,7 @@ impl FitsFile {
         self.invalidate_cache();
         let fits_data = self.parsed()?;
         let idx = fits_data.len() - 1;
-        Ok(FitsHdu { hdu_index: idx })
+        FitsHdu::at(self, idx)
     }
 
     /// Create a new binary table extension HDU.
@@ -272,7 +270,7 @@ impl FitsFile {
         self.invalidate_cache();
         let fits_data = self.parsed()?;
         let idx = fits_data.len() - 1;
-        Ok(FitsHdu { hdu_index: idx })
+        FitsHdu::at(self, idx)
     }
 
     /// Create a new ASCII table extension HDU.
@@ -296,7 +294,7 @@ impl FitsFile {
         self.invalidate_cache();
         let fits_data = self.parsed()?;
         let idx = fits_data.len() - 1;
-        Ok(FitsHdu { hdu_index: idx })
+        FitsHdu::at(self, idx)
     }
 
     /// Return a reference to the in-memory FITS bytes.
@@ -308,6 +306,13 @@ impl FitsFile {
     pub fn set_data(&mut self, data: Vec<u8>) {
         self.data = data;
         self.invalidate_cache();
+    }
+
+    /// Mutable access to the in-memory FITS bytes, for writes that change
+    /// bytes in place without moving anything.
+    pub(crate) fn data_mut(&mut self) -> &mut [u8] {
+        self.invalidate_cache();
+        &mut self.data
     }
 
     /// Flush the in-memory data to disk if opened for writing from a path.
@@ -501,8 +506,8 @@ mod tests {
         assert_eq!(from_mem.data(), from_disk.data());
         assert_eq!(from_mem.num_hdus().unwrap(), from_disk.num_hdus().unwrap());
         assert_eq!(
-            from_mem.hdu("SCI").unwrap().hdu_index,
-            from_disk.hdu("SCI").unwrap().hdu_index
+            from_mem.hdu("SCI").unwrap().number,
+            from_disk.hdu("SCI").unwrap().number
         );
     }
 
@@ -571,7 +576,7 @@ mod tests {
 
         let from_file = FitsFile::open(&gz_path).unwrap();
         assert_eq!(from_file.data(), &plain[..]);
-        assert_eq!(from_file.hdu("SCI").unwrap().hdu_index, 1);
+        assert_eq!(from_file.hdu("SCI").unwrap().number, 1);
 
         let from_bytes = FitsFile::from_bytes(gz.clone()).unwrap();
         assert_eq!(from_bytes.data(), &plain[..]);
@@ -670,7 +675,7 @@ mod tests {
         let path = dir.path().join("test.fits");
         let f = FitsFile::create(&path).open().unwrap();
         let hdu = f.primary_hdu().unwrap();
-        assert_eq!(hdu.hdu_index, 0);
+        assert_eq!(hdu.number, 0);
     }
 
     #[test]
@@ -691,7 +696,7 @@ mod tests {
             dimensions: &[10, 10],
         };
         let hdu = f.create_image("SCI", &desc).unwrap();
-        assert_eq!(hdu.hdu_index, 1);
+        assert_eq!(hdu.number, 1);
         assert_eq!(f.num_hdus().unwrap(), 2);
     }
 
@@ -706,7 +711,7 @@ mod tests {
         };
         f.create_image("SCI", &desc).unwrap();
         let hdu = f.hdu("SCI").unwrap();
-        assert_eq!(hdu.hdu_index, 1);
+        assert_eq!(hdu.number, 1);
     }
 
     /// cfitsio compares names ignoring case and falls back to HDUNAME, and
@@ -725,11 +730,11 @@ mod tests {
         let second = f.create_image("WHT", &desc).unwrap();
         second.write_key(&mut f, "HDUNAME", "Weights").unwrap();
 
-        assert_eq!(f.hdu("Events").unwrap().hdu_index, 1);
-        assert_eq!(f.hdu("EVENTS").unwrap().hdu_index, 1);
-        assert_eq!(f.hdu("events").unwrap().hdu_index, 1);
-        assert_eq!(f.hdu("wht").unwrap().hdu_index, 2);
-        assert_eq!(f.hdu("WEIGHTS").unwrap().hdu_index, 2);
+        assert_eq!(f.hdu("Events").unwrap().number, 1);
+        assert_eq!(f.hdu("EVENTS").unwrap().number, 1);
+        assert_eq!(f.hdu("events").unwrap().number, 1);
+        assert_eq!(f.hdu("wht").unwrap().number, 2);
+        assert_eq!(f.hdu("WEIGHTS").unwrap().number, 2);
         assert!(f.hdu("EVENT").is_err());
     }
 
@@ -739,7 +744,7 @@ mod tests {
         let path = dir.path().join("test.fits");
         let f = FitsFile::create(&path).open().unwrap();
         let hdu = f.hdu(0usize).unwrap();
-        assert_eq!(hdu.hdu_index, 0);
+        assert_eq!(hdu.number, 0);
     }
 
     #[test]
@@ -801,7 +806,7 @@ mod tests {
         assert_eq!(hdu.read_key::<i64>(&f, "NAXIS1").unwrap(), 7);
         assert_eq!(hdu.read_key::<i64>(&f, "NAXIS2").unwrap(), 5);
         assert_eq!(f32::read_image(&f, &hdu).unwrap(), pixels);
-        assert_eq!(f.hdu("_PRIMARY").unwrap().hdu_index, 0);
+        assert_eq!(f.hdu("_PRIMARY").unwrap().number, 0);
     }
 
     #[test]

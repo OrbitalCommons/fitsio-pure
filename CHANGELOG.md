@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.18.0
+
+### Added
+
+- **Compat `FitsHdu` has `fitsio`'s fields and image methods.** (#92)
+  - `hdu.info` and `hdu.number` are public fields, filled in when the handle is fetched, so `match &hdu.info { … }` and `hdu.number + 1` compile as upstream code writes them. The `info(&f)` method stays, for info that reflects later changes.
+  - `hdu.read_image`, `read_section`, `read_rows` and `read_region` return `Vec<T>` or, with the `array` feature, `ArrayD<T>`, chosen by the binding, through a new `ReadsImage` trait.
+  - `hdu.write_image`, `write_section` and `write_region` are added; region ranges are `NAXIS1` first.
+  - `hdu.name()` returns `EXTNAME` or an empty string, and `hdu.read_cell_value()` reads one table cell.
+  - A compat-parity test runs the same upstream-style `FitsHdu` code against `fitsio` and compat and gets identical results.
+  - Not provided, for lack of callers: `resize`, `copy_to`, `delete`, `columns`, `row`/`read_row`, `write_col_range`, and the column add/insert/delete methods.
+
+### Fixed
+
+- **Compat image writes no longer corrupt the file when the data doesn't match the image.** `write_image` replaced the whole data unit with the bytes it was given. Too few pixels shrank the data unit and broke the file; too many grew it; and a type that didn't match `BITPIX` (an `f64` slice into a `Float` image) wrote the wrong bytes. Writes now go in place. More values than the image holds is an error, as in `fitsio`, and fewer leave the rest of the image unchanged. Values are converted to the stored type through `BZERO`/`BSCALE`, rounding as cfitsio does, and a value that doesn't fit, or a NaN in an integer image, is an error.
+
+### Changed
+
+- **Breaking:** `WriteImage` gains `write_section` and `write_region`, so implementations outside the crate must add them. `FitsHdu` now derives `PartialEq`.
+
 ## 0.17.0
 
 ### Changed

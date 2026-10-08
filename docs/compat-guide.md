@@ -122,14 +122,18 @@ let dec: Vec<f64> = f64::read_col(&fitsfile, &hdu, "DEC").unwrap();
 | Get HDU by index | `f.hdu(0)?` | `f.hdu(0usize)?` |
 | Read header key | `hdu.read_key::<T>(&mut f, name)?` | `hdu.read_key::<T>(&f, name)?` |
 | Write header key | `hdu.write_key(&mut f, name, val)?` | `hdu.write_key(&mut f, name, val)?` |
-| Read image | `hdu.read_image(&mut f)?` | `T::read_image(&f, &hdu)?` |
-| Write image | `hdu.write_image(&mut f, &data)?` | `T::write_image(&mut f, &hdu, &data)?` |
-| Read column | `hdu.read_col::<T>(&mut f, name)?` | `T::read_col(&f, &hdu, name)?` |
-| HDU info | `hdu.info` | `hdu.info(&f)?` |
+| Read image | `hdu.read_image(&mut f)?` | `hdu.read_image(&mut f)?` |
+| Read section / rows / region | `hdu.read_section(&mut f, start, end)?` … | the same |
+| Write image | `hdu.write_image(&mut f, &data)?` | `hdu.write_image(&mut f, &data)?` |
+| Write section / region | `hdu.write_section(&mut f, start, end, &data)?` … | the same |
+| Read column | `hdu.read_col::<T>(&mut f, name)?` | `hdu.read_col::<T>(&f, name)?` |
+| HDU info | `hdu.info` | `hdu.info` (or `hdu.info(&f)?` for the current state) |
+| HDU number / name | `hdu.number`, `hdu.name(&mut f)?` | the same |
 | Number of HDUs | `f.num_hdus()?` | `f.num_hdus()?` |
 
 ### Key differences from fitsio
 
-- No mutable borrow required for read operations (reads take `&FitsFile`, not `&mut FitsFile`).
-- Image and column read/write use associated functions (`T::read_image(...)`) instead of methods on the HDU.
-- HDU info requires a reference to the file since there is no cached C-side state.
+- No mutable borrow required for read operations (reads take `&FitsFile`, not `&mut FitsFile`); passing `&mut f` still works.
+- Region ranges are one per axis, `NAXIS1` first, which is the order `fitsio` actually passes to cfitsio.
+- Image writes convert to the image's type through its `BZERO`/`BSCALE`, as cfitsio does, and a value that doesn't fit is an error.
+- Not provided: `resize`, `copy_to`, `delete`, `columns`, `row`/`read_row`, `write_col_range`, and the column add/insert/delete methods.

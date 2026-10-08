@@ -35,9 +35,9 @@ fn find_card(
     name: &str,
 ) -> Result<(crate::value::Value, Option<String>)> {
     let fits_data = file.parsed()?;
-    let core_hdu = fits_data.get(hdu.hdu_index).ok_or(Error::Message(format!(
+    let core_hdu = fits_data.get(hdu.number).ok_or(Error::Message(format!(
         "HDU index {} not found",
-        hdu.hdu_index
+        hdu.number
     )))?;
 
     // Like cfitsio, match keywords ignoring case, and refuse to read an
@@ -190,10 +190,10 @@ fn write_key_to_file(
     let mut fits_data = crate::hdu::parse_fits(file.data())?;
     let core_hdu = fits_data
         .hdus
-        .get_mut(hdu.hdu_index)
+        .get_mut(hdu.number)
         .ok_or(Error::Message(format!(
             "HDU index {} not found",
-            hdu.hdu_index
+            hdu.number
         )))?;
 
     if crate::header::needs_hierarch(name) {

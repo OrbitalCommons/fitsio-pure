@@ -133,13 +133,13 @@ impl ImageType {
 
 fn validate_hdu_index(file: &FitsFile, hdu: &FitsHdu) -> Result<usize> {
     let fits_data = file.parsed()?;
-    if hdu.hdu_index >= fits_data.len() {
+    if hdu.number >= fits_data.len() {
         return Err(Error::Message(format!(
             "HDU index {} out of range",
-            hdu.hdu_index
+            hdu.number
         )));
     }
-    Ok(hdu.hdu_index)
+    Ok(hdu.number)
 }
 
 /// Trait for types that can read image pixel data from a FITS file.
@@ -161,6 +161,38 @@ pub trait ReadImage: Sized {
         hdu: &FitsHdu,
         ranges: &[std::ops::Range<usize>],
     ) -> Result<Vec<Self>>;
+}
+
+/// The output of an image read through [`FitsHdu`]'s methods: `Vec<T>` or,
+/// with the `array` feature, `ndarray::ArrayD<T>`, as in `fitsio`. This is
+/// what lets `let pixels: Vec<f32> = hdu.read_image(&mut f)?` pick its type
+/// from the binding.
+///
+/// Its methods are named apart from [`ReadImage`]'s so the two traits can be
+/// in scope together without making `ArrayD::<f32>::read_image(…)` ambiguous.
+pub trait ReadsImage: Sized {
+    fn image(file: &FitsFile, hdu: &FitsHdu) -> Result<Self>;
+    fn section(file: &FitsFile, hdu: &FitsHdu, range: std::ops::Range<usize>) -> Result<Self>;
+    fn rows(file: &FitsFile, hdu: &FitsHdu, start_row: usize, num_rows: usize) -> Result<Self>;
+    fn region(file: &FitsFile, hdu: &FitsHdu, ranges: &[std::ops::Range<usize>]) -> Result<Self>;
+}
+
+impl<T: ReadImage> ReadsImage for Vec<T> {
+    fn image(file: &FitsFile, hdu: &FitsHdu) -> Result<Self> {
+        T::read_image(file, hdu)
+    }
+
+    fn section(file: &FitsFile, hdu: &FitsHdu, range: std::ops::Range<usize>) -> Result<Self> {
+        T::read_section(file, hdu, range)
+    }
+
+    fn rows(file: &FitsFile, hdu: &FitsHdu, start_row: usize, num_rows: usize) -> Result<Self> {
+        T::read_rows(file, hdu, start_row, num_rows)
+    }
+
+    fn region(file: &FitsFile, hdu: &FitsHdu, ranges: &[std::ops::Range<usize>]) -> Result<Self> {
+        T::read_region(file, hdu, ranges)
+    }
 }
 
 /// Trait for types that support zero-allocation image reads into a caller buffer.
@@ -189,10 +221,37 @@ impl ReadImageIntoBuffer for f64 {
 }
 
 /// Trait for types that can write image pixel data to a FITS file.
-pub trait WriteImage {
-    fn write_image(file: &mut FitsFile, hdu: &FitsHdu, data: &[Self]) -> Result<()>
-    where
-        Self: Sized;
+///
+/// As in cfitsio, the values are physical: they are converted to the image's
+/// `BITPIX`, undoing its `BSCALE`/`BZERO`, so an `f64` slice can be written to
+/// a `Float` image or a `u16` slice to a `BZERO = 32768` one. A value that
+/// doesn't fit the stored type is an error. Pixels are written in place, and
+/// no write can change the image's size.
+pub trait WriteImage: Sized {
+    /// Write `data` from the first pixel on. More values than the image has
+    /// pixels is an error; fewer leave the rest of the image unchanged.
+    fn write_image(file: &mut FitsFile, hdu: &FitsHdu, data: &[Self]) -> Result<()>;
+
+    /// Write `data` to the pixels `range` covers in the flat, `NAXIS1`-fastest
+    /// pixel order. As in `fitsio`, only the first `range.len()` values are
+    /// written; fewer than that is an error.
+    fn write_section(
+        file: &mut FitsFile,
+        hdu: &FitsHdu,
+        range: std::ops::Range<usize>,
+        data: &[Self],
+    ) -> Result<()>;
+
+    /// Write `data` to a rectangular region. `ranges` has one range per axis,
+    /// `NAXIS1` first, as `read_region` takes them; `data` is `NAXIS1`-fastest.
+    /// As in `fitsio`, values past the region's size are ignored; fewer than
+    /// it holds is an error.
+    fn write_region(
+        file: &mut FitsFile,
+        hdu: &FitsHdu,
+        ranges: &[std::ops::Range<usize>],
+        data: &[Self],
+    ) -> Result<()>;
 }
 
 fn ranges_to_tuples(ranges: &[std::ops::Range<usize>]) -> Vec<(usize, usize)> {
@@ -352,86 +411,290 @@ macro_rules! impl_read_image {
 
 impl_read_image!(u8, i8, i16, u16, i32, u32, i64, u64, f32, f64);
 
-/// Splice already-serialized pixel bytes into the HDU's data region, preserving
-/// any subsequent HDUs.
-fn write_serialized(file: &mut FitsFile, hdu: &FitsHdu, serialized: &[u8]) -> Result<()> {
-    // Read HDU metadata from cache before mutating.
-    let (data_start, padded_data_len, file_len) = {
-        let parsed = file.parsed()?;
-        let core_hdu = parsed
-            .hdus
-            .get(hdu.hdu_index)
-            .ok_or(Error::Message(format!(
-                "HDU index {} out of range",
-                hdu.hdu_index
-            )))?;
-        let padded = crate::block::padded_byte_len(core_hdu.data_len);
-        (core_hdu.data_start, padded, file.data().len())
+/// A pixel value to write: exact for integers, `f64` for floats.
+#[derive(Clone, Copy)]
+enum PhysicalValue {
+    Exact(i128),
+    Scaled(f64),
+}
+
+/// Conversion of an element type to the physical value it writes.
+trait ToPhysical: Copy {
+    fn to_physical(self) -> PhysicalValue;
+}
+
+macro_rules! impl_to_physical {
+    (exact: $($i:ty),*; scaled: $($f:ty),*) => {
+        $(impl ToPhysical for $i {
+            fn to_physical(self) -> PhysicalValue {
+                PhysicalValue::Exact(i128::from(self))
+            }
+        })*
+        $(impl ToPhysical for $f {
+            fn to_physical(self) -> PhysicalValue {
+                PhysicalValue::Scaled(f64::from(self))
+            }
+        })*
     };
+}
 
-    let next_hdu_start = data_start + padded_data_len;
-    let tail_len = file_len.saturating_sub(next_hdu_start);
+impl_to_physical!(exact: u8, i8, i16, u16, i32, u32, i64, u64; scaled: f32, f64);
 
-    let mut new_data = Vec::with_capacity(data_start + serialized.len() + tail_len);
-    new_data.extend_from_slice(&file.data()[..data_start]);
-    new_data.extend_from_slice(serialized);
-    if tail_len > 0 {
-        new_data.extend_from_slice(&file.data()[next_hdu_start..]);
+/// An image HDU's storage: where its data unit is and how pixels are stored.
+struct ImageStorage {
+    data_start: usize,
+    pixel_count: usize,
+    bitpix: i64,
+    bscale: f64,
+    bzero: f64,
+}
+
+fn image_storage(file: &FitsFile, hdu: &FitsHdu) -> Result<ImageStorage> {
+    let idx = validate_hdu_index(file, hdu)?;
+    let parsed = file.parsed()?;
+    let core = &parsed.hdus[idx];
+    let bitpix = match &core.info {
+        crate::hdu::HduInfo::Primary { bitpix, .. } | crate::hdu::HduInfo::Image { bitpix, .. } => {
+            *bitpix
+        }
+        _ => {
+            return Err(Error::Message(format!(
+                "HDU {idx} is not an uncompressed image"
+            )))
+        }
+    };
+    let bytes_per_pixel = crate::image::bytes_per_pixel(bitpix)?;
+    if core.data_start + core.data_len > file.data().len() {
+        return Err(Error::Message(format!(
+            "HDU {idx} data unit runs past the end of the file"
+        )));
     }
+    let (bscale, bzero) = crate::image::extract_bscale_bzero(&core.cards);
+    Ok(ImageStorage {
+        data_start: core.data_start,
+        pixel_count: core.data_len / bytes_per_pixel,
+        bitpix,
+        bscale,
+        bzero,
+    })
+}
 
-    file.set_data(new_data);
+/// Encode physical values as the image stores them: undo `BZERO`/`BSCALE`
+/// and narrow to `BITPIX`, rounding to the nearest integer for integer images
+/// as cfitsio does. A value that doesn't fit is an error (cfitsio's
+/// `NUM_OVERFLOW`).
+fn encode_storage<T: ToPhysical>(data: &[T], storage: &ImageStorage) -> Result<Vec<u8>> {
+    let ImageStorage {
+        bitpix,
+        bscale,
+        bzero,
+        ..
+    } = *storage;
+    let exact_offset =
+        (bscale == 1.0 && bzero.fract() == 0.0 && bzero.abs() < 1e20).then_some(bzero as i128);
+    let mut out = Vec::with_capacity(data.len() * crate::image::bytes_per_pixel(bitpix)?);
+    for &value in data {
+        let value = value.to_physical();
+        if bitpix < 0 {
+            let physical = match value {
+                PhysicalValue::Exact(v) => v as f64,
+                PhysicalValue::Scaled(v) => v,
+            };
+            let stored = (physical - bzero) / bscale;
+            match bitpix {
+                -32 => out.extend_from_slice(&(stored as f32).to_be_bytes()),
+                _ => out.extend_from_slice(&stored.to_be_bytes()),
+            }
+            continue;
+        }
+        let stored: i128 = match (value, exact_offset) {
+            (PhysicalValue::Exact(v), Some(offset)) => v - offset,
+            (value, _) => {
+                let physical = match value {
+                    PhysicalValue::Exact(v) => v as f64,
+                    PhysicalValue::Scaled(v) => v,
+                };
+                let stored = ((physical - bzero) / bscale).round();
+                if !stored.is_finite() {
+                    return Err(Error::Message(format!(
+                        "pixel value {physical} cannot be stored in a BITPIX = {bitpix} image"
+                    )));
+                }
+                stored as i128
+            }
+        };
+        let overflow = || {
+            Error::Message(format!(
+                "pixel value out of range for a BITPIX = {bitpix} image"
+            ))
+        };
+        match bitpix {
+            8 => out.push(u8::try_from(stored).map_err(|_| overflow())?),
+            16 => {
+                out.extend_from_slice(&i16::try_from(stored).map_err(|_| overflow())?.to_be_bytes())
+            }
+            32 => {
+                out.extend_from_slice(&i32::try_from(stored).map_err(|_| overflow())?.to_be_bytes())
+            }
+            _ => {
+                out.extend_from_slice(&i64::try_from(stored).map_err(|_| overflow())?.to_be_bytes())
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Overwrite runs of pixels in place. Each run is `(first pixel, pixel count)`
+/// in the flat `NAXIS1`-fastest order, and `encoded` holds the runs' pixels
+/// back to back.
+fn write_pixels(
+    file: &mut FitsFile,
+    storage: &ImageStorage,
+    runs: &[(usize, usize)],
+    encoded: &[u8],
+) -> Result<()> {
+    let bytes_per_pixel = crate::image::bytes_per_pixel(storage.bitpix)?;
+    for &(first, count) in runs {
+        if first + count > storage.pixel_count {
+            return Err(Error::Message(format!(
+                "pixels {first}..{} are outside an image of {} pixels",
+                first + count,
+                storage.pixel_count
+            )));
+        }
+    }
+    let bytes = file.data_mut();
+    let mut source = encoded;
+    for &(first, count) in runs {
+        let start = storage.data_start + first * bytes_per_pixel;
+        let len = count * bytes_per_pixel;
+        bytes[start..start + len].copy_from_slice(&source[..len]);
+        source = &source[len..];
+    }
     Ok(())
 }
 
-macro_rules! impl_write_image {
-    ($t:ty, $serialize_fn:path) => {
-        impl WriteImage for $t {
-            fn write_image(file: &mut FitsFile, hdu: &FitsHdu, data: &[Self]) -> Result<()> {
-                write_serialized(file, hdu, &$serialize_fn(data))
-            }
+/// The contiguous runs covering a region of an image with axis lengths
+/// `naxes` (`NAXIS1` first), in `NAXIS1`-fastest order.
+fn region_runs(naxes: &[usize], ranges: &[std::ops::Range<usize>]) -> Result<Vec<(usize, usize)>> {
+    if ranges.len() != naxes.len() {
+        return Err(Error::Message(format!(
+            "{} ranges given for a {}-dimensional image",
+            ranges.len(),
+            naxes.len()
+        )));
+    }
+    for (axis, (range, &len)) in ranges.iter().zip(naxes).enumerate() {
+        if range.start > range.end || range.end > len {
+            return Err(Error::Message(format!(
+                "range {range:?} is outside axis {} of length {len}",
+                axis + 1
+            )));
         }
-    };
-}
-
-impl_write_image!(u8, crate::image::serialize_image_u8);
-impl_write_image!(i16, crate::image::serialize_image_i16);
-impl_write_image!(i32, crate::image::serialize_image_i32);
-impl_write_image!(i64, crate::image::serialize_image_i64);
-impl_write_image!(f32, crate::image::serialize_image_f32);
-impl_write_image!(f64, crate::image::serialize_image_f64);
-
-/// Write an unsigned image using the cfitsio storage convention: each value is
-/// offset by `-BZERO` (a sign-bit flip) into the signed storage type before
-/// serialization. The matching `BZERO`/`BSCALE` keywords are written by
-/// `create_image`.
-macro_rules! impl_write_image_unsigned {
-    ($t:ty, $signed:ty, $sign_bit:expr, $serialize_fn:path) => {
-        impl WriteImage for $t {
-            fn write_image(file: &mut FitsFile, hdu: &FitsHdu, data: &[Self]) -> Result<()> {
-                let storage: Vec<$signed> =
-                    data.iter().map(|&u| (u ^ $sign_bit) as $signed).collect();
-                write_serialized(file, hdu, &$serialize_fn(&storage))
+    }
+    if ranges.iter().any(|r| r.is_empty()) {
+        return Ok(Vec::new());
+    }
+    let strides: Vec<usize> = naxes
+        .iter()
+        .scan(1usize, |stride, &len| {
+            let this = *stride;
+            *stride *= len;
+            Some(this)
+        })
+        .collect();
+    let run_len = ranges[0].end - ranges[0].start;
+    let mut runs = Vec::new();
+    let mut index: Vec<usize> = ranges.iter().map(|r| r.start).collect();
+    loop {
+        let first = index.iter().zip(&strides).map(|(i, s)| i * s).sum();
+        runs.push((first, run_len));
+        // Advance the outer axes like an odometer; axis 1 is the run itself.
+        let mut axis = 1;
+        loop {
+            if axis == ranges.len() {
+                return Ok(runs);
             }
+            index[axis] += 1;
+            if index[axis] < ranges[axis].end {
+                break;
+            }
+            index[axis] = ranges[axis].start;
+            axis += 1;
         }
-    };
-}
-
-impl_write_image_unsigned!(u16, i16, 0x8000, crate::image::serialize_image_i16);
-impl_write_image_unsigned!(u32, i32, 0x8000_0000, crate::image::serialize_image_i32);
-impl_write_image_unsigned!(
-    u64,
-    i64,
-    0x8000_0000_0000_0000,
-    crate::image::serialize_image_i64
-);
-
-/// Write an `i8` image as `BITPIX = 8` storage offset by `BZERO = -128`.
-impl WriteImage for i8 {
-    fn write_image(file: &mut FitsFile, hdu: &FitsHdu, data: &[Self]) -> Result<()> {
-        let storage: Vec<u8> = data.iter().map(|&v| (v as u8) ^ 0x80).collect();
-        write_serialized(file, hdu, &crate::image::serialize_image_u8(&storage))
     }
 }
+
+/// The image's axis lengths, `NAXIS1` first.
+fn naxes(file: &FitsFile, hdu: &FitsHdu) -> Result<Vec<usize>> {
+    let idx = validate_hdu_index(file, hdu)?;
+    match &file.parsed()?.hdus[idx].info {
+        crate::hdu::HduInfo::Primary { naxes, .. } | crate::hdu::HduInfo::Image { naxes, .. } => {
+            Ok(naxes.clone())
+        }
+        _ => Err(Error::Message(format!(
+            "HDU {idx} is not an uncompressed image"
+        ))),
+    }
+}
+
+macro_rules! impl_write_image {
+    ($($t:ty),*) => {$(
+        impl WriteImage for $t {
+            fn write_image(file: &mut FitsFile, hdu: &FitsHdu, data: &[Self]) -> Result<()> {
+                let storage = image_storage(file, hdu)?;
+                if data.len() > storage.pixel_count {
+                    return Err(Error::Message(format!(
+                        "{} values given for an image of {} pixels",
+                        data.len(),
+                        storage.pixel_count
+                    )));
+                }
+                let encoded = encode_storage(data, &storage)?;
+                write_pixels(file, &storage, &[(0, data.len())], &encoded)
+            }
+
+            fn write_section(
+                file: &mut FitsFile,
+                hdu: &FitsHdu,
+                range: std::ops::Range<usize>,
+                data: &[Self],
+            ) -> Result<()> {
+                let count = range.end.saturating_sub(range.start);
+                if data.len() < count {
+                    return Err(Error::Message(format!(
+                        "{} values given for a section of {count} pixels",
+                        data.len()
+                    )));
+                }
+                let storage = image_storage(file, hdu)?;
+                let encoded = encode_storage(&data[..count], &storage)?;
+                write_pixels(file, &storage, &[(range.start, count)], &encoded)
+            }
+
+            fn write_region(
+                file: &mut FitsFile,
+                hdu: &FitsHdu,
+                ranges: &[std::ops::Range<usize>],
+                data: &[Self],
+            ) -> Result<()> {
+                let runs = region_runs(&naxes(file, hdu)?, ranges)?;
+                let count: usize = runs.iter().map(|&(_, n)| n).sum();
+                if data.len() < count {
+                    return Err(Error::Message(format!(
+                        "{} values given for a region of {count} pixels",
+                        data.len()
+                    )));
+                }
+                let storage = image_storage(file, hdu)?;
+                let encoded = encode_storage(&data[..count], &storage)?;
+                write_pixels(file, &storage, &runs, &encoded)
+            }
+        }
+    )*};
+}
+
+impl_write_image!(u8, i8, i16, u16, i32, u32, i64, u64, f32, f64);
 
 #[cfg(test)]
 mod tests {
@@ -584,7 +847,7 @@ mod tests {
 
         // Raw signed storage is value - 32768.
         let parsed = f.parsed().unwrap();
-        let raw = crate::image::read_image_data(f.data(), &parsed.hdus[hdu.hdu_index]).unwrap();
+        let raw = crate::image::read_image_data(f.data(), &parsed.hdus[hdu.number]).unwrap();
         assert_eq!(raw, crate::image::ImageData::I16(vec![-32768, 0, 32767]));
 
         // Like cfitsio, an i16 read applies BZERO, so 32768 and 65535 overflow.

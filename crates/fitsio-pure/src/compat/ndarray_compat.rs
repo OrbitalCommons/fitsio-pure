@@ -3,7 +3,36 @@ use ndarray::{Array, ArrayBase, ArrayD, Data, Dimension};
 use super::errors::Result;
 use super::fitsfile::FitsFile;
 use super::hdu::{FitsHdu, HduInfo};
-use super::images::{ReadImage, WriteImage};
+use super::images::{ReadImage, ReadsImage, WriteImage};
+
+/// `hdu.read_image(&mut f)` into an `ArrayD<T>` shaped like the image (or the
+/// section, rows or region read), as `fitsio`'s `array` feature gives it.
+impl<T: Clone + ReadImage> ReadsImage for ArrayD<T> {
+    fn image(file: &FitsFile, hdu: &FitsHdu) -> Result<Self> {
+        single(<ArrayD<T> as ReadImage>::read_image(file, hdu)?)
+    }
+
+    fn section(file: &FitsFile, hdu: &FitsHdu, range: std::ops::Range<usize>) -> Result<Self> {
+        single(<ArrayD<T> as ReadImage>::read_section(file, hdu, range)?)
+    }
+
+    fn rows(file: &FitsFile, hdu: &FitsHdu, start_row: usize, num_rows: usize) -> Result<Self> {
+        single(<ArrayD<T> as ReadImage>::read_rows(
+            file, hdu, start_row, num_rows,
+        )?)
+    }
+
+    fn region(file: &FitsFile, hdu: &FitsHdu, ranges: &[std::ops::Range<usize>]) -> Result<Self> {
+        single(<ArrayD<T> as ReadImage>::read_region(file, hdu, ranges)?)
+    }
+}
+
+/// The one array an `ArrayD` `ReadImage` call returns.
+fn single<T>(mut arrays: Vec<ArrayD<T>>) -> Result<ArrayD<T>> {
+    arrays
+        .pop()
+        .ok_or_else(|| super::errors::Error::Message("image read returned no array".into()))
+}
 
 /// Write an n-dimensional array directly to an image HDU (requires the `array`
 /// feature).
