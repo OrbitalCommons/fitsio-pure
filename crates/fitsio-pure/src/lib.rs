@@ -2,8 +2,8 @@
 //!
 //! Parse FITS files with [`hdu::parse_fits`], then read image pixels via
 //! [`image::read_image_data`] or table columns via [`bintable`] and [`table`].
-//! Tile-compressed images (RICE_1 / GZIP_1) are handled transparently through
-//! the [`tiled`] module.
+//! Tile-compressed images (RICE_1 / GZIP_1) are read transparently through
+//! the [`tiled`] module and written with [`compress`].
 //!
 //! The core library is `no_std`-compatible (requires `alloc`). Enable the
 //! `compat` feature for a drop-in replacement of the `fitsio` crate API.
@@ -18,6 +18,7 @@ pub mod bintable;
 pub mod block;
 /// HDU checksum computation and encoding (CHECKSUM/DATASUM).
 pub mod checksum;
+pub mod compress;
 /// Updating header cards of a file in place, without rewriting its data.
 #[cfg(feature = "std")]
 pub mod edit;

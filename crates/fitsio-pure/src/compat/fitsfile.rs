@@ -2,6 +2,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+use super::compression::CompressSpec;
 use super::errors::{Error, Result};
 use super::hdu::FitsHdu;
 use super::images::ImageDescription;
@@ -31,6 +32,9 @@ pub struct FitsFile {
     /// No backing file, so `flush` and `Drop` never touch disk.
     in_memory: bool,
     cached_parse: OnceLock<crate::hdu::FitsData>,
+    /// A `[compress …]` spec given to `create`: images are tile-compressed
+    /// when the file is saved.
+    compression: Option<CompressSpec>,
 }
 
 /// Where an open file's bytes are.
@@ -147,6 +151,7 @@ impl FitsFile {
             mode: FileOpenMode::ReadOnly,
             in_memory: false,
             cached_parse: OnceLock::new(),
+            compression: None,
         };
         // As cfitsio does, fail to open a file that isn't FITS.
         let mut first = [0u8; 8];
@@ -179,6 +184,7 @@ impl FitsFile {
             mode: FileOpenMode::ReadWrite,
             in_memory: false,
             cached_parse: OnceLock::new(),
+            compression: None,
         })
     }
 
@@ -195,6 +201,7 @@ impl FitsFile {
             mode: FileOpenMode::ReadOnly,
             in_memory: true,
             cached_parse: OnceLock::new(),
+            compression: None,
         };
         file.parsed()?;
         Ok(file)
@@ -225,6 +232,7 @@ impl FitsFile {
             mode: FileOpenMode::ReadWrite,
             in_memory: true,
             cached_parse: OnceLock::new(),
+            compression: None,
         })
     }
 
@@ -254,6 +262,15 @@ impl FitsFile {
     }
 
     /// Return a builder for creating a new FITS file.
+    ///
+    /// As in cfitsio, a `[compress …]` spec after the file name, such as
+    /// `"image.fits[compress]"` or `"image.fits[compress G 100,100; q 8]"`,
+    /// tile-compresses the file's images when it is saved: `R` (the default)
+    /// for `RICE_1`, `G` for `GZIP_1`, then optional tile dimensions and a
+    /// quantization level for floats (`q0` for no dithering). The file is
+    /// edited uncompressed in memory. A primary image is saved as cfitsio
+    /// saves it, in the first extension behind an empty primary HDU. See
+    /// [`crate::compress`].
     pub fn create<'a, P: AsRef<Path>>(path: P) -> NewFitsFile<'a> {
         NewFitsFile {
             path: path.as_ref().to_path_buf(),
@@ -454,9 +471,18 @@ impl FitsFile {
     /// failed or interrupted flush leaves the previous file intact.
     pub fn flush(&self) -> Result<()> {
         if self.mode == FileOpenMode::ReadWrite && !self.in_memory {
-            write_atomic(&self.filename, self.data()?)?;
+            write_atomic(&self.filename, &self.saved_bytes()?)?;
         }
         Ok(())
+    }
+
+    /// The bytes a save writes: the file as it is, or, for a file created
+    /// with a `[compress …]` spec, with its images tile-compressed.
+    fn saved_bytes(&self) -> Result<std::borrow::Cow<'_, [u8]>> {
+        match &self.compression {
+            None => Ok(self.data()?.into()),
+            Some(spec) => Ok(super::compression::compress_images(self.data()?, spec)?.into()),
+        }
     }
 
     /// Consume the file and return its FITS bytes.
@@ -467,6 +493,9 @@ impl FitsFile {
         self.flush()?;
         // The bytes are handed back, so Drop must not write them out again.
         self.in_memory = true;
+        if self.compression.is_some() {
+            return Ok(self.saved_bytes()?.into_owned());
+        }
         Ok(std::mem::take(self.bytes_mut()?))
     }
 
@@ -497,10 +526,12 @@ impl FitsFile {
 
 impl Drop for FitsFile {
     fn drop(&mut self) {
-        if let (FileOpenMode::ReadWrite, false, Storage::Memory(data)) =
+        if let (FileOpenMode::ReadWrite, false, Storage::Memory(_)) =
             (self.mode, self.in_memory, &self.storage)
         {
-            let _ = write_atomic(&self.filename, data);
+            if let Ok(bytes) = self.saved_bytes() {
+                let _ = write_atomic(&self.filename, &bytes);
+            }
         }
     }
 }
@@ -529,18 +560,17 @@ impl<'a> NewFitsFile<'a> {
     /// atomically.
     pub fn open(self) -> Result<FitsFile> {
         let data = primary_hdu_bytes(self.image_description.as_ref())?;
+        let (path, compression) = super::compression::split_path(&self.path)?;
 
-        if !(self.overwrite && self.path.exists()) {
+        if !(self.overwrite && path.exists()) {
             let created = std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
-                .open(&self.path);
+                .open(&path);
             match created {
                 Ok(_) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    return Err(Error::ExistingFile(
-                        self.path.to_string_lossy().into_owned(),
-                    ))
+                    return Err(Error::ExistingFile(path.to_string_lossy().into_owned()))
                 }
                 Err(_) => return Err(Error::status(sys::FILE_NOT_CREATED)),
             }
@@ -548,10 +578,11 @@ impl<'a> NewFitsFile<'a> {
 
         Ok(FitsFile {
             storage: Storage::Memory(data),
-            filename: self.path,
+            filename: path,
             mode: FileOpenMode::ReadWrite,
             in_memory: false,
             cached_parse: OnceLock::new(),
+            compression,
         })
     }
 }

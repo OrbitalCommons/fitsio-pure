@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.21.0
+
+### Added
+
+- **Tile-compressed image writing: `RICE_1` and `GZIP_1`.** The new `compress` module writes an image as a `ZIMAGE` binary table extension. `compress_image_hdu` returns the bytes and `write_compressed_image` writes to any `Write` sink, so it works in memory, in `no_std` and on `wasm32`.
+  - **Pixel types:** `u8`, `i8`, `i16`, `u16`, `i32`, `u32`, `f32` and `f64`. `i8`, `u16` and `u32` are stored with `BZERO`, as cfitsio stores them.
+  - **Tiles:** whole rows (`tile_rows`, one row per tile by default) or explicit N-D dimensions (`tile_dims`). Edge tiles are clipped.
+  - **Floats:** quantized per tile as cfitsio does. The step is the tile's noise divided by the quantization level `q`, with `SUBTRACTIVE_DITHER_1` (the default) or `NO_DITHER`. The dither seed is set by the caller or, by default, derived from the first tile, so it is deterministic. A tile that can't be quantized, such as a constant one, is gzipped losslessly into `GZIP_COMPRESSED_DATA`. NaNs are written as `ZBLANK` nulls. `GZIP_1` can also store floats losslessly (`lossless()`).
+  - **Ported from cfitsio's encoders:** `ricecomp.c`, `quantize.c` (the MAD noise estimates and `quick_select`) and `imcompress.c`. On the same pixels and seed, every tile matches cfitsio's: Rice bytes, quantized values, `ZSCALE` and `ZZERO`, including the data-derived seed. A Rice-compressed integer image's whole data unit is identical to cfitsio's.
+  - **Credit:** the design follows sunipkm/refimage's FITS writer (MIT OR Apache-2.0), whose encoders were the cross-check. On refimage's own test cases, the Rice tables and heaps are byte-identical to refimage 1.0.0-pre6's. Gzip tiles differ only in the gzip header's OS byte. Quantized floats differ because refimage uses one quantization step for the whole image, where cfitsio and this writer use one per tile.
+- **Compat `create("file.fits[compress …]")`** tile-compresses the file's images when it is saved, as cfitsio's extended file name does.
+  - `R` (the default) gives `RICE_1` and `G` gives `GZIP_1`, then optional tile dimensions, then `; q LEVEL` (or `q0 LEVEL`, without dithering).
+  - The file is edited uncompressed in memory.
+  - A primary image is saved as cfitsio saves it, in the first extension (marked `ZSIMPLE`) behind an empty primary HDU.
+- **`gzip::compress`** writes a gzip member at a chosen DEFLATE level.
+
+### Tests
+
+- A compat-parity test compresses the same pixels with cfitsio (`[compress …]`) and with fitsio-pure, then compares every tile:
+  - types `u8`, `i16`, `u16`, `i32`, `f32` and `f64`;
+  - row tiles and 16×8 tiles, Rice and gzip;
+  - compat's `[compress …]` path against cfitsio's.
+- cfitsio reads every file back.
+- astropy 8.0.1 decodes all 50 combinations of codec × type × tiling as written: integers exactly, quantized floats within one `ZSCALE`, and identically to fitsio-pure's own reader.
+
 ## 0.20.1
 
 ### Changed

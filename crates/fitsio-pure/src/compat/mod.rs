@@ -1,6 +1,7 @@
 //! Compatibility layer mirroring the [`fitsio`](https://crates.io/crates/fitsio) crate API.
 #![allow(missing_docs)]
 
+mod compression;
 pub mod errors;
 /// FITS file open/create/save operations.
 pub mod fitsfile;
