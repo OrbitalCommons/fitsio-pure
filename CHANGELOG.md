@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.21.1
+
+### Added
+
+- **`compress::Quantize::step(f64)`** sets a fixed quantization step for every tile, exactly. A negative `level` does the same, but `level` takes an `f32`, as cfitsio's `q` does, so a step computed in `f64` was rounded, and pixels on rounding boundaries quantized one step apart. refimage's port keeps its whole-image step this way. Levels set with `level` behave as before.
+
 ## 0.21.0
 
 ### Added

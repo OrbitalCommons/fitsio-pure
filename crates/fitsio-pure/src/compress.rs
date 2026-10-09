@@ -106,7 +106,9 @@ pub enum DitherSeed {
 /// Quantization of `f32`/`f64` images.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Quantize {
-    level: f32,
+    /// cfitsio's `q`, held as `f64` so [`Quantize::step`] is exact; an `f32`
+    /// level converts to it without change.
+    level: f64,
     dither: Dither,
     seed: DitherSeed,
 }
@@ -132,7 +134,15 @@ impl Quantize {
     /// its noise divided by `q`, so larger is finer; a negative `q` sets the
     /// step to `-q` in every tile. 0 means the default, 4.
     pub fn level(mut self, q: f32) -> Self {
-        self.level = q;
+        self.level = f64::from(q);
+        self
+    }
+
+    /// A fixed quantization step for every tile, as a negative
+    /// [`level`](Self::level) gives, but exact: `level` takes an `f32`, as
+    /// cfitsio does, which rounds a step computed in `f64`.
+    pub fn step(mut self, step: f64) -> Self {
+        self.level = -step.abs();
         self
     }
 
@@ -1031,7 +1041,7 @@ fn quantize_tile<F: Float>(
     nxpix: usize,
     nypix: usize,
     nullcheck: bool,
-    qlevel: f32,
+    qlevel: f64,
     row: usize,
     table: &[f32],
 ) -> Option<(Vec<i32>, f64, f64)> {
@@ -1057,7 +1067,7 @@ fn quantize_tile<F: Float>(
         let delta = if qlevel == 0.0 {
             stdev / 4.0
         } else {
-            stdev / f64::from(qlevel)
+            stdev / qlevel
         };
         if delta == 0.0 {
             return None;
@@ -1065,7 +1075,7 @@ fn quantize_tile<F: Float>(
         delta
     } else {
         noise = range(fdata, nullcheck);
-        -f64::from(qlevel)
+        -qlevel
     };
     let (minval, maxval) = if nullcheck && noise.ngood == 0 && qlevel >= 0.0 {
         (F::ZERO, F::from_f64(1.0))
@@ -1694,6 +1704,17 @@ mod tests {
         assert_eq!(seed(&header(&none)), None);
         let bad = TileCompression::rice().quantize(Quantize::new().seed(DitherSeed::Fixed(0)));
         assert!(compress_image_hdu(&[20, 4], &pixels, &bad, &[]).is_err());
+    }
+
+    #[test]
+    fn a_step_is_used_exactly() {
+        let pixels = noisy(20, 4);
+        let step = 0.1f64 / 3.0;
+        assert_ne!(f64::from(step as f32), step, "an f32 level would round it");
+        let opts = TileCompression::rice().quantize(Quantize::new().step(step));
+        let file = file_with(&[20, 4], &pixels, &opts);
+        let parsed = parse_fits(&file).unwrap();
+        assert_eq!(max_zscale(&file, &parsed.hdus[1]), step);
     }
 
     #[test]
