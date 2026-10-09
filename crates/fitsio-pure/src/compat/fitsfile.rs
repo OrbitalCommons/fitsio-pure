@@ -4,6 +4,7 @@ use std::sync::OnceLock;
 use super::errors::{Error, Result};
 use super::hdu::FitsHdu;
 use super::images::ImageDescription;
+use super::sys;
 use crate::io::write_atomic;
 
 /// Whether a file is opened for reading or writing.
@@ -35,19 +36,25 @@ pub struct NewFitsFile<'a> {
 }
 
 /// Trait for types that can identify an HDU (by index or name).
+///
+/// A missing HDU is an error with cfitsio's status: `END_OF_FILE` for an index
+/// past the last HDU, `BAD_HDU_NUM` for a name no HDU has.
 pub trait DescribesHdu {
     fn get_hdu<'a>(
         &self,
         fits_data: &'a crate::hdu::FitsData,
-    ) -> Option<(usize, &'a crate::hdu::Hdu)>;
+    ) -> Result<(usize, &'a crate::hdu::Hdu)>;
 }
 
 impl DescribesHdu for usize {
     fn get_hdu<'a>(
         &self,
         fits_data: &'a crate::hdu::FitsData,
-    ) -> Option<(usize, &'a crate::hdu::Hdu)> {
-        fits_data.get(*self).map(|hdu| (*self, hdu))
+    ) -> Result<(usize, &'a crate::hdu::Hdu)> {
+        fits_data
+            .get(*self)
+            .map(|hdu| (*self, hdu))
+            .ok_or(Error::status(sys::END_OF_FILE))
     }
 }
 
@@ -57,7 +64,7 @@ impl DescribesHdu for &str {
     fn get_hdu<'a>(
         &self,
         fits_data: &'a crate::hdu::FitsData,
-    ) -> Option<(usize, &'a crate::hdu::Hdu)> {
+    ) -> Result<(usize, &'a crate::hdu::Hdu)> {
         // Like cfitsio, only the first card with the keyword counts.
         let named = |hdu: &crate::hdu::Hdu, keyword: &str| {
             matches!(
@@ -72,6 +79,7 @@ impl DescribesHdu for &str {
             .iter()
             .enumerate()
             .find(|(_, hdu)| named(hdu, "EXTNAME") || named(hdu, "HDUNAME"))
+            .ok_or(Error::status(sys::BAD_HDU_NUM))
     }
 }
 
@@ -79,7 +87,7 @@ impl DescribesHdu for String {
     fn get_hdu<'a>(
         &self,
         fits_data: &'a crate::hdu::FitsData,
-    ) -> Option<(usize, &'a crate::hdu::Hdu)> {
+    ) -> Result<(usize, &'a crate::hdu::Hdu)> {
         self.as_str().get_hdu(fits_data)
     }
 }
@@ -90,7 +98,7 @@ impl FitsFile {
     /// A gzip-compressed file (`.fits.gz`, `.fit.gz`) is decompressed
     /// transparently, as cfitsio does.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let data = gunzip_if_compressed(std::fs::read(path.as_ref())?)?;
+        let data = gunzip_if_compressed(read_file(path.as_ref())?)?;
         Ok(FitsFile {
             data,
             filename: path.as_ref().to_path_buf(),
@@ -105,7 +113,7 @@ impl FitsFile {
     /// A gzip-compressed file is refused, as cfitsio refuses it: saving would
     /// replace it with uncompressed bytes. Decompress it first to edit it.
     pub fn edit<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let data = std::fs::read(path.as_ref())?;
+        let data = read_file(path.as_ref())?;
         if crate::gzip::is_gzip(&data) {
             return Err(Error::Message(format!(
                 "{} is gzip-compressed and can only be opened read-only",
@@ -203,10 +211,7 @@ impl FitsFile {
 
     /// Return a handle to the HDU described by `desc` (index or name).
     pub fn hdu<D: DescribesHdu>(&self, desc: D) -> Result<FitsHdu> {
-        let fits_data = self.parsed()?;
-        let (idx, _) = desc
-            .get_hdu(fits_data)
-            .ok_or(Error::Message("HDU not found".to_string()))?;
+        let (idx, _) = desc.get_hdu(self.parsed()?)?;
         FitsHdu::at(self, idx)
     }
 
@@ -231,6 +236,7 @@ impl FitsFile {
         extname: T,
         desc: &ImageDescription,
     ) -> Result<FitsHdu> {
+        self.check_writable()?;
         // `dimensions` are row-major, as in `fitsio`; FITS lists NAXIS1 first.
         let cards = crate::extension::build_extension_header(
             crate::extension::ExtensionType::Image,
@@ -255,6 +261,7 @@ impl FitsFile {
         extname: &str,
         columns: &[crate::bintable::BinaryColumnDescriptor],
     ) -> Result<FitsHdu> {
+        self.check_writable()?;
         let mut cards = crate::bintable::build_binary_table_cards(columns, 0, 0)?;
 
         let extname_card = crate::header::Card {
@@ -279,6 +286,7 @@ impl FitsFile {
         extname: &str,
         columns: &[crate::table::AsciiColumnDescriptor],
     ) -> Result<FitsHdu> {
+        self.check_writable()?;
         let mut cards = crate::table::build_ascii_table_cards(columns, 0)?;
 
         let extname_card = crate::header::Card {
@@ -347,6 +355,14 @@ impl FitsFile {
     pub fn mode(&self) -> FileOpenMode {
         self.mode
     }
+
+    /// Refuse to change a read-only file, with the status `fitsio` uses.
+    pub(crate) fn check_writable(&self) -> Result<()> {
+        match self.mode {
+            FileOpenMode::ReadWrite => Ok(()),
+            FileOpenMode::ReadOnly => Err(Error::status(READONLY_STATUS)),
+        }
+    }
 }
 
 impl Drop for FitsFile {
@@ -375,15 +391,14 @@ impl<'a> NewFitsFile<'a> {
     /// [`NewFitsFile::with_custom_primary`] was given) and return an open `FitsFile`.
     pub fn open(self) -> Result<FitsFile> {
         if !self.overwrite && self.path.exists() {
-            return Err(Error::Message(format!(
-                "file already exists: {}",
-                self.path.display()
-            )));
+            return Err(Error::ExistingFile(
+                self.path.to_string_lossy().into_owned(),
+            ));
         }
 
         let data = primary_hdu_bytes(self.image_description.as_ref())?;
 
-        write_atomic(&self.path, &data)?;
+        write_atomic(&self.path, &data).map_err(|_| Error::status(sys::FILE_NOT_CREATED))?;
 
         Ok(FitsFile {
             data,
@@ -452,6 +467,15 @@ fn image_hdu_bytes(
     let data_bytes = pixels * ((desc.data_type.to_bitpix().unsigned_abs() as usize) / 8);
     bytes.resize(bytes.len() + crate::block::padded_byte_len(data_bytes), 0u8);
     Ok(bytes)
+}
+
+/// `fitsio`'s status for a write to a read-only file. Not a cfitsio status:
+/// `fitsio` checks the open mode itself.
+const READONLY_STATUS: u32 = 602;
+
+/// The bytes of the file at `path`, failing as cfitsio fails to open it.
+fn read_file(path: &Path) -> Result<Vec<u8>> {
+    std::fs::read(path).map_err(|_| Error::status(sys::FILE_NOT_OPENED))
 }
 
 fn gunzip_if_compressed(data: Vec<u8>) -> Result<Vec<u8>> {

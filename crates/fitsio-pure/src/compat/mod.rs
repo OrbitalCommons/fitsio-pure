@@ -1,7 +1,6 @@
 //! Compatibility layer mirroring the [`fitsio`](https://crates.io/crates/fitsio) crate API.
 #![allow(missing_docs)]
 
-/// Error types for the compat layer.
 pub mod errors;
 /// FITS file open/create/save operations.
 pub mod fitsfile;
@@ -14,6 +13,7 @@ pub mod images;
 /// ndarray integration (requires the `array` feature).
 #[cfg(feature = "array")]
 pub mod ndarray_compat;
+pub mod sys;
 /// Table column read/write traits and types.
 pub mod tables;
 
