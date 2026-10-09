@@ -402,29 +402,48 @@ pub(crate) fn parse_hdu_info(cards: &[Card], is_primary: bool) -> Result<HduInfo
 
 /// Parse a complete FITS byte stream into a [`FitsData`] containing all HDUs.
 pub fn parse_fits(data: &[u8]) -> Result<FitsData> {
-    if data.is_empty() {
-        return Err(Error::UnexpectedEof);
-    }
-    if data.len() < BLOCK_SIZE {
+    parse_fits_headers(data.len(), |offset, buf| {
+        buf.copy_from_slice(&data[offset..offset + buf.len()]);
+        Ok(())
+    })
+}
+
+/// Parse the HDUs of a FITS file `len` bytes long, reading only its headers.
+///
+/// `read_at(offset, buf)` fills `buf` with the bytes at `offset`; it is only
+/// asked for whole header blocks inside the file, so a file on disk can be
+/// parsed without reading its data units. The result is the same as
+/// [`parse_fits`] on the whole file.
+pub fn parse_fits_headers<R>(len: usize, mut read_at: R) -> Result<FitsData>
+where
+    R: FnMut(usize, &mut [u8]) -> Result<()>,
+{
+    if len < BLOCK_SIZE {
         return Err(Error::UnexpectedEof);
     }
 
     let mut hdus = Vec::new();
     let mut offset: usize = 0;
+    let mut header_data = Vec::new();
 
-    while offset < data.len() {
-        let remaining = &data[offset..];
-        if remaining.len() < BLOCK_SIZE {
-            break;
+    while len - offset >= BLOCK_SIZE {
+        // Read whole blocks until one holds the END card.
+        header_data.clear();
+        let mut found_end = false;
+        while !found_end && len - offset - header_data.len() >= BLOCK_SIZE {
+            let block_start = header_data.len();
+            header_data.resize(block_start + BLOCK_SIZE, 0);
+            read_at(offset + block_start, &mut header_data[block_start..])?;
+            found_end = header_byte_len(&header_data[block_start..]).is_ok();
         }
-
-        let header_len = match header_byte_len(remaining) {
-            Ok(len) => len,
-            Err(_) if !hdus.is_empty() => break,
-            Err(e) => return Err(e),
-        };
-        let header_data = &remaining[..header_len];
-        let cards = match parse_header_blocks(header_data) {
+        if !found_end {
+            if !hdus.is_empty() {
+                break;
+            }
+            return Err(Error::UnexpectedEof);
+        }
+        let header_len = header_data.len();
+        let cards = match parse_header_blocks(&header_data) {
             Ok(cards) => cards,
             Err(_) if !hdus.is_empty() => break,
             Err(e) => return Err(e),
@@ -450,7 +469,7 @@ pub fn parse_fits(data: &[u8]) -> Result<FitsData> {
         // Require that all actual data bytes are present, but allow
         // the trailing block padding to be missing.  Many real-world
         // files (HiPS tiles from Aladin/Hipsgen) omit trailing padding.
-        if data_len > 0 && data_start + data_len > data.len() {
+        if data_len > 0 && data_start + data_len > len {
             return Err(Error::UnexpectedEof);
         }
 
@@ -464,6 +483,9 @@ pub fn parse_fits(data: &[u8]) -> Result<FitsData> {
 
         let padded_data = padded_byte_len(data_len);
         offset = data_start + padded_data;
+        if offset >= len {
+            break;
+        }
     }
 
     if hdus.is_empty() {
@@ -811,6 +833,37 @@ mod tests {
         data.resize(header.len() + BLOCK_SIZE, 0u8);
 
         assert!(parse_fits(&data).is_err());
+    }
+
+    #[test]
+    fn parse_fits_headers_reads_only_headers() {
+        let primary = serialize_header(&primary_header_image(16, &[100, 200])).unwrap();
+        let ext = serialize_header(&image_extension_header(8, &[10], None)).unwrap();
+        let mut data = primary.clone();
+        data.resize(data.len() + padded_byte_len(100 * 200 * 2), 0u8);
+        let ext_start = data.len();
+        data.extend_from_slice(&ext);
+        data.resize(data.len() + padded_byte_len(10), 0u8);
+
+        let mut reads = Vec::new();
+        let fits = parse_fits_headers(data.len(), |offset, buf| {
+            reads.push((offset, buf.len()));
+            buf.copy_from_slice(&data[offset..offset + buf.len()]);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(fits.len(), 2);
+        assert_eq!(fits.hdus[1].data_start, ext_start + ext.len());
+        let header_blocks = |start: usize, len: usize| {
+            (start..start + len)
+                .step_by(BLOCK_SIZE)
+                .map(|offset| (offset, BLOCK_SIZE))
+        };
+        let expected: Vec<_> = header_blocks(0, primary.len())
+            .chain(header_blocks(ext_start, ext.len()))
+            .collect();
+        assert_eq!(reads, expected);
     }
 
     #[test]

@@ -198,7 +198,7 @@ fn write_key_to_file(
         return Err(Error::status(sys::BAD_KEYCHAR));
     }
 
-    let mut fits_data = crate::hdu::parse_fits(file.data())?;
+    let mut fits_data = crate::hdu::parse_fits(file.data()?)?;
     let core_hdu = fits_data
         .hdus
         .get_mut(hdu.number)
@@ -266,6 +266,7 @@ fn insert_before_end(cards: &mut Vec<crate::header::Card>, card: crate::header::
 
 fn rebuild_fits_data(file: &mut FitsFile, fits_data: &crate::hdu::FitsData) -> Result<()> {
     let mut new_data = Vec::new();
+    let data = file.data()?;
 
     for (i, hdu) in fits_data.hdus.iter().enumerate() {
         let cards_without_end: Vec<_> = hdu.cards.iter().filter(|c| !c.is_end()).cloned().collect();
@@ -274,8 +275,8 @@ fn rebuild_fits_data(file: &mut FitsFile, fits_data: &crate::hdu::FitsData) -> R
 
         if hdu.data_len > 0 {
             let data_end = hdu.data_start + hdu.data_len;
-            if data_end <= file.data().len() {
-                let raw = &file.data()[hdu.data_start..data_end];
+            if data_end <= data.len() {
+                let raw = &data[hdu.data_start..data_end];
                 let padded_len = crate::block::padded_byte_len(raw.len());
                 new_data.extend_from_slice(raw);
                 new_data.resize(new_data.len() + (padded_len - raw.len()), 0);

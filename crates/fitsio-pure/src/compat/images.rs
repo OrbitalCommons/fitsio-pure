@@ -203,7 +203,7 @@ impl ReadImageIntoBuffer for f32 {
         let idx = validate_hdu_index(file, hdu)?;
         let parsed = file.parsed()?;
         let core_hdu = &parsed.hdus[idx];
-        crate::image::read_image_data_into_f32(file.data(), core_hdu, buf)?;
+        crate::image::read_image_data_into_f32(file.data()?, core_hdu, buf)?;
         Ok(())
     }
 }
@@ -213,7 +213,7 @@ impl ReadImageIntoBuffer for f64 {
         let idx = validate_hdu_index(file, hdu)?;
         let parsed = file.parsed()?;
         let core_hdu = &parsed.hdus[idx];
-        crate::image::read_image_data_into_f64(file.data(), core_hdu, buf)?;
+        crate::image::read_image_data_into_f64(file.data()?, core_hdu, buf)?;
         Ok(())
     }
 }
@@ -290,9 +290,14 @@ fn image_naxes(hdu: &FitsHdu) -> Option<Vec<usize>> {
     }
 }
 
-/// Read stored pixels (via `read`) and apply the HDU's `BSCALE`/`BZERO`.
-fn read_physical<F>(file: &FitsFile, hdu: &FitsHdu, read: F) -> Result<Physical>
+/// Read stored pixels and apply the HDU's `BSCALE`/`BZERO`.
+///
+/// For an uncompressed image, `runs` gives the pixels to read from the
+/// image's axis lengths (`NAXIS1` first), and only those are read from the
+/// file. Any other HDU is read whole with `read`.
+fn read_physical<R, F>(file: &FitsFile, hdu: &FitsHdu, runs: R, read: F) -> Result<Physical>
 where
+    R: FnOnce(&[usize]) -> Result<Vec<(usize, usize)>>,
     F: FnOnce(&[u8], &crate::hdu::Hdu) -> crate::error::Result<crate::image::ImageData>,
 {
     use crate::image::ImageData;
@@ -300,7 +305,19 @@ where
     let parsed = file.parsed()?;
     let core_hdu = &parsed.hdus[idx];
     let (bscale, bzero) = crate::image::extract_bscale_bzero(&core_hdu.cards);
-    let stored: Vec<i128> = match read(file.data(), core_hdu)? {
+    let data = match &core_hdu.info {
+        crate::hdu::HduInfo::Primary { bitpix, naxes }
+        | crate::hdu::HduInfo::Image { bitpix, naxes } => {
+            let runs = runs(naxes)?;
+            let pixels = pixel_count(naxes);
+            if runs.iter().any(|&(first, count)| first + count > pixels) {
+                return Err(Error::status(sys::BAD_ROW_NUM));
+            }
+            read_runs(file, core_hdu.data_start, *bitpix, &runs)?
+        }
+        _ => read(file.data()?, core_hdu)?,
+    };
+    let stored: Vec<i128> = match data {
         ImageData::U8(v) => v.into_iter().map(i128::from).collect(),
         ImageData::I16(v) => v.into_iter().map(i128::from).collect(),
         ImageData::I32(v) => v.into_iter().map(i128::from).collect(),
@@ -322,6 +339,44 @@ where
     } else {
         let scaled = stored.into_iter().map(|x| x as f64 * bscale + bzero);
         Ok(Physical::Scaled(scaled.collect()))
+    }
+}
+
+/// Read the stored pixels in `runs`, each `(first pixel, count)` in the flat
+/// `NAXIS1`-fastest order, of an uncompressed image whose data unit starts at
+/// `data_start`. Only those bytes are read from the file.
+fn read_runs(
+    file: &FitsFile,
+    data_start: usize,
+    bitpix: i64,
+    runs: &[(usize, usize)],
+) -> Result<crate::image::ImageData> {
+    let bytes_per_pixel = crate::image::bytes_per_pixel(bitpix)?;
+    let total: usize = runs.iter().map(|&(_, count)| count).sum();
+    let mut raw = vec![0u8; total * bytes_per_pixel];
+    let mut out = &mut raw[..];
+    let mut runs = runs.iter().copied().peekable();
+    while let Some((first, mut count)) = runs.next() {
+        // Read runs that follow on from each other in one go.
+        while let Some(&(next, more)) = runs.peek() {
+            if next != first + count {
+                break;
+            }
+            count += more;
+            runs.next();
+        }
+        let (run, rest) = out.split_at_mut(count * bytes_per_pixel);
+        file.read_at(data_start + first * bytes_per_pixel, run)?;
+        out = rest;
+    }
+    Ok(crate::image::decode_pixels(&raw, bitpix)?)
+}
+
+/// The number of pixels in an image with axis lengths `naxes`.
+fn pixel_count(naxes: &[usize]) -> usize {
+    match naxes {
+        [] => 0,
+        naxes => naxes.iter().product(),
     }
 }
 
@@ -385,9 +440,12 @@ macro_rules! impl_read_image {
     ($($t:ty),*) => {$(
         impl ReadImage for $t {
             fn read_image(file: &FitsFile, hdu: &FitsHdu) -> Result<Vec<Self>> {
-                narrow(read_physical(file, hdu, |d, h| {
-                    crate::image::read_image_data(d, h)
-                })?)
+                narrow(read_physical(
+                    file,
+                    hdu,
+                    |naxes| Ok(vec![(0, pixel_count(naxes))]),
+                    |d, h| crate::image::read_image_data(d, h),
+                )?)
             }
 
             fn read_section(
@@ -401,9 +459,12 @@ macro_rules! impl_read_image {
                     }
                 }
                 let count = range.end.saturating_sub(range.start);
-                narrow(read_physical(file, hdu, |d, h| {
-                    crate::image::read_image_section(d, h, range.start, count)
-                })?)
+                narrow(read_physical(
+                    file,
+                    hdu,
+                    |_| Ok(vec![(range.start, count)]),
+                    |d, h| crate::image::read_image_section(d, h, range.start, count),
+                )?)
             }
 
             fn read_rows(
@@ -418,9 +479,19 @@ macro_rules! impl_read_image {
                         return Err(Error::status(sys::BAD_ROW_NUM));
                     }
                 }
-                narrow(read_physical(file, hdu, |d, h| {
-                    crate::image::read_image_rows(d, h, start_row, num_rows)
-                })?)
+                narrow(read_physical(
+                    file,
+                    hdu,
+                    |naxes| {
+                        if naxes.len() < 2 {
+                            return Err(Error::Message(
+                                "image needs at least 2 axes for row slicing".to_string(),
+                            ));
+                        }
+                        Ok(vec![(start_row * naxes[0], num_rows * naxes[0])])
+                    },
+                    |d, h| crate::image::read_image_rows(d, h, start_row, num_rows),
+                )?)
             }
 
             fn read_region(
@@ -442,9 +513,12 @@ macro_rules! impl_read_image {
                     }
                 }
                 let tuples = ranges_to_tuples(ranges);
-                narrow(read_physical(file, hdu, |d, h| {
-                    crate::image::read_image_region(d, h, &tuples)
-                })?)
+                narrow(read_physical(
+                    file,
+                    hdu,
+                    |naxes| region_runs(naxes, ranges),
+                    |d, h| crate::image::read_image_region(d, h, &tuples),
+                )?)
             }
         }
     )*};
@@ -505,7 +579,7 @@ fn image_storage(file: &FitsFile, hdu: &FitsHdu) -> Result<ImageStorage> {
         }
     };
     let bytes_per_pixel = crate::image::bytes_per_pixel(bitpix)?;
-    if core.data_start + core.data_len > file.data().len() {
+    if core.data_start + core.data_len > file.data()?.len() {
         return Err(Error::Message(format!(
             "HDU {idx} data unit runs past the end of the file"
         )));
@@ -598,7 +672,7 @@ fn write_pixels(
             )));
         }
     }
-    let bytes = file.data_mut();
+    let bytes = file.data_mut()?;
     let mut source = encoded;
     for &(first, count) in runs {
         let start = storage.data_start + first * bytes_per_pixel;
@@ -886,7 +960,8 @@ mod tests {
 
         // Raw signed storage is value - 32768.
         let parsed = f.parsed().unwrap();
-        let raw = crate::image::read_image_data(f.data(), &parsed.hdus[hdu.number]).unwrap();
+        let raw =
+            crate::image::read_image_data(f.data().unwrap(), &parsed.hdus[hdu.number]).unwrap();
         assert_eq!(raw, crate::image::ImageData::I16(vec![-32768, 0, 32767]));
 
         // Like cfitsio, an i16 read applies BZERO, so 32768 and 65535 overflow.

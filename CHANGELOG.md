@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.20.0
+
+### Changed
+
+- **Compat `FitsFile::open` reads only what is used.** (#38)
+  - Opening a file reads its headers alone and keeps the file handle.
+  - `read_key`, `hdu.info` and HDU lookups work from the parsed headers.
+  - `read_image`, `read_section`, `read_rows` and `read_region` on an uncompressed image read only the pixels they return. Contiguous runs of a region are read in one go.
+  - Table reads, tile-compressed images and `data()` read the whole file once and keep it, as before.
+  - Cutting 50 sources from a 1 GB 16000×16000 `f32` mosaic with FastFitsCutter went from 42 s and 1 GB RSS to 0.2 s of CPU and 3.5 MB RSS. cfitsio takes 0.05 s and 11 MB. Most of the remaining wall time is the atomic, fsynced save of each cutout.
+  - Gzip-compressed files are still decompressed into memory, and `edit`, `create` and the in-memory constructors still hold the file in memory.
+- **Breaking:** `FitsFile::data()` returns `Result<&[u8]>`, since for a file opened from disk it reads the whole file on first use.
+- **Compat `open` fails on a file that isn't FITS, as cfitsio does.** A file shorter than one block is status 108 (`READ_ERROR`), and one that doesn't start with `SIMPLE` is 252 (`UNKNOWN_REC`). Before, `open` succeeded and the first read failed.
+
+### Added
+
+- **`hdu::parse_fits_headers`** parses a FITS file's HDUs through a `read_at(offset, buf)` callback, asking only for header blocks. It gives the same result as `parse_fits` without reading data units.
+
 ## 0.19.0
 
 ### Changed

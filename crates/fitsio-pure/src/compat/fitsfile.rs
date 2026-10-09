@@ -1,5 +1,6 @@
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use super::errors::{Error, Result};
 use super::hdu::FitsHdu;
@@ -14,18 +15,35 @@ pub enum FileOpenMode {
     ReadWrite,
 }
 
-/// An in-memory representation of an open FITS file.
+/// An open FITS file.
+///
+/// A file opened with [`FitsFile::open`] is read on demand: opening it reads
+/// the headers alone, and image reads fetch only the pixels they return.
+/// Writable and in-memory files are held in memory whole.
 ///
 /// The parse cache is a [`OnceLock`], so `&FitsFile` is `Sync` and one open
 /// file can be shared across threads (reading every column of a table in
 /// parallel, say) instead of reopening and reparsing the file per thread.
 pub struct FitsFile {
-    data: Vec<u8>,
+    storage: Storage,
     filename: PathBuf,
     mode: FileOpenMode,
     /// No backing file, so `flush` and `Drop` never touch disk.
     in_memory: bool,
     cached_parse: OnceLock<crate::hdu::FitsData>,
+}
+
+/// Where an open file's bytes are.
+enum Storage {
+    /// The whole file, in memory.
+    Memory(Vec<u8>),
+    /// A file on disk opened read-only, read as needed. `loaded` holds the
+    /// whole file once something has needed all of it.
+    Disk {
+        file: Mutex<std::fs::File>,
+        len: usize,
+        loaded: OnceLock<Vec<u8>>,
+    },
 }
 
 /// Builder for creating a new FITS file.
@@ -95,17 +113,52 @@ impl DescribesHdu for String {
 impl FitsFile {
     /// Open an existing FITS file in read-only mode.
     ///
-    /// A gzip-compressed file (`.fits.gz`, `.fit.gz`) is decompressed
-    /// transparently, as cfitsio does.
+    /// Only the headers are read here. Image reads then read just the pixels
+    /// they return, so cutting a small region from a large image is fast and
+    /// uses little memory. Table reads, and reads of tile-compressed images,
+    /// read the whole file once.
+    ///
+    /// A gzip-compressed file (`.fits.gz`, `.fit.gz`) is decompressed into
+    /// memory, as cfitsio does.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let data = gunzip_if_compressed(read_file(path.as_ref())?)?;
-        Ok(FitsFile {
-            data,
-            filename: path.as_ref().to_path_buf(),
+        let path = path.as_ref();
+        let not_opened = |_| Error::status(sys::FILE_NOT_OPENED);
+        let mut file = std::fs::File::open(path).map_err(not_opened)?;
+        let len = file.metadata().map_err(not_opened)?.len() as usize;
+        let mut magic = [0u8; 2];
+        let storage = if len >= magic.len()
+            && file.read_exact(&mut magic).is_ok()
+            && crate::gzip::is_gzip(&magic)
+        {
+            let mut data = Vec::with_capacity(len);
+            file.seek(SeekFrom::Start(0))?;
+            file.read_to_end(&mut data)?;
+            Storage::Memory(crate::gzip::decompress(&data)?)
+        } else {
+            Storage::Disk {
+                file: Mutex::new(file),
+                len,
+                loaded: OnceLock::new(),
+            }
+        };
+        let file = FitsFile {
+            storage,
+            filename: path.to_path_buf(),
             mode: FileOpenMode::ReadOnly,
             in_memory: false,
             cached_parse: OnceLock::new(),
-        })
+        };
+        // As cfitsio does, fail to open a file that isn't FITS.
+        let mut first = [0u8; 8];
+        if file.byte_len() < crate::BLOCK_SIZE {
+            return Err(Error::status(sys::READ_ERROR));
+        }
+        file.read_at(0, &mut first)?;
+        if &first != b"SIMPLE  " {
+            return Err(Error::status(sys::UNKNOWN_REC));
+        }
+        file.parsed()?;
+        Ok(file)
     }
 
     /// Open an existing FITS file for editing.
@@ -113,7 +166,7 @@ impl FitsFile {
     /// A gzip-compressed file is refused, as cfitsio refuses it: saving would
     /// replace it with uncompressed bytes. Decompress it first to edit it.
     pub fn edit<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let data = read_file(path.as_ref())?;
+        let data = std::fs::read(path.as_ref()).map_err(|_| Error::status(sys::FILE_NOT_OPENED))?;
         if crate::gzip::is_gzip(&data) {
             return Err(Error::Message(format!(
                 "{} is gzip-compressed and can only be opened read-only",
@@ -121,7 +174,7 @@ impl FitsFile {
             )));
         }
         Ok(FitsFile {
-            data,
+            storage: Storage::Memory(data),
             filename: path.as_ref().to_path_buf(),
             mode: FileOpenMode::ReadWrite,
             in_memory: false,
@@ -137,7 +190,7 @@ impl FitsFile {
     /// rejected here rather than on first use.
     pub fn from_bytes(data: impl Into<Vec<u8>>) -> Result<Self> {
         let file = FitsFile {
-            data: gunzip_if_compressed(data.into())?,
+            storage: Storage::Memory(gunzip_if_compressed(data.into())?),
             filename: PathBuf::new(),
             mode: FileOpenMode::ReadOnly,
             in_memory: true,
@@ -167,7 +220,7 @@ impl FitsFile {
 
     fn new_in_memory(data: Vec<u8>) -> Result<Self> {
         Ok(FitsFile {
-            data,
+            storage: Storage::Memory(data),
             filename: PathBuf::new(),
             mode: FileOpenMode::ReadWrite,
             in_memory: true,
@@ -180,7 +233,12 @@ impl FitsFile {
         if let Some(cached) = self.cached_parse.get() {
             return Ok(cached);
         }
-        let parsed = crate::hdu::parse_fits(&self.data)?;
+        let parsed = match &self.storage {
+            Storage::Memory(data) => crate::hdu::parse_fits(data)?,
+            Storage::Disk { file, len, .. } => {
+                crate::hdu::parse_fits_headers(*len, |offset, buf| read_file_at(file, offset, buf))?
+            }
+        };
         // A concurrent caller may have won the race; either parse is equivalent,
         // so keep whichever landed first.
         let _ = self.cached_parse.set(parsed);
@@ -246,8 +304,8 @@ impl FitsFile {
             1,
         )?;
         let extname = extname.into();
-        self.data
-            .extend_from_slice(&image_hdu_bytes(cards, &extname, desc)?);
+        let bytes = image_hdu_bytes(cards, &extname, desc)?;
+        self.bytes_mut()?.extend_from_slice(&bytes);
 
         self.invalidate_cache();
         let fits_data = self.parsed()?;
@@ -272,7 +330,7 @@ impl FitsFile {
         cards.push(extname_card);
 
         let header_bytes = crate::header::serialize_header(&cards)?;
-        self.data.extend_from_slice(&header_bytes);
+        self.bytes_mut()?.extend_from_slice(&header_bytes);
 
         self.invalidate_cache();
         let fits_data = self.parsed()?;
@@ -297,7 +355,7 @@ impl FitsFile {
         cards.push(extname_card);
 
         let header_bytes = crate::header::serialize_header(&cards)?;
-        self.data.extend_from_slice(&header_bytes);
+        self.bytes_mut()?.extend_from_slice(&header_bytes);
 
         self.invalidate_cache();
         let fits_data = self.parsed()?;
@@ -305,22 +363,74 @@ impl FitsFile {
         FitsHdu::at(self, idx)
     }
 
-    /// Return a reference to the in-memory FITS bytes.
-    pub fn data(&self) -> &[u8] {
-        &self.data
+    /// Return the file's FITS bytes.
+    ///
+    /// For a file opened with [`FitsFile::open`], the first call reads the
+    /// whole file into memory.
+    pub fn data(&self) -> Result<&[u8]> {
+        match &self.storage {
+            Storage::Memory(data) => Ok(data),
+            Storage::Disk { file, len, loaded } => {
+                if let Some(data) = loaded.get() {
+                    return Ok(data);
+                }
+                let mut data = vec![0u8; *len];
+                read_file_at(file, 0, &mut data)?;
+                // A concurrent caller may have loaded it first; keep either.
+                Ok(loaded.get_or_init(|| data))
+            }
+        }
+    }
+
+    /// The length of the file in bytes.
+    fn byte_len(&self) -> usize {
+        match &self.storage {
+            Storage::Memory(data) => data.len(),
+            Storage::Disk { len, .. } => *len,
+        }
+    }
+
+    /// Fill `buf` with the file's bytes from `offset`, reading from disk only
+    /// what is asked for.
+    pub(crate) fn read_at(&self, offset: usize, buf: &mut [u8]) -> Result<()> {
+        let data = match &self.storage {
+            Storage::Memory(data) => data,
+            Storage::Disk { file, loaded, .. } => match loaded.get() {
+                Some(data) => data,
+                None => return Ok(read_file_at(file, offset, buf)?),
+            },
+        };
+        let bytes = offset
+            .checked_add(buf.len())
+            .and_then(|end| data.get(offset..end))
+            .ok_or(crate::Error::UnexpectedEof)?;
+        buf.copy_from_slice(bytes);
+        Ok(())
     }
 
     /// Replace the in-memory FITS bytes (used by write operations).
     pub fn set_data(&mut self, data: Vec<u8>) {
-        self.data = data;
+        self.storage = Storage::Memory(data);
         self.invalidate_cache();
     }
 
-    /// Mutable access to the in-memory FITS bytes, for writes that change
-    /// bytes in place without moving anything.
-    pub(crate) fn data_mut(&mut self) -> &mut [u8] {
+    /// The whole file in memory, to change it, reading it in first if needed.
+    fn bytes_mut(&mut self) -> Result<&mut Vec<u8>> {
+        if let Storage::Disk { .. } = self.storage {
+            let data = self.data()?.to_vec();
+            self.storage = Storage::Memory(data);
+        }
         self.invalidate_cache();
-        &mut self.data
+        match &mut self.storage {
+            Storage::Memory(data) => Ok(data),
+            Storage::Disk { .. } => unreachable!("loaded into memory above"),
+        }
+    }
+
+    /// Mutable access to the FITS bytes, for writes that change bytes in
+    /// place without moving anything.
+    pub(crate) fn data_mut(&mut self) -> Result<&mut [u8]> {
+        Ok(self.bytes_mut()?)
     }
 
     /// Flush the in-memory data to disk if opened for writing from a path.
@@ -330,7 +440,7 @@ impl FitsFile {
     /// failed or interrupted flush leaves the previous file intact.
     pub fn flush(&self) -> Result<()> {
         if self.mode == FileOpenMode::ReadWrite && !self.in_memory {
-            write_atomic(&self.filename, &self.data)?;
+            write_atomic(&self.filename, self.data()?)?;
         }
         Ok(())
     }
@@ -343,7 +453,7 @@ impl FitsFile {
         self.flush()?;
         // The bytes are handed back, so Drop must not write them out again.
         self.in_memory = true;
-        Ok(std::mem::take(&mut self.data))
+        Ok(std::mem::take(self.bytes_mut()?))
     }
 
     /// Return the file path. Empty for an in-memory file.
@@ -367,8 +477,10 @@ impl FitsFile {
 
 impl Drop for FitsFile {
     fn drop(&mut self) {
-        if self.mode == FileOpenMode::ReadWrite && !self.in_memory {
-            let _ = write_atomic(&self.filename, &self.data);
+        if let (FileOpenMode::ReadWrite, false, Storage::Memory(data)) =
+            (self.mode, self.in_memory, &self.storage)
+        {
+            let _ = write_atomic(&self.filename, data);
         }
     }
 }
@@ -401,7 +513,7 @@ impl<'a> NewFitsFile<'a> {
         write_atomic(&self.path, &data).map_err(|_| Error::status(sys::FILE_NOT_CREATED))?;
 
         Ok(FitsFile {
-            data,
+            storage: Storage::Memory(data),
             filename: self.path,
             mode: FileOpenMode::ReadWrite,
             in_memory: false,
@@ -473,9 +585,16 @@ fn image_hdu_bytes(
 /// `fitsio` checks the open mode itself.
 const READONLY_STATUS: u32 = 602;
 
-/// The bytes of the file at `path`, failing as cfitsio fails to open it.
-fn read_file(path: &Path) -> Result<Vec<u8>> {
-    std::fs::read(path).map_err(|_| Error::status(sys::FILE_NOT_OPENED))
+/// Fill `buf` with the bytes of `file` from `offset`.
+fn read_file_at(file: &Mutex<std::fs::File>, offset: usize, buf: &mut [u8]) -> crate::Result<()> {
+    // A panic while holding the lock can't leave the handle inconsistent:
+    // every read seeks first.
+    let mut file = file.lock().unwrap_or_else(|e| e.into_inner());
+    file.seek(SeekFrom::Start(offset as u64))?;
+    file.read_exact(buf).map_err(|e| match e.kind() {
+        std::io::ErrorKind::UnexpectedEof => crate::Error::UnexpectedEof,
+        _ => crate::Error::Io(e),
+    })
 }
 
 fn gunzip_if_compressed(data: Vec<u8>) -> Result<Vec<u8>> {
@@ -527,7 +646,7 @@ mod tests {
         let from_mem = FitsFile::from_bytes(std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(from_mem.mode(), FileOpenMode::ReadOnly);
         assert_eq!(from_mem.filename(), Path::new(""));
-        assert_eq!(from_mem.data(), from_disk.data());
+        assert_eq!(from_mem.data().unwrap(), from_disk.data().unwrap());
         assert_eq!(from_mem.num_hdus().unwrap(), from_disk.num_hdus().unwrap());
         assert_eq!(
             from_mem.hdu("SCI").unwrap().number,
@@ -599,11 +718,11 @@ mod tests {
         std::fs::write(&gz_path, &gz).unwrap();
 
         let from_file = FitsFile::open(&gz_path).unwrap();
-        assert_eq!(from_file.data(), &plain[..]);
+        assert_eq!(from_file.data().unwrap(), &plain[..]);
         assert_eq!(from_file.hdu("SCI").unwrap().number, 1);
 
         let from_bytes = FitsFile::from_bytes(gz.clone()).unwrap();
-        assert_eq!(from_bytes.data(), &plain[..]);
+        assert_eq!(from_bytes.data().unwrap(), &plain[..]);
 
         // Saving would replace the compressed file with plain bytes, so editing is refused.
         assert!(FitsFile::edit(&gz_path).is_err());
@@ -623,7 +742,7 @@ mod tests {
         };
         f.create_image("SCI", &desc).unwrap();
         f.flush().unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), f.data());
+        assert_eq!(std::fs::read(&path).unwrap(), f.data().unwrap());
         drop(f);
 
         let names: Vec<_> = std::fs::read_dir(dir.path())
@@ -656,7 +775,7 @@ mod tests {
         let path = dir.path().join("test.fits");
         let f = FitsFile::create(&path).open().unwrap();
         assert_eq!(f.mode(), FileOpenMode::ReadWrite);
-        assert!(f.data().len() >= 2880);
+        assert!(f.data().unwrap().len() >= 2880);
     }
 
     #[test]
@@ -902,14 +1021,14 @@ mod tests {
             .overwrite()
             .open()
             .unwrap();
-        assert_eq!(f.data().len(), 2 * 2880);
+        assert_eq!(f.data().unwrap().len(), 2 * 2880);
         drop(f);
         let f = FitsFile::create(&path)
             .overwrite()
             .with_custom_primary(&desc)
             .open()
             .unwrap();
-        assert_eq!(f.data().len(), 2 * 2880);
+        assert_eq!(f.data().unwrap().len(), 2 * 2880);
     }
 
     #[test]
@@ -919,8 +1038,101 @@ mod tests {
             dimensions: &[],
         };
         let mut f = FitsFile::create_in_memory_with_custom_primary(&desc).unwrap();
-        assert_eq!(f.data().len(), 2880);
+        assert_eq!(f.data().unwrap().len(), 2880);
         f.create_image("SCI", &desc).unwrap();
         assert_eq!(f.num_hdus().unwrap(), 2);
+    }
+
+    /// A file of two `u16` images (stored as `BZERO`-offset `i16`), 7×5 and
+    /// 3×4, with distinct pixel values, as written by compat.
+    fn two_image_file(path: &Path) -> (Vec<u16>, Vec<u16>) {
+        let mut f = FitsFile::create(path).open().unwrap();
+        let a: Vec<u16> = (0..35).map(|i| 40000 + i * 7).collect();
+        let b: Vec<u16> = (0..12).map(|i| i * 3).collect();
+        for (name, dims, pixels) in [("A", [5, 7], &a), ("B", [4, 3], &b)] {
+            let desc = ImageDescription {
+                data_type: ImageType::UnsignedShort,
+                dimensions: &dims,
+            };
+            let hdu = f.create_image(name, &desc).unwrap();
+            hdu.write_image(&mut f, pixels).unwrap();
+        }
+        (a, b)
+    }
+
+    #[test]
+    fn open_reads_pixels_from_disk_as_from_bytes_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lazy.fits");
+        let (a, b) = two_image_file(&path);
+
+        let disk = FitsFile::open(&path).unwrap();
+        let mem = FitsFile::from_bytes(std::fs::read(&path).unwrap()).unwrap();
+        for f in [&disk, &mem] {
+            let hdu = f.hdu("A").unwrap();
+            assert_eq!(hdu.read_image::<Vec<u16>>(f).unwrap(), a);
+            assert_eq!(hdu.read_section::<Vec<u16>>(f, 3, 11).unwrap(), a[3..11]);
+            assert_eq!(hdu.read_rows::<Vec<u16>>(f, 1, 2).unwrap(), a[7..21]);
+            // Columns 2..5 of rows 1..4: three runs, read separately.
+            let region: Vec<u16> = hdu.read_region(f, &[&(2..5), &(1..4)]).unwrap();
+            let expected: Vec<u16> = (1..4)
+                .flat_map(|row| a[row * 7 + 2..row * 7 + 5].to_vec())
+                .collect();
+            assert_eq!(region, expected);
+            // Whole rows: one run.
+            let rows: Vec<u16> = hdu.read_region(f, &[&(0..7), &(2..4)]).unwrap();
+            assert_eq!(rows, a[14..28]);
+
+            let hdu = f.hdu("B").unwrap();
+            assert_eq!(hdu.read_image::<Vec<u16>>(f).unwrap(), b);
+            assert_eq!(hdu.read_key::<i64>(f, "NAXIS1").unwrap(), 3);
+        }
+        assert_eq!(disk.data().unwrap(), mem.data().unwrap());
+    }
+
+    #[test]
+    fn open_reads_regions_from_threads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("threads.fits");
+        let (a, _) = two_image_file(&path);
+
+        let f = FitsFile::open(&path).unwrap();
+        let hdu = f.hdu("A").unwrap();
+        std::thread::scope(|scope| {
+            for row in 0..5 {
+                let (f, hdu, a) = (&f, &hdu, &a);
+                scope.spawn(move || {
+                    let got: Vec<u16> = hdu.read_region(f, &[&(0..7), &(row..row + 1)]).unwrap();
+                    assert_eq!(got, a[row * 7..row * 7 + 7]);
+                });
+            }
+        });
+    }
+
+    #[test]
+    fn open_rejects_a_file_that_is_not_fits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("junk.fits");
+        std::fs::write(&path, vec![b'x'; 2 * 2880]).unwrap();
+        assert!(matches!(
+            FitsFile::open(&path),
+            Err(Error::Fits(crate::compat::errors::FitsError {
+                status: 252,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn open_reads_a_truncated_data_unit_as_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("truncated.fits");
+        two_image_file(&path);
+        let bytes = std::fs::read(&path).unwrap();
+        // Keep the primary HDU and image A's header, and cut A's data short.
+        let parsed = crate::hdu::parse_fits(&bytes).unwrap();
+        let cut = parsed.hdus[1].data_start + 10;
+        std::fs::write(&path, &bytes[..cut]).unwrap();
+        assert!(FitsFile::open(&path).is_err());
     }
 }
