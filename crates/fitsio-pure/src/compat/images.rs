@@ -223,8 +223,9 @@ impl ReadImageIntoBuffer for f64 {
 /// As in cfitsio, the values are physical: they are converted to the image's
 /// `BITPIX`, undoing its `BSCALE`/`BZERO`, so an `f64` slice can be written to
 /// a `Float` image or a `u16` slice to a `BZERO = 32768` one. A value that
-/// doesn't fit the stored type is an error. Pixels are written in place, and
-/// no write can change the image's size.
+/// doesn't fit the stored type is an error, and the values before it have
+/// been written. Pixels are written in place, and no write can change the
+/// image's size.
 pub trait WriteImage: Sized {
     /// Write `data` from the first pixel on. More values than the image has
     /// pixels is an error; fewer leave the rest of the image unchanged.
@@ -594,11 +595,12 @@ fn image_storage(file: &FitsFile, hdu: &FitsHdu) -> Result<ImageStorage> {
     })
 }
 
-/// Encode physical values as the image stores them: undo `BZERO`/`BSCALE`
-/// and narrow to `BITPIX`, rounding to the nearest integer for integer images
-/// as cfitsio does. A value that doesn't fit is an error (cfitsio's
-/// `NUM_OVERFLOW`).
-fn encode_storage<T: ToPhysical>(data: &[T], storage: &ImageStorage) -> Result<Vec<u8>> {
+/// Encode physical values as the image stores them into `out`, which holds
+/// exactly one stored pixel per value: undo `BZERO`/`BSCALE` and narrow to
+/// `BITPIX`, rounding to the nearest integer for integer images as cfitsio
+/// does. A value that doesn't fit is an error (cfitsio's `NUM_OVERFLOW`); the
+/// values before it are already encoded.
+fn encode_into<T: ToPhysical>(data: &[T], storage: &ImageStorage, out: &mut [u8]) -> Result<()> {
     let ImageStorage {
         bitpix,
         bscale,
@@ -607,60 +609,56 @@ fn encode_storage<T: ToPhysical>(data: &[T], storage: &ImageStorage) -> Result<V
     } = *storage;
     let exact_offset =
         (bscale == 1.0 && bzero.fract() == 0.0 && bzero.abs() < 1e20).then_some(bzero as i128);
-    let mut out = Vec::with_capacity(data.len() * crate::image::bytes_per_pixel(bitpix)?);
-    for &value in data {
-        let value = value.to_physical();
-        if bitpix < 0 {
+    let overflow = || Error::status(sys::NUM_OVERFLOW);
+    let stored_float = |value: T| {
+        let physical = match value.to_physical() {
+            PhysicalValue::Exact(v) => v as f64,
+            PhysicalValue::Scaled(v) => v,
+        };
+        (physical - bzero) / bscale
+    };
+    let stored_int = |value: T| match (value.to_physical(), exact_offset) {
+        (PhysicalValue::Exact(v), Some(offset)) => Ok(v - offset),
+        (value, _) => {
             let physical = match value {
                 PhysicalValue::Exact(v) => v as f64,
                 PhysicalValue::Scaled(v) => v,
             };
-            let stored = (physical - bzero) / bscale;
-            match bitpix {
-                -32 => out.extend_from_slice(&(stored as f32).to_be_bytes()),
-                _ => out.extend_from_slice(&stored.to_be_bytes()),
+            let stored = ((physical - bzero) / bscale).round();
+            if stored.is_finite() {
+                Ok(stored as i128)
+            } else {
+                Err(overflow())
             }
-            continue;
         }
-        let stored: i128 = match (value, exact_offset) {
-            (PhysicalValue::Exact(v), Some(offset)) => v - offset,
-            (value, _) => {
-                let physical = match value {
-                    PhysicalValue::Exact(v) => v as f64,
-                    PhysicalValue::Scaled(v) => v,
-                };
-                let stored = ((physical - bzero) / bscale).round();
-                if !stored.is_finite() {
-                    return Err(Error::status(sys::NUM_OVERFLOW));
-                }
-                stored as i128
+    };
+    // One loop per BITPIX, so the per-pixel work is just the conversion.
+    macro_rules! encode {
+        ($size:literal, $stored:expr) => {
+            for (&value, out) in data.iter().zip(out.chunks_exact_mut($size)) {
+                out.copy_from_slice(&$stored(value)?.to_be_bytes());
             }
         };
-        let overflow = || Error::status(sys::NUM_OVERFLOW);
-        match bitpix {
-            8 => out.push(u8::try_from(stored).map_err(|_| overflow())?),
-            16 => {
-                out.extend_from_slice(&i16::try_from(stored).map_err(|_| overflow())?.to_be_bytes())
-            }
-            32 => {
-                out.extend_from_slice(&i32::try_from(stored).map_err(|_| overflow())?.to_be_bytes())
-            }
-            _ => {
-                out.extend_from_slice(&i64::try_from(stored).map_err(|_| overflow())?.to_be_bytes())
-            }
-        }
     }
-    Ok(out)
+    match bitpix {
+        -32 => encode!(4, |v| Ok::<_, Error>(stored_float(v) as f32)),
+        -64 => encode!(8, |v| Ok::<_, Error>(stored_float(v))),
+        8 => encode!(1, |v| u8::try_from(stored_int(v)?).map_err(|_| overflow())),
+        16 => encode!(2, |v| i16::try_from(stored_int(v)?).map_err(|_| overflow())),
+        32 => encode!(4, |v| i32::try_from(stored_int(v)?).map_err(|_| overflow())),
+        _ => encode!(8, |v| i64::try_from(stored_int(v)?).map_err(|_| overflow())),
+    }
+    Ok(())
 }
 
-/// Overwrite runs of pixels in place. Each run is `(first pixel, pixel count)`
-/// in the flat `NAXIS1`-fastest order, and `encoded` holds the runs' pixels
-/// back to back.
-fn write_pixels(
+/// Write `data` in place over runs of pixels, encoded as the image stores
+/// them. Each run is `(first pixel, pixel count)` in the flat `NAXIS1`-fastest
+/// order, and `data` holds the runs' values back to back.
+fn write_pixels<T: ToPhysical>(
     file: &mut FitsFile,
     storage: &ImageStorage,
     runs: &[(usize, usize)],
-    encoded: &[u8],
+    data: &[T],
 ) -> Result<()> {
     let bytes_per_pixel = crate::image::bytes_per_pixel(storage.bitpix)?;
     for &(first, count) in runs {
@@ -673,12 +671,12 @@ fn write_pixels(
         }
     }
     let bytes = file.data_mut()?;
-    let mut source = encoded;
+    let mut source = data;
     for &(first, count) in runs {
         let start = storage.data_start + first * bytes_per_pixel;
-        let len = count * bytes_per_pixel;
-        bytes[start..start + len].copy_from_slice(&source[..len]);
-        source = &source[len..];
+        let out = &mut bytes[start..start + count * bytes_per_pixel];
+        encode_into(&source[..count], storage, out)?;
+        source = &source[count..];
     }
     Ok(())
 }
@@ -760,8 +758,7 @@ macro_rules! impl_write_image {
                         storage.pixel_count
                     )));
                 }
-                let encoded = encode_storage(data, &storage)?;
-                write_pixels(file, &storage, &[(0, data.len())], &encoded)
+                write_pixels(file, &storage, &[(0, data.len())], data)
             }
 
             fn write_section(
@@ -779,8 +776,7 @@ macro_rules! impl_write_image {
                     )));
                 }
                 let storage = image_storage(file, hdu)?;
-                let encoded = encode_storage(&data[..count], &storage)?;
-                write_pixels(file, &storage, &[(range.start, count)], &encoded)
+                write_pixels(file, &storage, &[(range.start, count)], &data[..count])
             }
 
             fn write_region(
@@ -800,8 +796,7 @@ macro_rules! impl_write_image {
                     )));
                 }
                 let storage = image_storage(file, hdu)?;
-                let encoded = encode_storage(&data[..count], &storage)?;
-                write_pixels(file, &storage, &runs, &encoded)
+                write_pixels(file, &storage, &runs, &data[..count])
             }
         }
     )*};

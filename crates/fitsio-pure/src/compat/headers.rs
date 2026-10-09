@@ -198,17 +198,18 @@ fn write_key_to_file(
         return Err(Error::status(sys::BAD_KEYCHAR));
     }
 
-    let mut fits_data = crate::hdu::parse_fits(file.data()?)?;
-    let core_hdu = fits_data
-        .hdus
-        .get_mut(hdu.number)
+    let core_hdu = file
+        .parsed()?
+        .get(hdu.number)
         .ok_or(Error::status(sys::END_OF_FILE))?;
+    let (header_start, data_start) = (core_hdu.header_start, core_hdu.data_start);
+    let mut cards = core_hdu.cards.clone();
 
     if crate::header::needs_hierarch(name) {
         // A name a standard 8-byte keyword can't hold becomes a HIERARCH
         // card, as cfitsio writes it, instead of being truncated.
         let wanted = crate::header::strip_hierarch(name);
-        let existing = core_hdu.cards.iter().enumerate().find_map(|(i, card)| {
+        let existing = cards.iter().enumerate().find_map(|(i, card)| {
             let (key, _) = crate::header::hierarch_entry(card)?;
             key.eq_ignore_ascii_case(wanted)
                 .then(|| (i, key.to_string()))
@@ -222,10 +223,10 @@ fn write_key_to_file(
             add_hierarch_comment(&mut card, comment);
         }
         match existing {
-            Some((i, _)) => core_hdu.cards[i] = card,
-            None => insert_before_end(&mut core_hdu.cards, card),
+            Some((i, _)) => cards[i] = card,
+            None => insert_before_end(&mut cards, card),
         }
-    } else if let Some(card) = core_hdu.cards.iter_mut().find(|c| c.keyword_str() == name) {
+    } else if let Some(card) = cards.iter_mut().find(|c| c.keyword_str() == name) {
         card.value = Some(value);
         if let Some(comment) = comment {
             card.comment = Some(comment.to_string());
@@ -236,10 +237,14 @@ fn write_key_to_file(
             value: Some(value),
             comment: comment.map(String::from),
         };
-        insert_before_end(&mut core_hdu.cards, card);
+        insert_before_end(&mut cards, card);
     }
 
-    rebuild_fits_data(file, &fits_data)
+    // Only this HDU's header changes. It is rewritten in place, so nothing
+    // after it moves unless the header needs another block.
+    cards.retain(|c| !c.is_end());
+    let header = crate::header::serialize_header(&cards)?;
+    file.replace_bytes(header_start..data_start, &header)
 }
 
 /// Whether cfitsio accepts `name`, upper-cased, as a keyword: digits, upper
@@ -262,32 +267,6 @@ fn insert_before_end(cards: &mut Vec<crate::header::Card>, card: crate::header::
         Some(idx) => cards.insert(idx, card),
         None => cards.push(card),
     }
-}
-
-fn rebuild_fits_data(file: &mut FitsFile, fits_data: &crate::hdu::FitsData) -> Result<()> {
-    let mut new_data = Vec::new();
-    let data = file.data()?;
-
-    for (i, hdu) in fits_data.hdus.iter().enumerate() {
-        let cards_without_end: Vec<_> = hdu.cards.iter().filter(|c| !c.is_end()).cloned().collect();
-        let header_bytes = crate::header::serialize_header(&cards_without_end)?;
-        new_data.extend_from_slice(&header_bytes);
-
-        if hdu.data_len > 0 {
-            let data_end = hdu.data_start + hdu.data_len;
-            if data_end <= data.len() {
-                let raw = &data[hdu.data_start..data_end];
-                let padded_len = crate::block::padded_byte_len(raw.len());
-                new_data.extend_from_slice(raw);
-                new_data.resize(new_data.len() + (padded_len - raw.len()), 0);
-            }
-        }
-
-        let _ = i;
-    }
-
-    file.set_data(new_data);
-    Ok(())
 }
 
 /// Conversion of a Rust value to the card value `write_key` writes.
@@ -445,6 +424,65 @@ mod tests {
         let f = FitsFile::create(&path).open().unwrap();
         let hdu = f.primary_hdu().unwrap();
         assert!(i64::read_key(&f, &hdu, "MISSING").is_err());
+    }
+
+    /// A file whose primary image is followed by a second image, both with
+    /// distinct pixels.
+    fn two_images() -> (FitsFile, Vec<i16>, Vec<i16>) {
+        use crate::compat::images::{ImageDescription, ImageType};
+        let desc = ImageDescription {
+            data_type: ImageType::Short,
+            dimensions: &[30, 40],
+        };
+        let mut f = FitsFile::create_in_memory_with_custom_primary(&desc).unwrap();
+        let first: Vec<i16> = (0..1200).map(|i| i as i16).collect();
+        let second: Vec<i16> = (0..1200).map(|i| -(i as i16)).collect();
+        f.primary_hdu()
+            .unwrap()
+            .write_image(&mut f, &first)
+            .unwrap();
+        let hdu = f.create_image("SECOND", &desc).unwrap();
+        hdu.write_image(&mut f, &second).unwrap();
+        (f, first, second)
+    }
+
+    #[test]
+    fn write_key_rewrites_only_the_header_it_changes() {
+        let (mut f, first, second) = two_images();
+        let before = f.data().unwrap().to_vec();
+        let header_len = f.parsed().unwrap().hdus[0].data_start;
+        let hdu = f.primary_hdu().unwrap();
+        hdu.write_key(&mut f, "EXPTIME", 30.0).unwrap();
+        hdu.write_key(&mut f, "EXPTIME", 60.0).unwrap();
+
+        let after = f.data().unwrap();
+        assert_eq!(after.len(), before.len());
+        assert_ne!(after[..header_len], before[..header_len]);
+        assert_eq!(after[header_len..], before[header_len..]);
+        assert_eq!(hdu.read_key::<f64>(&f, "EXPTIME").unwrap(), 60.0);
+        assert_eq!(hdu.read_image::<Vec<i16>>(&f).unwrap(), first);
+        let hdu = f.hdu("SECOND").unwrap();
+        assert_eq!(hdu.read_image::<Vec<i16>>(&f).unwrap(), second);
+    }
+
+    #[test]
+    fn write_key_grows_a_full_header_by_a_block() {
+        let (mut f, first, second) = two_images();
+        let len = f.data().unwrap().len();
+        let hdu = f.primary_hdu().unwrap();
+        // Enough cards to spill out of the first header block.
+        for i in 0..40 {
+            hdu.write_key(&mut f, &format!("KEY{i}"), i).unwrap();
+        }
+
+        assert_eq!(f.data().unwrap().len(), len + 2880);
+        assert_eq!(f.parsed().unwrap().hdus[0].data_start, 2 * 2880);
+        for i in 0..40 {
+            assert_eq!(hdu.read_key::<i64>(&f, &format!("KEY{i}")).unwrap(), i);
+        }
+        assert_eq!(hdu.read_image::<Vec<i16>>(&f).unwrap(), first);
+        let hdu = f.hdu("SECOND").unwrap();
+        assert_eq!(hdu.read_image::<Vec<i16>>(&f).unwrap(), second);
     }
 
     fn card_text(f: FitsFile, keyword: &str) -> String {

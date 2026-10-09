@@ -304,10 +304,8 @@ impl FitsFile {
             1,
         )?;
         let extname = extname.into();
-        let bytes = image_hdu_bytes(cards, &extname, desc)?;
-        self.bytes_mut()?.extend_from_slice(&bytes);
+        append_image_hdu(self.bytes_mut()?, cards, &extname, desc)?;
 
-        self.invalidate_cache();
         let fits_data = self.parsed()?;
         let idx = fits_data.len() - 1;
         FitsHdu::at(self, idx)
@@ -427,6 +425,22 @@ impl FitsFile {
         }
     }
 
+    /// Replace the bytes in `range` with `bytes`, moving what follows only if
+    /// the length changes.
+    pub(crate) fn replace_bytes(
+        &mut self,
+        range: std::ops::Range<usize>,
+        bytes: &[u8],
+    ) -> Result<()> {
+        let data = self.bytes_mut()?;
+        if range.len() == bytes.len() {
+            data[range].copy_from_slice(bytes);
+        } else {
+            data.splice(range, bytes.iter().copied());
+        }
+        Ok(())
+    }
+
     /// Mutable access to the FITS bytes, for writes that change bytes in
     /// place without moving anything.
     pub(crate) fn data_mut(&mut self) -> Result<&mut [u8]> {
@@ -458,6 +472,12 @@ impl FitsFile {
 
     /// Return the file path. Empty for an in-memory file.
     pub fn filename(&self) -> &Path {
+        &self.filename
+    }
+
+    /// Return the file path, as `fitsio`'s `file_path` does. Empty for an
+    /// in-memory file.
+    pub fn file_path(&self) -> &Path {
         &self.filename
     }
 
@@ -499,18 +519,32 @@ impl<'a> NewFitsFile<'a> {
         self
     }
 
-    /// Finalize creation: write the primary HDU (minimal unless
+    /// Finalize creation: start the file with a primary HDU (minimal unless
     /// [`NewFitsFile::with_custom_primary`] was given) and return an open `FitsFile`.
+    ///
+    /// As with cfitsio, the file is created here but its contents are written
+    /// when it is flushed or dropped, so the image isn't written twice. Until
+    /// then a new file is empty, and with [`NewFitsFile::overwrite`] an
+    /// existing file keeps its old contents. Each save replaces the file
+    /// atomically.
     pub fn open(self) -> Result<FitsFile> {
-        if !self.overwrite && self.path.exists() {
-            return Err(Error::ExistingFile(
-                self.path.to_string_lossy().into_owned(),
-            ));
-        }
-
         let data = primary_hdu_bytes(self.image_description.as_ref())?;
 
-        write_atomic(&self.path, &data).map_err(|_| Error::status(sys::FILE_NOT_CREATED))?;
+        if !(self.overwrite && self.path.exists()) {
+            let created = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&self.path);
+            match created {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    return Err(Error::ExistingFile(
+                        self.path.to_string_lossy().into_owned(),
+                    ))
+                }
+                Err(_) => return Err(Error::status(sys::FILE_NOT_CREATED)),
+            }
+        }
 
         Ok(FitsFile {
             storage: Storage::Memory(data),
@@ -536,18 +570,21 @@ fn primary_hdu_bytes(desc: Option<&ImageDescription>) -> Result<Vec<u8>> {
                 desc.data_type.to_bitpix(),
                 &super::hdu::row_major(desc.dimensions),
             )?;
-            image_hdu_bytes(cards, "_PRIMARY", desc)
+            let mut bytes = Vec::new();
+            append_image_hdu(&mut bytes, cards, "_PRIMARY", desc)?;
+            Ok(bytes)
         }
     }
 }
 
 /// Finish an image HDU from its structural `cards`: add the unsigned-type
-/// scaling and `EXTNAME`, then serialize it with a zeroed data unit.
-fn image_hdu_bytes(
+/// scaling and `EXTNAME`, then append it to `out` with a zeroed data unit.
+fn append_image_hdu(
+    out: &mut Vec<u8>,
     mut cards: Vec<crate::header::Card>,
     extname: &str,
     desc: &ImageDescription,
-) -> Result<Vec<u8>> {
+) -> Result<()> {
     // For unsigned pixel types, record the cfitsio storage convention
     // (signed BITPIX offset by BZERO) so readers recover unsigned values.
     if let Some(bzero) = desc.data_type.unsigned_bzero() {
@@ -569,7 +606,7 @@ fn image_hdu_bytes(
         comment: None,
     });
 
-    let mut bytes = crate::header::serialize_header(&cards)?;
+    out.extend_from_slice(&crate::header::serialize_header(&cards)?);
 
     // NAXIS = 0 means no data unit, not the empty product's one pixel.
     let pixels = match desc.dimensions {
@@ -577,8 +614,8 @@ fn image_hdu_bytes(
         dims => dims.iter().product::<usize>(),
     };
     let data_bytes = pixels * ((desc.data_type.to_bitpix().unsigned_abs() as usize) / 8);
-    bytes.resize(bytes.len() + crate::block::padded_byte_len(data_bytes), 0u8);
-    Ok(bytes)
+    out.resize(out.len() + crate::block::padded_byte_len(data_bytes), 0u8);
+    Ok(())
 }
 
 /// `fitsio`'s status for a write to a read-only file. Not a cfitsio status:
@@ -646,6 +683,8 @@ mod tests {
         let from_mem = FitsFile::from_bytes(std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(from_mem.mode(), FileOpenMode::ReadOnly);
         assert_eq!(from_mem.filename(), Path::new(""));
+        assert_eq!(from_mem.file_path(), Path::new(""));
+        assert_eq!(from_disk.file_path(), path);
         assert_eq!(from_mem.data().unwrap(), from_disk.data().unwrap());
         assert_eq!(from_mem.num_hdus().unwrap(), from_disk.num_hdus().unwrap());
         assert_eq!(
@@ -1134,5 +1173,38 @@ mod tests {
         let cut = parsed.hdus[1].data_start + 10;
         std::fs::write(&path, &bytes[..cut]).unwrap();
         assert!(FitsFile::open(&path).is_err());
+    }
+
+    #[test]
+    fn create_writes_the_file_when_it_is_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new.fits");
+        let desc = ImageDescription {
+            data_type: ImageType::Short,
+            dimensions: &[3, 2],
+        };
+        let f = FitsFile::create(&path)
+            .with_custom_primary(&desc)
+            .open()
+            .unwrap();
+        assert!(path.exists());
+        assert!(matches!(
+            FitsFile::create(&path).open(),
+            Err(Error::ExistingFile(_))
+        ));
+        let bytes = f.data().unwrap().to_vec();
+        drop(f);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn overwrite_keeps_the_old_file_until_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.fits");
+        std::fs::write(&path, b"old contents").unwrap();
+        let f = FitsFile::create(&path).overwrite().open().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"old contents");
+        f.flush().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), f.data().unwrap());
     }
 }

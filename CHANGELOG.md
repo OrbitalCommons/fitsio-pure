@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.20.1
+
+### Changed
+
+- **Compat header writes rewrite one header in place.** Before, `write_key` re-parsed the file, re-serialized every HDU and copied every data unit into a new buffer. Now it rewrites only the changed HDU's header, a few kilobytes, over the old one. The data after it moves only when the header needs another 2880-byte block. Cards and pixels written are unchanged.
+- **Compat image writes encode straight into the file.** `write_image`, `write_section` and `write_region` convert values into the data unit in one pass per `BITPIX`, without building an intermediate buffer. On an overflow error the values before it have been written, as cfitsio writes the values it can.
+- **`create_image` appends without a temporary copy of the new HDU.**
+- **`create().open()` writes the file when it is saved, not twice.** It creates the file, failing with `ExistingFile` or status 105 as before, but leaves it empty until the first `flush` or drop. cfitsio also writes its buffers at close. Before, the zero-filled primary image was written and fsynced at `open`, then written again when saved. With `overwrite()`, an existing file keeps its old contents until the save. Every save still replaces the file atomically.
+- serialimage saving a 26 MP u8 luma image, a u16 RGB image and an f32 RGB image, each followed by about 15 keys:
+  - `savefits` time went from 7.9 s to 1.1 s, against 0.57 s for cfitsio;
+  - a single u16 RGB save went from 2.3 s to 0.38 s, and its peak RSS from 461 MB to 307 MB (156 MB of that is the caller's own pixels);
+  - fsync is about 10 ms of each 0.38 s save.
+
+### Added
+
+- **Compat `FitsFile::file_path()`**, as in `fitsio`.
+
 ## 0.20.0
 
 ### Changed
