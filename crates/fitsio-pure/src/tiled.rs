@@ -969,7 +969,7 @@ fn decompress_byte_tiles(
 }
 
 /// Length of cfitsio's dither random table (`N_RANDOM`).
-const N_RANDOM: usize = 10_000;
+pub(crate) const N_RANDOM: usize = 10_000;
 
 /// Quantized value that `SUBTRACTIVE_DITHER_2` reserves for an exact 0.0.
 const ZERO_VALUE: i32 = -2_147_483_646;
@@ -1054,7 +1054,7 @@ impl Dither {
 }
 
 /// cfitsio's `fits_init_randoms`: a Park–Miller sequence scaled to (0, 1).
-fn dither_table() -> Vec<f32> {
+pub(crate) fn dither_table() -> Vec<f32> {
     let a = 16807.0f64;
     let m = 2_147_483_647.0f64;
     let mut seed = 1.0f64;

@@ -1,4 +1,4 @@
-//! Gzip decompression (RFC 1952).
+//! Gzip (RFC 1952) decompression, and the compression `GZIP_1` tiles use.
 //!
 //! Archives commonly distribute whole FITS files gzip-compressed (`.fits.gz`,
 //! `.fit.gz`), and cfitsio opens them transparently. The same framing carries
@@ -11,6 +11,26 @@ use miniz_oxide::inflate::core::{decompress as inflate, inflate_flags, Decompres
 use miniz_oxide::inflate::TINFLStatus;
 
 use crate::error::{Error, Result};
+
+/// Compress `data` into one gzip member at DEFLATE `level` (0 to 9).
+///
+/// The header is the one zlib writes, as cfitsio's `GZIP_1` tiles carry:
+/// no file name, no modification time, and the extra flags for the level.
+pub fn compress(data: &[u8], level: u8) -> Vec<u8> {
+    let level = level.min(9);
+    let deflated = miniz_oxide::deflate::compress_to_vec(data, level);
+    let xfl = match level {
+        0 | 1 => 4,
+        9 => 2,
+        _ => 0,
+    };
+    let mut out = Vec::with_capacity(deflated.len() + 18);
+    out.extend_from_slice(&[0x1f, 0x8b, 8, 0, 0, 0, 0, 0, xfl, 3]);
+    out.extend_from_slice(&deflated);
+    out.extend_from_slice(&crc32(data).to_le_bytes());
+    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    out
+}
 
 /// True if `data` starts with the gzip magic bytes.
 pub fn is_gzip(data: &[u8]) -> bool {
@@ -174,6 +194,17 @@ pub(crate) fn encode_for_tests(data: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn compress_round_trips_at_every_level() {
+        let data: Vec<u8> = (0..10_000u32).map(|i| (i * 31 % 251) as u8).collect();
+        for level in 0..=9 {
+            let packed = compress(&data, level);
+            assert!(is_gzip(&packed));
+            assert_eq!(decompress(&packed).unwrap(), data);
+        }
+        assert_eq!(decompress(&compress(&[], 1)).unwrap(), Vec::<u8>::new());
+    }
+
     use super::*;
 
     #[test]
