@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.21.3
+
+### Added
+
+- **`parallel` feature: decode on all cores.** It is opt-in, depends on `rayon` and `std`, and leaves default, `no_std` and `wasm32` builds as they were.
+  - **Tile decode in parallel:** compressed images are split into bands, one per tile coordinate along the slowest axis, and the bands are decoded and assembled concurrently. Row tiles, 2-D tiles and cubes all parallelize, with no extra copy of the image.
+  - **Big pixel passes in chunks:** big-endian decoding of plain images, `read_image_data_into_f32`/`f64`, and `read_image_physical`'s BSCALE/BZERO and BLANK→NaN. The physical read is now one fused pass, without the intermediate mask, with the feature on or off.
+  - **Identical output:** a new test hashes the decoded bytes of every codec, type and tiling and of the HCOMPRESS/PLIO fixtures. It must match the same constant, which `main` also gave before this change; CI runs it with the feature on and off.
+  - **Benchmark:** AstroBurst's FITS reader against fitsio-pure on 26 MP images, 64 threads, with bit-identical output:
+
+    | file | AstroBurst | before | with `parallel` |
+    |---|---|---|---|
+    | RICE i16 | 176 ms | 391 ms | 140 ms |
+    | RICE f32 | 168 ms | 467 ms | 143 ms |
+    | GZIP_2 f32 | 183 ms | 655 ms | 156 ms |
+    | GZIP_1 i32 | 188 ms | 582 ms | 154 ms |
+    | plain f32 | 34 ms | 98 ms | 33 ms |
+
 ## 0.21.2
 
 ### Added

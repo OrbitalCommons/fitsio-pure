@@ -42,6 +42,7 @@ pub mod image_writer;
 /// Minimal `Read`/`Write`/`Seek` traits for `no_std` environments, and
 /// atomic file replacement under `std`.
 pub mod io;
+mod par;
 /// Primary HDU header parsing and construction.
 pub mod primary;
 /// Streaming HDU-at-a-time reading over `std::io::Read`.

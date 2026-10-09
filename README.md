@@ -21,6 +21,7 @@ The existing [`fitsio`](https://github.com/simonrw/rust-fitsio) crate wraps the 
 | `compat` | no | Drop-in replacement API matching the [`fitsio`](https://github.com/simonrw/rust-fitsio) crate |
 | `cli` | no | CLI binaries: `fitsinfo`, `fitsconv` |
 | `array` | no | ndarray integration (`ArrayD<T>` support via `ReadImage`) |
+| `parallel` | no | Decode tiles and convert pixels on all cores with [rayon](https://crates.io/crates/rayon). Results are identical with it off |
 
 The core library is `no_std` compatible (with `alloc`) and compiles to `wasm32-unknown-unknown`.
 
