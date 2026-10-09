@@ -191,7 +191,7 @@ fn hdu_info(file: &FitsFile, number: usize) -> Result<HduInfo> {
     let fits_data = file.parsed()?;
     let hdu = fits_data
         .get(number)
-        .ok_or(Error::Message(format!("HDU index {number} out of range")))?;
+        .ok_or(Error::status(super::sys::END_OF_FILE))?;
     let (bscale, bzero) = crate::image::extract_bscale_bzero(&hdu.cards);
 
     match &hdu.info {

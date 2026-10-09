@@ -1,6 +1,7 @@
 use super::errors::{Error, Result};
 use super::fitsfile::FitsFile;
 use super::hdu::FitsHdu;
+use super::sys;
 
 /// Describes the shape and type of an image HDU.
 ///
@@ -134,10 +135,7 @@ impl ImageType {
 fn validate_hdu_index(file: &FitsFile, hdu: &FitsHdu) -> Result<usize> {
     let fits_data = file.parsed()?;
     if hdu.number >= fits_data.len() {
-        return Err(Error::Message(format!(
-            "HDU index {} out of range",
-            hdu.number
-        )));
+        return Err(Error::status(sys::END_OF_FILE));
     }
     Ok(hdu.number)
 }
@@ -282,6 +280,16 @@ enum Physical {
     Scaled(Vec<f64>),
 }
 
+/// The image's axis lengths, `NAXIS1` first, or `None` for a table.
+fn image_naxes(hdu: &FitsHdu) -> Option<Vec<usize>> {
+    match &hdu.info {
+        crate::compat::hdu::HduInfo::ImageInfo { shape, .. } => {
+            Some(shape.iter().rev().copied().collect())
+        }
+        _ => None,
+    }
+}
+
 /// Read stored pixels (via `read`) and apply the HDU's `BSCALE`/`BZERO`.
 fn read_physical<F>(file: &FitsFile, hdu: &FitsHdu, read: F) -> Result<Physical>
 where
@@ -357,12 +365,7 @@ macro_rules! impl_from_physical_float {
 impl_from_physical_float!(f32, f64);
 
 fn narrow<T: FromPhysical>(physical: Physical) -> Result<Vec<T>> {
-    let overflow = || {
-        Error::Message(format!(
-            "pixel value out of range for {}",
-            std::any::type_name::<T>()
-        ))
-    };
+    let overflow = || Error::status(sys::NUM_OVERFLOW);
     match physical {
         Physical::Exact(v) => v
             .into_iter()
@@ -392,6 +395,11 @@ macro_rules! impl_read_image {
                 hdu: &FitsHdu,
                 range: std::ops::Range<usize>,
             ) -> Result<Vec<Self>> {
+                if let Some(naxes) = image_naxes(hdu) {
+                    if range.end > naxes.iter().product() {
+                        return Err(Error::status(sys::BAD_ROW_NUM));
+                    }
+                }
                 let count = range.end.saturating_sub(range.start);
                 narrow(read_physical(file, hdu, |d, h| {
                     crate::image::read_image_section(d, h, range.start, count)
@@ -404,6 +412,12 @@ macro_rules! impl_read_image {
                 start_row: usize,
                 num_rows: usize,
             ) -> Result<Vec<Self>> {
+                if let Some(naxes) = image_naxes(hdu) {
+                    let rows: usize = naxes.iter().skip(1).product();
+                    if naxes.len() >= 2 && start_row + num_rows > rows {
+                        return Err(Error::status(sys::BAD_ROW_NUM));
+                    }
+                }
                 narrow(read_physical(file, hdu, |d, h| {
                     crate::image::read_image_rows(d, h, start_row, num_rows)
                 })?)
@@ -420,6 +434,13 @@ macro_rules! impl_read_image {
                     }
                     _ => ranges,
                 };
+                if let Some(naxes) = image_naxes(hdu) {
+                    if ranges.len() == naxes.len()
+                        && ranges.iter().zip(&naxes).any(|(r, &n)| r.end > n)
+                    {
+                        return Err(Error::status(sys::BAD_ROW_NUM));
+                    }
+                }
                 let tuples = ranges_to_tuples(ranges);
                 narrow(read_physical(file, hdu, |d, h| {
                     crate::image::read_image_region(d, h, &tuples)
@@ -536,18 +557,12 @@ fn encode_storage<T: ToPhysical>(data: &[T], storage: &ImageStorage) -> Result<V
                 };
                 let stored = ((physical - bzero) / bscale).round();
                 if !stored.is_finite() {
-                    return Err(Error::Message(format!(
-                        "pixel value {physical} cannot be stored in a BITPIX = {bitpix} image"
-                    )));
+                    return Err(Error::status(sys::NUM_OVERFLOW));
                 }
                 stored as i128
             }
         };
-        let overflow = || {
-            Error::Message(format!(
-                "pixel value out of range for a BITPIX = {bitpix} image"
-            ))
-        };
+        let overflow = || Error::status(sys::NUM_OVERFLOW);
         match bitpix {
             8 => out.push(u8::try_from(stored).map_err(|_| overflow())?),
             16 => {
@@ -662,6 +677,7 @@ macro_rules! impl_write_image {
     ($($t:ty),*) => {$(
         impl WriteImage for $t {
             fn write_image(file: &mut FitsFile, hdu: &FitsHdu, data: &[Self]) -> Result<()> {
+                file.check_writable()?;
                 let storage = image_storage(file, hdu)?;
                 if data.len() > storage.pixel_count {
                     return Err(Error::Message(format!(
@@ -680,6 +696,7 @@ macro_rules! impl_write_image {
                 range: std::ops::Range<usize>,
                 data: &[Self],
             ) -> Result<()> {
+                file.check_writable()?;
                 let count = range.end.saturating_sub(range.start);
                 if data.len() < count {
                     return Err(Error::Message(format!(
@@ -698,6 +715,7 @@ macro_rules! impl_write_image {
                 ranges: &[std::ops::Range<usize>],
                 data: &[Self],
             ) -> Result<()> {
+                file.check_writable()?;
                 let naxes = naxes(file, hdu)?;
                 let runs = region_runs(&naxes, trim_absent_axes(naxes.len(), ranges))?;
                 let count: usize = runs.iter().map(|&(_, n)| n).sum();

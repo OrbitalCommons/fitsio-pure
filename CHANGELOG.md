@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.19.0
+
+### Changed
+
+- **Breaking: compat `errors::Error` has `fitsio`'s variants and cfitsio's status codes.**
+  - The enum has all ten of upstream's variants: `ExistingFile`, `Fits`, `Index`, `IntoString`, `Io`, `Message`, `Null`, `NullPointer`, `UnlockError` and `Utf8`. Exhaustive matches written against `fitsio` (asicam_rs, cameraunit_asi, cameraunit_fli, surge) now compile. `IndexError` and the upstream `From` impls are added too.
+  - `Error::Fits` holds a `FitsError { status, message }` instead of the core `fitsio_pure::Error`. `status` is the code cfitsio returns for the same condition, so code that turns a missing key into `None` (mwalib, hyperdrive, twinkle) works:
+    - a missing key is 202 (`KEY_NO_EXIST`), and a key with no value is 204 (`VALUE_UNDEFINED`);
+    - an HDU name no HDU has is 301 (`BAD_HDU_NUM`), and an index past the last HDU is 107 (`END_OF_FILE`);
+    - a read past the end of an image is 307 (`BAD_ROW_NUM`), and a value that doesn't fit the type asked for is 412 (`NUM_OVERFLOW`);
+    - a string read as a number is 409 (408 for `f32`), and a bad keyword name is 207 (`BAD_KEYCHAR`);
+    - a file that can't be opened is 104, and one that can't be created is 105;
+    - errors from the core parser get the nearest cfitsio status, with the parser's description as the message. I/O errors stay `Error::Io`.
+  - `create().open()` on an existing file without `overwrite()` returns `Error::ExistingFile(path)`, as upstream does.
+  - Writing to a file opened read-only is an error, status 602, as in `fitsio`. Before, the change was made in memory and silently never saved. This covers `write_key`, the image writes, `create_image`, `create_table` and `write_col`.
+  - `DescribesHdu::get_hdu` returns a `Result`, so the error carries the status above.
+  - Messages follow upstream: `Display` matches `fitsio`'s, and a missing column is `Message("Cannot find column \"NAME\"")`.
+
+### Added
+
+- **`compat::sys`** holds cfitsio's status codes with the same values and types as `fitsio::sys`, so comparisons against `sys::KEY_NO_EXIST` compile unchanged.
+- **`compat::errors::check_status`**, as in `fitsio`.
+- A compat-parity test triggers each condition above through `fitsio` and compat and checks they return the same variant and status. It also compiles the same exhaustive ten-variant `match` against both.
+
 ## 0.18.1
 
 ### Fixed

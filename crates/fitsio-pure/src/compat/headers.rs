@@ -1,6 +1,7 @@
 use super::errors::{Error, Result};
 use super::fitsfile::FitsFile;
 use super::hdu::FitsHdu;
+use super::sys;
 
 /// A header value with an optional comment.
 #[derive(Debug, Clone, PartialEq)]
@@ -38,10 +39,9 @@ fn find_card(
     // as it sits on the card still matches.
     let name = name.trim();
     let fits_data = file.parsed()?;
-    let core_hdu = fits_data.get(hdu.number).ok_or(Error::Message(format!(
-        "HDU index {} not found",
-        hdu.number
-    )))?;
+    let core_hdu = fits_data
+        .get(hdu.number)
+        .ok_or(Error::status(sys::END_OF_FILE))?;
 
     // Like cfitsio, match keywords ignoring case, and refuse to read an
     // undefined value as any type.
@@ -49,9 +49,7 @@ fn find_card(
         if card.keyword_str().eq_ignore_ascii_case(name) {
             match card.value {
                 Some(crate::value::Value::Undefined) => {
-                    return Err(Error::Message(format!(
-                        "keyword '{name}' value is undefined"
-                    )))
+                    return Err(Error::status(sys::VALUE_UNDEFINED))
                 }
                 Some(ref v) => return Ok((v.clone(), card.comment.clone())),
                 None => {}
@@ -68,7 +66,7 @@ fn find_card(
             }
         }
     }
-    Err(Error::Message(format!("keyword '{name}' not found")))
+    Err(Error::status(sys::KEY_NO_EXIST))
 }
 
 /// The comment after the value of a `HIERARCH` card, if it has one.
@@ -81,59 +79,61 @@ fn hierarch_comment(card: &crate::header::Card) -> Option<String> {
 
 /// Conversion of a card value to a Rust type, as `read_key` does it.
 trait FromCardValue: Sized {
-    fn from_card_value(name: &str, value: crate::value::Value) -> Result<Self>;
+    fn from_card_value(value: crate::value::Value) -> Result<Self>;
 }
 
 impl FromCardValue for i64 {
-    fn from_card_value(name: &str, value: crate::value::Value) -> Result<Self> {
+    fn from_card_value(value: crate::value::Value) -> Result<Self> {
         match value {
             crate::value::Value::Integer(n) => Ok(n),
-            _ => Err(Error::Message(format!(
-                "keyword '{name}' is not an integer"
-            ))),
+            _ => Err(Error::status(sys::BAD_C2D)),
         }
     }
 }
 
 impl FromCardValue for i32 {
-    fn from_card_value(name: &str, value: crate::value::Value) -> Result<Self> {
-        let n = i64::from_card_value(name, value)?;
-        i32::try_from(n).map_err(|_| {
-            Error::Message(format!("keyword '{name}' value {n} does not fit in an i32"))
-        })
+    fn from_card_value(value: crate::value::Value) -> Result<Self> {
+        let n = i64::from_card_value(value)?;
+        i32::try_from(n).map_err(|_| Error::status(sys::NUM_OVERFLOW))
     }
 }
 
 impl FromCardValue for f64 {
-    fn from_card_value(name: &str, value: crate::value::Value) -> Result<Self> {
+    fn from_card_value(value: crate::value::Value) -> Result<Self> {
         match value {
             crate::value::Value::Float(f) => Ok(f),
             crate::value::Value::Integer(n) => Ok(n as f64),
-            _ => Err(Error::Message(format!("keyword '{name}' is not a float"))),
+            _ => Err(Error::status(sys::BAD_C2D)),
         }
     }
 }
 
 impl FromCardValue for f32 {
-    fn from_card_value(name: &str, value: crate::value::Value) -> Result<Self> {
-        f64::from_card_value(name, value).map(|f| f as f32)
+    fn from_card_value(value: crate::value::Value) -> Result<Self> {
+        match value {
+            crate::value::Value::Float(f) => Ok(f as f32),
+            crate::value::Value::Integer(n) => Ok(n as f32),
+            _ => Err(Error::status(sys::BAD_C2F)),
+        }
     }
 }
 
 impl FromCardValue for bool {
-    fn from_card_value(name: &str, value: crate::value::Value) -> Result<Self> {
+    fn from_card_value(value: crate::value::Value) -> Result<Self> {
         match value {
             crate::value::Value::Logical(b) => Ok(b),
-            _ => Err(Error::Message(format!("keyword '{name}' is not a logical"))),
+            _ => Err(Error::status(sys::BAD_C2D)),
         }
     }
 }
 
 impl FromCardValue for String {
-    fn from_card_value(name: &str, value: crate::value::Value) -> Result<Self> {
+    fn from_card_value(value: crate::value::Value) -> Result<Self> {
         match value {
             crate::value::Value::String(s) => Ok(s.trim().to_string()),
-            _ => Err(Error::Message(format!("keyword '{name}' is not a string"))),
+            _ => Err(Error::Message(format!(
+                "keyword value {value:?} is not a string"
+            ))),
         }
     }
 }
@@ -143,7 +143,7 @@ macro_rules! reads_key_impl {
         impl ReadsKey for $t {
             fn read_key(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<Self> {
                 let (value, _) = find_card(file, hdu, name)?;
-                <$t>::from_card_value(name, value)
+                <$t>::from_card_value(value)
             }
         }
 
@@ -151,7 +151,7 @@ macro_rules! reads_key_impl {
             fn read_key(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<Self> {
                 let (value, comment) = find_card(file, hdu, name)?;
                 Ok(HeaderValue {
-                    value: <$t>::from_card_value(name, value)?,
+                    value: <$t>::from_card_value(value)?,
                     comment,
                 })
             }
@@ -190,18 +190,20 @@ fn write_key_to_file(
     value: crate::value::Value,
     comment: Option<&str>,
 ) -> Result<()> {
+    file.check_writable()?;
+    // As cfitsio does, ignore blanks around the name and write it in upper
+    // case.
+    let name = &name.trim().to_ascii_uppercase();
+    if !valid_keyword(name) {
+        return Err(Error::status(sys::BAD_KEYCHAR));
+    }
+
     let mut fits_data = crate::hdu::parse_fits(file.data())?;
     let core_hdu = fits_data
         .hdus
         .get_mut(hdu.number)
-        .ok_or(Error::Message(format!(
-            "HDU index {} not found",
-            hdu.number
-        )))?;
+        .ok_or(Error::status(sys::END_OF_FILE))?;
 
-    // As cfitsio does, ignore blanks around the name and write it in upper
-    // case.
-    let name = &name.trim().to_ascii_uppercase();
     if crate::header::needs_hierarch(name) {
         // A name a standard 8-byte keyword can't hold becomes a HIERARCH
         // card, as cfitsio writes it, instead of being truncated.
@@ -213,11 +215,9 @@ fn write_key_to_file(
         });
         // An existing key keeps the name as the file spells it.
         let key = existing.as_ref().map_or(wanted, |(_, key)| key.as_str());
-        let mut card = crate::header::hierarch_card(key, &value).map_err(|_| {
-            Error::Message(format!(
-                "keyword '{name}' and its value don't fit on one card"
-            ))
-        })?;
+        // cfitsio rejects a name too long to fit as BAD_KEYCHAR too.
+        let mut card = crate::header::hierarch_card(key, &value)
+            .map_err(|_| Error::status(sys::BAD_KEYCHAR))?;
         if let Some(comment) = comment {
             add_hierarch_comment(&mut card, comment);
         }
@@ -240,6 +240,21 @@ fn write_key_to_file(
     }
 
     rebuild_fits_data(file, &fits_data)
+}
+
+/// Whether cfitsio accepts `name`, upper-cased, as a keyword: digits, upper
+/// case letters, `-` and `_`, or for a `HIERARCH` name, any printable
+/// characters but `=`.
+fn valid_keyword(name: &str) -> bool {
+    if crate::header::needs_hierarch(name) {
+        name.bytes()
+            .all(|b| (b' '..=b'~').contains(&b) && b != b'=')
+    } else {
+        !name.is_empty()
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+    }
 }
 
 fn insert_before_end(cards: &mut Vec<crate::header::Card>, card: crate::header::Card) {

@@ -1,6 +1,7 @@
 use super::errors::{Error, Result};
 use super::fitsfile::FitsFile;
 use super::hdu::FitsHdu;
+use super::sys;
 use crate::bintable::{BinaryColumnData, BinaryColumnType};
 
 /// Describes one column in a table extension.
@@ -91,10 +92,7 @@ pub enum Column {
 fn validate_hdu_index(file: &FitsFile, hdu: &FitsHdu) -> Result<usize> {
     let fits_data = file.parsed()?;
     if hdu.number >= fits_data.len() {
-        return Err(Error::Message(format!(
-            "HDU index {} out of range",
-            hdu.number
-        )));
+        return Err(Error::status(sys::END_OF_FILE));
     }
     Ok(hdu.number)
 }
@@ -122,7 +120,7 @@ fn find_column_index(cards: &[crate::header::Card], name: &str, tfields: usize) 
             }
         }
     }
-    Err(Error::Message(format!("column '{}' not found", name)))
+    Err(Error::Message(format!("Cannot find column {name:?}")))
 }
 
 fn get_tfields(hdu: &crate::hdu::Hdu) -> Result<usize> {
@@ -236,8 +234,8 @@ fn stored(value: f64, tscal: f64, tzero: f64) -> f64 {
     }
 }
 
-fn out_of_range(name: &str) -> Error {
-    Error::Message(format!("value out of range for column '{}'", name))
+fn out_of_range() -> Error {
+    Error::status(sys::NUM_OVERFLOW)
 }
 
 fn not_numeric(name: &str) -> Error {
@@ -278,7 +276,7 @@ fn scale_column<T: ColumnScalar>(
             .collect(),
         _ => return Err(not_numeric(name)),
     };
-    converted.ok_or_else(|| out_of_range(name))
+    converted.ok_or_else(out_of_range)
 }
 
 fn narrow<T: Copy, S: TryFrom<i128>>(
@@ -322,7 +320,7 @@ fn unscale_column<T: ColumnScalar>(
         )),
         _ => return Err(not_numeric(name)),
     };
-    converted.ok_or_else(|| out_of_range(name))
+    converted.ok_or_else(out_of_range)
 }
 
 fn read_scaled<T: ColumnScalar>(
@@ -507,6 +505,7 @@ fn write_col_inner(
     name: &str,
     col_data: &crate::bintable::BinaryColumnData,
 ) -> Result<()> {
+    file.check_writable()?;
     let (idx, col_idx, rows, naxis2) = {
         let idx = validate_hdu_index(file, hdu)?;
         let parsed = file.parsed()?;
