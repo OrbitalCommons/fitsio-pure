@@ -182,25 +182,41 @@ pub fn apply_bscale_bzero(data: &ImageData, bscale: f64, bzero: f64) -> Vec<f64>
 /// `bzero + bscale * pixel` for every pixel, with pixels equal to `blank`
 /// (integer images) or NaN (float images, when `blank` is given) set to NaN.
 fn physical(data: &ImageData, bscale: f64, bzero: f64, blank: Option<i64>) -> Vec<f64> {
-    let scale = |p: f64| bzero + bscale * p;
+    let mut out = vec![0f64; image_len(data)];
+    physical_into(data, bscale, bzero, blank, &mut out, |v| v);
+    out
+}
+
+/// [`physical`] into `out`, each value computed in `f64` and passed through
+/// `to`.
+fn physical_into<O, F>(
+    data: &ImageData,
+    bscale: f64,
+    bzero: f64,
+    blank: Option<i64>,
+    out: &mut [O],
+    to: F,
+) where
+    O: Send,
+    F: Fn(f64) -> O + Sync + Send,
+{
+    let scale = |p: f64| to(bzero + bscale * p);
     macro_rules! ints {
-        ($v:expr, $t:ty) => {{
-            let mut out = vec![0f64; $v.len()];
+        ($v:expr, $t:ty) => {
             match blank {
                 Some(b) => {
                     let b = b as $t;
-                    crate::par::map_into($v, &mut out, |&p| {
+                    crate::par::map_into($v, out, |&p| {
                         if p == b {
-                            f64::NAN
+                            to(f64::NAN)
                         } else {
                             scale(p as f64)
                         }
                     })
                 }
-                None => crate::par::map_into($v, &mut out, |&p| scale(p as f64)),
+                None => crate::par::map_into($v, out, |&p| scale(p as f64)),
             }
-            out
-        }};
+        };
     }
     let nan_blank = blank.is_some();
     match data {
@@ -208,28 +224,32 @@ fn physical(data: &ImageData, bscale: f64, bzero: f64, blank: Option<i64>) -> Ve
         ImageData::I16(v) => ints!(v, i16),
         ImageData::I32(v) => ints!(v, i32),
         ImageData::I64(v) => ints!(v, i64),
-        ImageData::F32(v) => {
-            let mut out = vec![0f64; v.len()];
-            crate::par::map_into(v, &mut out, |&p| {
-                if nan_blank && p.is_nan() {
-                    f64::NAN
-                } else {
-                    scale(p as f64)
-                }
-            });
-            out
-        }
-        ImageData::F64(v) => {
-            let mut out = vec![0f64; v.len()];
-            crate::par::map_into(v, &mut out, |&p| {
-                if nan_blank && p.is_nan() {
-                    f64::NAN
-                } else {
-                    scale(p)
-                }
-            });
-            out
-        }
+        ImageData::F32(v) => crate::par::map_into(v, out, |&p| {
+            if nan_blank && p.is_nan() {
+                to(f64::NAN)
+            } else {
+                scale(p as f64)
+            }
+        }),
+        ImageData::F64(v) => crate::par::map_into(v, out, |&p| {
+            if nan_blank && p.is_nan() {
+                to(f64::NAN)
+            } else {
+                scale(p)
+            }
+        }),
+    }
+}
+
+/// The number of pixels in `data`.
+fn image_len(data: &ImageData) -> usize {
+    match data {
+        ImageData::U8(v) => v.len(),
+        ImageData::I16(v) => v.len(),
+        ImageData::I32(v) => v.len(),
+        ImageData::I64(v) => v.len(),
+        ImageData::F32(v) => v.len(),
+        ImageData::F64(v) => v.len(),
     }
 }
 
@@ -334,14 +354,110 @@ fn find_float_keyword(cards: &[Card], keyword: &str) -> Option<f64> {
 pub fn read_image_physical(fits_data: &[u8], hdu: &Hdu) -> Result<Vec<f64>> {
     let raw = read_image_data(fits_data, hdu)?;
     let (bscale, bzero) = extract_bscale_bzero(&hdu.cards);
-    let blank = extract_blank(&hdu.cards);
-    // Float pixels that are NaN become the canonical NaN, as the integer
-    // BLANK pixels do; without BLANK they pass through BSCALE/BZERO.
-    let blank = match raw {
+    Ok(physical(
+        &raw,
+        bscale,
+        bzero,
+        physical_blank(&raw, &hdu.cards),
+    ))
+}
+
+/// The BLANK handling [`read_image_physical`] uses: NaN float pixels become
+/// the canonical NaN, as the integer BLANK pixels do; without BLANK, integer
+/// pixels all pass through BSCALE/BZERO.
+fn physical_blank(raw: &ImageData, cards: &[Card]) -> Option<i64> {
+    match raw {
         ImageData::F32(_) | ImageData::F64(_) => Some(0),
-        _ => blank,
-    };
-    Ok(physical(&raw, bscale, bzero, blank))
+        _ => extract_blank(cards),
+    }
+}
+
+/// Read image data with BSCALE/BZERO applied, as `f32`.
+///
+/// Each value is [`read_image_physical`]'s, cast to `f32`: computed in `f64`
+/// and rounded once, with BLANK pixels (and NaN float pixels) as NaN. No
+/// `f64` copy of the image is made, so this needs half the memory of
+/// `read_image_physical` followed by a cast. Works for plain and
+/// tile-compressed images.
+pub fn read_image_physical_f32(fits_data: &[u8], hdu: &Hdu) -> Result<Vec<f32>> {
+    let mut out = vec![0f32; image_pixels(hdu)?];
+    read_image_physical_into_f32(fits_data, hdu, &mut out)?;
+    Ok(out)
+}
+
+/// [`read_image_physical_f32`] into a caller's buffer, which must hold
+/// exactly one value per pixel.
+pub fn read_image_physical_into_f32(fits_data: &[u8], hdu: &Hdu, buf: &mut [f32]) -> Result<()> {
+    if buf.len() != image_pixels(hdu)? {
+        return Err(Error::InvalidValue);
+    }
+    let (bscale, bzero) = extract_bscale_bzero(&hdu.cards);
+    if matches!(hdu.info, HduInfo::CompressedImage { .. }) {
+        let raw = read_image_data(fits_data, hdu)?;
+        let blank = physical_blank(&raw, &hdu.cards);
+        physical_into(&raw, bscale, bzero, blank, buf, |v| v as f32);
+        return Ok(());
+    }
+
+    // A plain image converts straight from its bytes.
+    let bitpix = hdu_bitpix(hdu)?;
+    let end = hdu.data_start + buf.len() * bytes_per_pixel(bitpix)?;
+    let raw = fits_data
+        .get(hdu.data_start..end)
+        .ok_or(Error::UnexpectedEof)?;
+    let scale = |p: f64| (bzero + bscale * p) as f32;
+    let blank = extract_blank(&hdu.cards);
+    macro_rules! ints {
+        ($t:ty) => {
+            match blank {
+                Some(b) => {
+                    let b = b as $t;
+                    decode_be_into(raw, buf, |bytes| {
+                        let p = <$t>::from_be_bytes(bytes);
+                        if p == b {
+                            f32::NAN
+                        } else {
+                            scale(p as f64)
+                        }
+                    })
+                }
+                None => decode_be_into(raw, buf, |bytes| scale(<$t>::from_be_bytes(bytes) as f64)),
+            }
+        };
+    }
+    match bitpix {
+        8 => ints!(u8),
+        16 => ints!(i16),
+        32 => ints!(i32),
+        64 => ints!(i64),
+        -32 => decode_be_into(raw, buf, |bytes| {
+            let p = f32::from_be_bytes(bytes);
+            if p.is_nan() {
+                f32::NAN
+            } else {
+                scale(p as f64)
+            }
+        }),
+        -64 => decode_be_into(raw, buf, |bytes| {
+            let p = f64::from_be_bytes(bytes);
+            if p.is_nan() {
+                f32::NAN
+            } else {
+                scale(p)
+            }
+        }),
+        other => return Err(Error::InvalidBitpix(other)),
+    }
+    Ok(())
+}
+
+/// The number of pixels in an image HDU, plain or tile-compressed.
+fn image_pixels(hdu: &Hdu) -> Result<usize> {
+    let (_, naxes) = hdu_bitpix_naxes(hdu)?;
+    Ok(match naxes {
+        [] => 0,
+        naxes => naxes.iter().product(),
+    })
 }
 
 /// Decode big-endian `N`-byte pixels into a new `Vec`, in chunks (on all
