@@ -51,7 +51,7 @@ mod pure_backend {
             let hdu_bytes =
                 fitsio_pure::bintable::serialize_binary_table_hdu(&columns, &col_data, nrows)
                     .unwrap();
-            let mut file_data = f.data().to_vec();
+            let mut file_data = f.data().unwrap().to_vec();
             file_data.extend_from_slice(&hdu_bytes);
             f.set_data(file_data);
         }
@@ -70,7 +70,7 @@ mod pure_backend {
             let hdu_bytes =
                 fitsio_pure::bintable::serialize_binary_table_hdu(&columns, &col_data, nrows)
                     .unwrap();
-            let mut file_data = f.data().to_vec();
+            let mut file_data = f.data().unwrap().to_vec();
             file_data.extend_from_slice(&hdu_bytes);
             f.set_data(file_data);
         }
@@ -89,7 +89,7 @@ mod pure_backend {
             let hdu_bytes =
                 fitsio_pure::bintable::serialize_binary_table_hdu(&columns, &col_data, nrows)
                     .unwrap();
-            let mut file_data = f.data().to_vec();
+            let mut file_data = f.data().unwrap().to_vec();
             file_data.extend_from_slice(&hdu_bytes);
             f.set_data(file_data);
         }
@@ -108,7 +108,7 @@ mod pure_backend {
             let hdu_bytes =
                 fitsio_pure::bintable::serialize_binary_table_hdu(&columns, &col_data, nrows)
                     .unwrap();
-            let mut file_data = f.data().to_vec();
+            let mut file_data = f.data().unwrap().to_vec();
             file_data.extend_from_slice(&hdu_bytes);
             f.set_data(file_data);
         }

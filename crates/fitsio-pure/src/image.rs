@@ -593,7 +593,7 @@ fn hdu_bitpix_naxes(hdu: &Hdu) -> Result<(i64, &[usize])> {
 }
 
 /// Decode a contiguous byte slice into an `ImageData` variant based on BITPIX.
-fn decode_pixels(raw: &[u8], bitpix: i64) -> Result<ImageData> {
+pub(crate) fn decode_pixels(raw: &[u8], bitpix: i64) -> Result<ImageData> {
     bytes_per_pixel(bitpix)?; // validate
     match bitpix {
         8 => Ok(ImageData::U8(raw.to_vec())),

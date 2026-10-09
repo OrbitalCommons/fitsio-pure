@@ -189,6 +189,20 @@ fn file_errors_match() {
     assert_eq!(p_err(PFits::create(&no_dir).open()), "Fits(105)");
 }
 
+#[test]
+fn opening_a_file_that_is_not_fits_matches() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, bytes, expected) in [
+        ("short.fits", b"hello".to_vec(), "Fits(108)"),
+        ("junk.fits", vec![b'x'; 2 * 2880], "Fits(252)"),
+    ] {
+        let path = dir.path().join(name);
+        std::fs::write(&path, bytes).unwrap();
+        assert_eq!(c_err(CFits::open(&path)), expected, "fitsio: {name}");
+        assert_eq!(p_err(PFits::open(&path)), expected, "compat: {name}");
+    }
+}
+
 /// mwalib's and hyperdrive's shape: a missing or undefined key is `None`,
 /// any other error is passed on.
 fn optional_key_c(path: &Path, name: &str) -> Result<Option<i64>, CError> {

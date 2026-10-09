@@ -312,9 +312,9 @@ mod tests {
         assert!(hdu.write_image(&mut f, &[0i32; 7]).is_err());
         // The file keeps its size: earlier releases replaced the data unit
         // with whatever was written.
-        let len = f.data().len();
+        let len = f.data().unwrap().len();
         hdu.write_image(&mut f, &[1i32]).unwrap();
-        assert_eq!(f.data().len(), len);
+        assert_eq!(f.data().unwrap().len(), len);
     }
 
     /// Values are converted to the image's type through its BZERO/BSCALE, as
@@ -387,7 +387,7 @@ mod tests {
         }];
         let data = [crate::bintable::BinaryColumnData::Int(vec![10, 20, 30])];
         let table = crate::bintable::serialize_binary_table_hdu(&columns, &data, 3).unwrap();
-        let mut bytes = f.data().to_vec();
+        let mut bytes = f.data().unwrap().to_vec();
         bytes.extend_from_slice(&table);
         f.set_data(bytes);
         let hdu = f.hdu(1usize).unwrap();
