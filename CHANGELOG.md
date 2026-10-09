@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.21.4
+
+### Added
+
+- **`image::read_image_physical_f32` and `read_image_physical_into_f32`** read an image with BSCALE/BZERO applied, as `f32`, for plain and tile-compressed images.
+  - **Values:** each is `read_image_physical`'s value cast to `f32`, bit for bit: computed in `f64` and rounded once, with BLANK pixels and NaN float pixels as NaN.
+  - **Memory:** no `f64` copy of the image is made. A plain image converts straight from its bytes, and a compressed one from its decoded tiles.
+  - **`parallel` feature:** the conversion runs in parallel with it, like the other pixel passes.
+  - **Test:** a new test checks them against `read_image_physical` for plain images (BSCALE/BZERO, BLANK, NaN, every BITPIX), for compressed images of every type, and for the HCOMPRESS/PLIO fixtures.
+  - **Benchmark:** in AstroBurst's benchmark at 64 threads with `parallel`, the compressed 26 MP files read in 28–50 ms against AstroBurst's 166–191 ms, and plain u16 in 16 ms against 18 ms.
+
 ## 0.21.3
 
 ### Added
