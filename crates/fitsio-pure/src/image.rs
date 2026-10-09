@@ -90,43 +90,11 @@ pub fn read_image_data(fits_data: &[u8], hdu: &Hdu) -> Result<ImageData> {
 
     match bitpix {
         8 => Ok(ImageData::U8(raw.to_vec())),
-        16 => {
-            // Interpret big-endian bytes as i16, collect into properly-aligned Vec<i16>,
-            // then swap each element to native endianness in place.
-            let mut pixels: Vec<i16> = pod_collect_to_vec(raw);
-            for v in &mut pixels {
-                *v = i16::from_be(*v);
-            }
-            Ok(ImageData::I16(pixels))
-        }
-        32 => {
-            let mut pixels: Vec<i32> = pod_collect_to_vec(raw);
-            for v in &mut pixels {
-                *v = i32::from_be(*v);
-            }
-            Ok(ImageData::I32(pixels))
-        }
-        64 => {
-            let mut pixels: Vec<i64> = pod_collect_to_vec(raw);
-            for v in &mut pixels {
-                *v = i64::from_be(*v);
-            }
-            Ok(ImageData::I64(pixels))
-        }
-        -32 => {
-            let mut pixels: Vec<f32> = pod_collect_to_vec(raw);
-            for v in &mut pixels {
-                *v = f32::from_bits(u32::from_be(v.to_bits()));
-            }
-            Ok(ImageData::F32(pixels))
-        }
-        -64 => {
-            let mut pixels: Vec<f64> = pod_collect_to_vec(raw);
-            for v in &mut pixels {
-                *v = f64::from_bits(u64::from_be(v.to_bits()));
-            }
-            Ok(ImageData::F64(pixels))
-        }
+        16 => Ok(ImageData::I16(decode_be(raw, i16::from_be_bytes))),
+        32 => Ok(ImageData::I32(decode_be(raw, i32::from_be_bytes))),
+        64 => Ok(ImageData::I64(decode_be(raw, i64::from_be_bytes))),
+        -32 => Ok(ImageData::F32(decode_be(raw, f32::from_be_bytes))),
+        -64 => Ok(ImageData::F64(decode_be(raw, f64::from_be_bytes))),
         other => Err(Error::InvalidBitpix(other)),
     }
 }
@@ -156,36 +124,12 @@ pub fn read_image_data_into_f32(fits_data: &[u8], hdu: &Hdu, buf: &mut [f32]) ->
     let raw = &fits_data[hdu.data_start..end];
 
     match bitpix {
-        8 => {
-            for (i, &b) in raw.iter().enumerate() {
-                buf[i] = b as f32;
-            }
-        }
-        16 => {
-            for i in 0..npixels {
-                buf[i] = crate::endian::read_i16_be(&raw[i * 2..]) as f32;
-            }
-        }
-        32 => {
-            for i in 0..npixels {
-                buf[i] = crate::endian::read_i32_be(&raw[i * 4..]) as f32;
-            }
-        }
-        64 => {
-            for i in 0..npixels {
-                buf[i] = crate::endian::read_i64_be(&raw[i * 8..]) as f32;
-            }
-        }
-        -32 => {
-            for i in 0..npixels {
-                buf[i] = crate::endian::read_f32_be(&raw[i * 4..]);
-            }
-        }
-        -64 => {
-            for i in 0..npixels {
-                buf[i] = crate::endian::read_f64_be(&raw[i * 8..]) as f32;
-            }
-        }
+        8 => decode_be_into(raw, buf, |b: [u8; 1]| b[0] as f32),
+        16 => decode_be_into(raw, buf, |b| i16::from_be_bytes(b) as f32),
+        32 => decode_be_into(raw, buf, |b| i32::from_be_bytes(b) as f32),
+        64 => decode_be_into(raw, buf, |b| i64::from_be_bytes(b) as f32),
+        -32 => decode_be_into(raw, buf, f32::from_be_bytes),
+        -64 => decode_be_into(raw, buf, |b| f64::from_be_bytes(b) as f32),
         other => return Err(Error::InvalidBitpix(other)),
     }
     Ok(())
@@ -216,36 +160,12 @@ pub fn read_image_data_into_f64(fits_data: &[u8], hdu: &Hdu, buf: &mut [f64]) ->
     let raw = &fits_data[hdu.data_start..end];
 
     match bitpix {
-        8 => {
-            for (i, &b) in raw.iter().enumerate() {
-                buf[i] = b as f64;
-            }
-        }
-        16 => {
-            for i in 0..npixels {
-                buf[i] = crate::endian::read_i16_be(&raw[i * 2..]) as f64;
-            }
-        }
-        32 => {
-            for i in 0..npixels {
-                buf[i] = crate::endian::read_i32_be(&raw[i * 4..]) as f64;
-            }
-        }
-        64 => {
-            for i in 0..npixels {
-                buf[i] = crate::endian::read_i64_be(&raw[i * 8..]) as f64;
-            }
-        }
-        -32 => {
-            for i in 0..npixels {
-                buf[i] = crate::endian::read_f32_be(&raw[i * 4..]) as f64;
-            }
-        }
-        -64 => {
-            for i in 0..npixels {
-                buf[i] = crate::endian::read_f64_be(&raw[i * 8..]);
-            }
-        }
+        8 => decode_be_into(raw, buf, |b: [u8; 1]| b[0] as f64),
+        16 => decode_be_into(raw, buf, |b| i16::from_be_bytes(b) as f64),
+        32 => decode_be_into(raw, buf, |b| i32::from_be_bytes(b) as f64),
+        64 => decode_be_into(raw, buf, |b| i64::from_be_bytes(b) as f64),
+        -32 => decode_be_into(raw, buf, |b| f32::from_be_bytes(b) as f64),
+        -64 => decode_be_into(raw, buf, f64::from_be_bytes),
         other => return Err(Error::InvalidBitpix(other)),
     }
     Ok(())
@@ -256,13 +176,60 @@ pub fn read_image_data_into_f64(fits_data: &[u8], hdu: &Hdu, buf: &mut [f64]) ->
 /// Computes `physical = bzero + bscale * pixel` for every pixel and returns
 /// the results as `Vec<f64>`.
 pub fn apply_bscale_bzero(data: &ImageData, bscale: f64, bzero: f64) -> Vec<f64> {
+    physical(data, bscale, bzero, None)
+}
+
+/// `bzero + bscale * pixel` for every pixel, with pixels equal to `blank`
+/// (integer images) or NaN (float images, when `blank` is given) set to NaN.
+fn physical(data: &ImageData, bscale: f64, bzero: f64, blank: Option<i64>) -> Vec<f64> {
+    let scale = |p: f64| bzero + bscale * p;
+    macro_rules! ints {
+        ($v:expr, $t:ty) => {{
+            let mut out = vec![0f64; $v.len()];
+            match blank {
+                Some(b) => {
+                    let b = b as $t;
+                    crate::par::map_into($v, &mut out, |&p| {
+                        if p == b {
+                            f64::NAN
+                        } else {
+                            scale(p as f64)
+                        }
+                    })
+                }
+                None => crate::par::map_into($v, &mut out, |&p| scale(p as f64)),
+            }
+            out
+        }};
+    }
+    let nan_blank = blank.is_some();
     match data {
-        ImageData::U8(v) => v.iter().map(|&p| bzero + bscale * (p as f64)).collect(),
-        ImageData::I16(v) => v.iter().map(|&p| bzero + bscale * (p as f64)).collect(),
-        ImageData::I32(v) => v.iter().map(|&p| bzero + bscale * (p as f64)).collect(),
-        ImageData::I64(v) => v.iter().map(|&p| bzero + bscale * (p as f64)).collect(),
-        ImageData::F32(v) => v.iter().map(|&p| bzero + bscale * (p as f64)).collect(),
-        ImageData::F64(v) => v.iter().map(|&p| bzero + bscale * p).collect(),
+        ImageData::U8(v) => ints!(v, u8),
+        ImageData::I16(v) => ints!(v, i16),
+        ImageData::I32(v) => ints!(v, i32),
+        ImageData::I64(v) => ints!(v, i64),
+        ImageData::F32(v) => {
+            let mut out = vec![0f64; v.len()];
+            crate::par::map_into(v, &mut out, |&p| {
+                if nan_blank && p.is_nan() {
+                    f64::NAN
+                } else {
+                    scale(p as f64)
+                }
+            });
+            out
+        }
+        ImageData::F64(v) => {
+            let mut out = vec![0f64; v.len()];
+            crate::par::map_into(v, &mut out, |&p| {
+                if nan_blank && p.is_nan() {
+                    f64::NAN
+                } else {
+                    scale(p)
+                }
+            });
+            out
+        }
     }
 }
 
@@ -368,15 +335,40 @@ pub fn read_image_physical(fits_data: &[u8], hdu: &Hdu) -> Result<Vec<f64>> {
     let raw = read_image_data(fits_data, hdu)?;
     let (bscale, bzero) = extract_bscale_bzero(&hdu.cards);
     let blank = extract_blank(&hdu.cards);
-    let mut physical = apply_bscale_bzero(&raw, bscale, bzero);
-    if let Some(mask) = blank_mask(&raw, blank) {
-        for (val, is_blank) in physical.iter_mut().zip(mask.iter()) {
-            if *is_blank {
-                *val = f64::NAN;
-            }
+    // Float pixels that are NaN become the canonical NaN, as the integer
+    // BLANK pixels do; without BLANK they pass through BSCALE/BZERO.
+    let blank = match raw {
+        ImageData::F32(_) | ImageData::F64(_) => Some(0),
+        _ => blank,
+    };
+    Ok(physical(&raw, bscale, bzero, blank))
+}
+
+/// Decode big-endian `N`-byte pixels into a new `Vec`, in chunks (on all
+/// cores with the `parallel` feature).
+fn decode_be<O, const N: usize>(raw: &[u8], conv: impl Fn([u8; N]) -> O + Sync + Send) -> Vec<O>
+where
+    O: Default + Clone + Send,
+{
+    let mut out = vec![O::default(); raw.len() / N];
+    decode_be_into(raw, &mut out, conv);
+    out
+}
+
+/// Decode big-endian `N`-byte pixels into `out`, which holds one per pixel.
+fn decode_be_into<O, const N: usize>(
+    raw: &[u8],
+    out: &mut [O],
+    conv: impl Fn([u8; N]) -> O + Sync + Send,
+) where
+    O: Send,
+{
+    crate::par::chunks_mut(out, crate::par::PIXEL_CHUNK, |start, chunk| {
+        let src = &raw[start * N..(start + chunk.len()) * N];
+        for (o, b) in chunk.iter_mut().zip(src.chunks_exact(N)) {
+            *o = conv(b.try_into().expect("chunks_exact yields N bytes"));
         }
-    }
-    Ok(physical)
+    });
 }
 
 // ---- Image write functions ----

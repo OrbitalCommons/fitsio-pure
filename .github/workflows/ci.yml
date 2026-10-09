@@ -19,6 +19,7 @@ jobs:
       - run: cargo test --workspace
       - run: cargo test --features compat
       - run: cargo test --features array
+      - run: cargo test -p fitsio-pure --features parallel
 
   clippy:
     runs-on: ubuntu-latest
@@ -30,6 +31,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo clippy --all-targets --features compat -- -D warnings
       - run: cargo clippy --all-targets --features array -- -D warnings
+      - run: cargo clippy -p fitsio-pure --all-targets --features parallel -- -D warnings
 
   fmt:
     runs-on: ubuntu-latest

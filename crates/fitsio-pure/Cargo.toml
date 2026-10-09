@@ -1,6 +1,6 @@
 [package]
 name = "fitsio-pure"
-version = "0.21.2"
+version = "0.21.3"
 edition = "2021"
 license = "Apache-2.0"
 description = "Pure Rust FITS file reader and writer"
@@ -13,6 +13,9 @@ std = []
 compat = ["std"]
 cli = ["std"]
 array = ["dep:ndarray", "compat"]
+# Decode tiles and convert pixels on all cores with rayon. Off by default;
+# results are identical with it on or off.
+parallel = ["std", "dep:rayon"]
 
 [dev-dependencies]
 tempfile = "3.25"
@@ -32,3 +35,4 @@ bytemuck = { version = "1.25.0", features = ["extern_crate_alloc"] }
 libm = "0.2.16"
 miniz_oxide = { version = "0.9.0", default-features = false, features = ["with-alloc"] }
 ndarray = { version = "0.17.2", optional = true }
+rayon = { version = "1.12.0", optional = true }

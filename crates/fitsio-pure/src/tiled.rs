@@ -577,11 +577,28 @@ impl TileGrid {
         self.extent(index).iter().product()
     }
 
-    /// Scatter one decoded tile into the flat image buffer.
+    /// The output split into bands that tiles fill independently: one band
+    /// per tile coordinate along the slowest axis longer than one pixel. A
+    /// band is a contiguous slab of the image, and its tiles are consecutive
+    /// rows of the table. Returns the pixels per band and the tiles per band.
+    fn bands(&self) -> (usize, usize) {
+        let Some(axis) = self.dims.iter().rposition(|&d| d > 1) else {
+            return (
+                self.dims.iter().product::<usize>().max(1),
+                self.len().max(1),
+            );
+        };
+        let stride: usize = self.dims[..axis].iter().product();
+        let tiles: usize = self.counts[..axis].iter().product();
+        ((self.tile[axis] * stride).max(1), tiles.max(1))
+    }
+
+    /// Scatter one decoded tile into `dst`, the part of the flat image buffer
+    /// that starts at pixel `base` and holds the tile.
     ///
     /// The fastest axis of a tile is contiguous in both source and destination,
     /// so each tile row is a single copy; the loop walks the higher axes.
-    fn blit<T: Copy>(&self, index: usize, src: &[T], dst: &mut [T]) {
+    fn blit<T: Copy>(&self, index: usize, src: &[T], dst: &mut [T], base: usize) {
         let coord = self.coord(index);
         let extent = self.extent(index);
         let run = extent[0].min(src.len());
@@ -615,6 +632,7 @@ impl TileGrid {
                     .enumerate()
                     .map(|(i, &h)| h * strides[i + 1])
                     .sum::<usize>();
+            let dst_off = dst_off - base;
             let n = run
                 .min(src.len() - src_off)
                 .min(dst.len().saturating_sub(dst_off));
@@ -782,31 +800,41 @@ fn scatter_tiles<T, F>(
     naxis2: usize,
     col_info: &ColumnInfo,
     fill: T,
-    mut decode: F,
+    decode: F,
 ) -> Result<Vec<T>>
 where
-    T: BePixel,
-    F: FnMut(usize, &[u8], usize, usize) -> Result<Vec<T>>,
+    T: BePixel + Send + Sync,
+    F: Fn(usize, &[u8], usize, usize) -> Result<Vec<T>> + Sync + Send,
 {
     let tile = |row: usize, column: &HeapColumn| {
         extract_tile_bytes(fits_data, hdu.data_start, naxis1, naxis2, row, column)
     };
-    let mut output = alloc::vec![fill; total_pixels];
-    for row in 0..grid.len().min(naxis2) {
+    let decode_row = |row: usize| -> Result<Vec<T>> {
         let (tile_data, tile_count) = tile(row, &col_info.compressed_data)?;
-        let vals = if tile_count > 0 {
-            decode(row, tile_data, tile_count, grid.tile_pixels(row))?
+        if tile_count > 0 {
+            decode(row, tile_data, tile_count, grid.tile_pixels(row))
         } else if let Some(column) = &col_info.uncompressed_data {
             let (data, count) = tile(row, column)?;
-            T::from_be_slice(&data[..count])
+            Ok(T::from_be_slice(&data[..count]))
         } else if let Some(column) = &col_info.gzip_data {
             let (data, count) = tile(row, column)?;
-            T::from_be_slice(&gzip_decompress(&data[..count])?)
+            Ok(T::from_be_slice(&gzip_decompress(&data[..count])?))
         } else {
-            return Err(Error::DecompressionError("empty tile"));
-        };
-        grid.blit(row, &vals, &mut output);
-    }
+            Err(Error::DecompressionError("empty tile"))
+        }
+    };
+    let rows = grid.len().min(naxis2);
+    let mut output = alloc::vec![fill; total_pixels];
+    // Each band of the output is filled by its own run of tiles, so bands
+    // decode independently (in parallel with the `parallel` feature).
+    let (band_len, tiles_per_band) = grid.bands();
+    crate::par::try_chunks_mut(&mut output, band_len, |start, band| {
+        let first = start / band_len * tiles_per_band;
+        for row in first..(first + tiles_per_band).min(rows) {
+            grid.blit(row, &decode_row(row)?, band, start);
+        }
+        Ok::<(), Error>(())
+    })?;
     Ok(output)
 }
 
@@ -829,7 +857,7 @@ impl IntTiles<'_> {
     /// the image.
     fn decode<D>(&self, decode: D) -> Result<ImageData>
     where
-        D: Fn(&[u8], usize) -> Result<Vec<i32>>,
+        D: Fn(&[u8], usize) -> Result<Vec<i32>> + Sync + Send,
     {
         let IntTiles {
             fits_data,
