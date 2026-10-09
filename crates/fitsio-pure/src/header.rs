@@ -35,6 +35,27 @@ impl Card {
         str::from_utf8(&self.keyword[..end]).unwrap_or("")
     }
 
+    /// A card setting `keyword` to `value`, without a comment.
+    ///
+    /// The keyword must be 1 to 8 characters of upper-case letters, digits,
+    /// `-` and `_`.
+    pub fn new(keyword: &str, value: Value) -> Result<Card> {
+        let valid = (1..=8).contains(&keyword.len())
+            && keyword
+                .bytes()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-' || b == b'_');
+        if !valid {
+            return Err(Error::InvalidKeyword);
+        }
+        let mut name = [b' '; 8];
+        name[..keyword.len()].copy_from_slice(keyword.as_bytes());
+        Ok(Card {
+            keyword: name,
+            value: Some(value),
+            comment: None,
+        })
+    }
+
     /// Returns `true` if this card is the END keyword.
     pub fn is_end(&self) -> bool {
         &self.keyword == b"END     "
