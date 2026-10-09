@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.21.2
+
+### Added
+
+- **`HCOMPRESS_1` and `PLIO_1` tile-compressed images are read.** Before, both returned `UnsupportedCompression`.
+  - **HCOMPRESS:** a port of cfitsio's `fits_hdecompress.c`, covering quadtree bit-plane decoding, the scale factor, the inverse H-transform and `SMOOTH` interpolation.
+    - Like cfitsio, it computes in 32-bit integers for `ZBITPIX` 8 and 16 and in 64-bit otherwise, wrapping on overflow, so lossy images decode to cfitsio's values.
+    - Quantized floats go through the existing dither path.
+    - `SMOOTH` is read whether it is written as an integer (cfitsio) or a logical (astropy).
+  - **PLIO:** a port of cfitsio's `pl_l2pi` line-list decoder.
+  - **no_std and wasm32:** both decoders are pure Rust in the core, so they work there too. The `hcompress` crate on crates.io needs `std`, so it wasn't used.
+  - **Bounds:** unlike the C, a truncated tile, or one whose dimensions don't match the tile it fills, is a `DecompressionError` rather than a read past the buffer.
+- **Fixtures:** compat-parity gains 16 fixtures in `tests/fixtures/hcompress/`. Each decodes exactly as astropy 8.0.1 and cfitsio decode it:
+  - astropy-written HCOMPRESS images: 8/16/32-bit, lossless and scaled, smoothed, quantized `f32`/`f64`, and odd tile sizes;
+  - astropy-written PLIO images;
+  - refimage 1.0.0-pre6's two HCOMPRESS outputs.
+
+  The same test compresses images with cfitsio (`H`, `HS`, with scales and tile sizes, and `P`) and checks that fitsio-pure decodes them exactly as cfitsio does.
+
 ## 0.21.1
 
 ### Added

@@ -702,12 +702,10 @@ pub fn read_tiled_image(fits_data: &[u8], hdu: &Hdu) -> Result<ImageData> {
     }
 
     let codec = match zcmptype {
-        "RICE_1" | "RICE_ONE" => None,
+        "RICE_1" | "RICE_ONE" | "HCOMPRESS_1" | "PLIO_1" => None,
         "GZIP_1" => Some(ByteCodec::Gzip),
         "GZIP_2" => Some(ByteCodec::ShuffledGzip),
         "NOCOMPRESS" => Some(ByteCodec::Raw),
-        "HCOMPRESS_1" => return Err(Error::UnsupportedCompression("HCOMPRESS_1")),
-        "PLIO_1" => return Err(Error::UnsupportedCompression("PLIO_1")),
         _ => return Err(Error::UnsupportedCompression("unrecognized ZCMPTYPE")),
     };
 
@@ -733,20 +731,33 @@ pub fn read_tiled_image(fits_data: &[u8], hdu: &Hdu) -> Result<ImageData> {
             is_quantized,
         )
     } else {
-        let params = RiceParams::for_bytepix(rice_bytepix)?;
-        decompress_rice_tiles(
+        let args = IntTiles {
             fits_data,
             hdu,
             zbitpix,
             total_pixels,
-            &grid,
+            grid: &grid,
             naxis1,
             naxis2,
-            blocksize,
-            &params,
-            &col_info,
+            col_info: &col_info,
             is_quantized,
-        )
+        };
+        match zcmptype {
+            "HCOMPRESS_1" => {
+                // cfitsio decodes 8- and 16-bit images in 32-bit arithmetic
+                // and everything else in 64-bit.
+                let wide = !matches!(zbitpix, 8 | 16);
+                let smooth = compression_parameter(&hdu.cards, "SMOOTH").unwrap_or(0) != 0;
+                args.decode(|tile, pixels| {
+                    crate::hdecompress::decompress(tile, pixels, smooth, wide)
+                })
+            }
+            "PLIO_1" => args.decode(plio_decompress),
+            _ => {
+                let params = RiceParams::for_bytepix(rice_bytepix)?;
+                args.decode(|tile, pixels| rice_decompress(tile, pixels, blocksize, &params))
+            }
+        }
     }
 }
 
@@ -799,73 +810,204 @@ where
     Ok(output)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn decompress_rice_tiles(
-    fits_data: &[u8],
-    hdu: &Hdu,
+/// A tile-compressed image whose tiles decode to integers: Rice, HCOMPRESS
+/// and PLIO. Quantized float images dequantize those integers.
+struct IntTiles<'a> {
+    fits_data: &'a [u8],
+    hdu: &'a Hdu,
     zbitpix: i64,
     total_pixels: usize,
-    grid: &TileGrid,
+    grid: &'a TileGrid,
     naxis1: usize,
     naxis2: usize,
-    blocksize: usize,
-    params: &RiceParams,
-    col_info: &ColumnInfo,
+    col_info: &'a ColumnInfo,
     is_quantized: bool,
-) -> Result<ImageData> {
-    // Per-tile quantization, read from the tile's own binary-table row.
-    let quant = |row: usize| TileQuant::read(fits_data, hdu, naxis1, row, col_info);
-    let dither = Dither::from_cards(&hdu.cards);
+}
 
-    macro_rules! scatter {
-        ($fill:expr, $conv:expr) => {
-            scatter_tiles(
-                fits_data,
-                hdu,
-                total_pixels,
-                grid,
-                naxis1,
-                naxis2,
-                col_info,
-                $fill,
-                |row, tile_data, _tile_count, pixels_in_tile| {
-                    let vals = rice_decompress(tile_data, pixels_in_tile, blocksize, params)?;
-                    Ok($conv(row, vals))
-                },
-            )?
-        };
-    }
+impl IntTiles<'_> {
+    /// Decode every tile with `decode(tile bytes, pixels in tile)` and build
+    /// the image.
+    fn decode<D>(&self, decode: D) -> Result<ImageData>
+    where
+        D: Fn(&[u8], usize) -> Result<Vec<i32>>,
+    {
+        let IntTiles {
+            fits_data,
+            hdu,
+            zbitpix,
+            total_pixels,
+            grid,
+            naxis1,
+            naxis2,
+            col_info,
+            is_quantized,
+        } = *self;
+        // Per-tile quantization, read from the tile's own binary-table row.
+        let quant = |row: usize| TileQuant::read(fits_data, hdu, naxis1, row, col_info);
+        let dither = Dither::from_cards(&hdu.cards);
 
-    if is_quantized && zbitpix == -32 {
-        Ok(ImageData::F32(scatter!(0.0f32, |row, vals: Vec<i32>| {
-            dither
-                .dequantize(row, &vals, &quant(row))
-                .iter()
-                .map(|&v| v as f32)
-                .collect::<Vec<f32>>()
-        })))
-    } else if is_quantized && zbitpix == -64 {
-        Ok(ImageData::F64(scatter!(0.0f64, |row, vals: Vec<i32>| {
-            dither.dequantize(row, &vals, &quant(row))
-        })))
-    } else {
-        match zbitpix {
-            8 => Ok(ImageData::U8(scatter!(0u8, |_row, vals: Vec<i32>| vals
-                .iter()
-                .map(|&v| v as u8)
-                .collect::<Vec<u8>>()))),
-            16 => Ok(ImageData::I16(scatter!(0i16, |_row, vals: Vec<i32>| vals
-                .iter()
-                .map(|&v| v as i16)
-                .collect::<Vec<i16>>()))),
-            32 => Ok(ImageData::I32(scatter!(0i32, |_row, vals: Vec<i32>| vals))),
-            64 => Ok(ImageData::I64(scatter!(0i64, |_row, vals: Vec<i32>| vals
-                .iter()
-                .map(|&v| v as i64)
-                .collect::<Vec<i64>>()))),
-            other => Err(Error::InvalidBitpix(other)),
+        macro_rules! scatter {
+            ($fill:expr, $conv:expr) => {
+                scatter_tiles(
+                    fits_data,
+                    hdu,
+                    total_pixels,
+                    grid,
+                    naxis1,
+                    naxis2,
+                    col_info,
+                    $fill,
+                    |row, tile_data, tile_count, pixels_in_tile| {
+                        let vals = decode(&tile_data[..tile_count], pixels_in_tile)?;
+                        Ok($conv(row, vals))
+                    },
+                )?
+            };
+        }
+
+        if is_quantized && zbitpix == -32 {
+            Ok(ImageData::F32(scatter!(0.0f32, |row, vals: Vec<i32>| {
+                dither
+                    .dequantize(row, &vals, &quant(row))
+                    .iter()
+                    .map(|&v| v as f32)
+                    .collect::<Vec<f32>>()
+            })))
+        } else if is_quantized && zbitpix == -64 {
+            Ok(ImageData::F64(scatter!(0.0f64, |row, vals: Vec<i32>| {
+                dither.dequantize(row, &vals, &quant(row))
+            })))
+        } else {
+            match zbitpix {
+                8 => Ok(ImageData::U8(scatter!(0u8, |_row, vals: Vec<i32>| vals
+                    .iter()
+                    .map(|&v| v as u8)
+                    .collect::<Vec<u8>>()))),
+                16 => Ok(ImageData::I16(scatter!(0i16, |_row, vals: Vec<i32>| vals
+                    .iter()
+                    .map(|&v| v as i16)
+                    .collect::<Vec<i16>>()))),
+                32 => Ok(ImageData::I32(scatter!(0i32, |_row, vals: Vec<i32>| vals))),
+                64 => Ok(ImageData::I64(scatter!(0i64, |_row, vals: Vec<i32>| vals
+                    .iter()
+                    .map(|&v| v as i64)
+                    .collect::<Vec<i64>>()))),
+                other => Err(Error::InvalidBitpix(other)),
+            }
         }
     }
+}
+
+/// The value of the compression parameter named `name`: the `ZVALn` of the
+/// `ZNAMEn` that names it. A logical is 1 or 0: astropy writes `SMOOTH` as
+/// `T`, cfitsio as `1`.
+fn compression_parameter(cards: &[Card], name: &str) -> Option<i64> {
+    (1..=9).find_map(|n| {
+        let named = card_string_value(cards, &alloc::format!("ZNAME{n}"))?;
+        if !named.eq_ignore_ascii_case(name) {
+            return None;
+        }
+        cards.iter().find_map(|c| match &c.value {
+            Some(Value::Integer(v)) if c.keyword_str() == alloc::format!("ZVAL{n}") => Some(*v),
+            Some(Value::Float(v)) if c.keyword_str() == alloc::format!("ZVAL{n}") => {
+                Some(*v as i64)
+            }
+            Some(Value::Logical(v)) if c.keyword_str() == alloc::format!("ZVAL{n}") => {
+                Some(i64::from(*v))
+            }
+            _ => None,
+        })
+    })
+}
+
+/// cfitsio's `pl_l2pi`: decode an IRAF PLIO line list, big-endian 16-bit
+/// words, into `npix` pixels.
+fn plio_decompress(data: &[u8], npix: usize) -> Result<Vec<i32>> {
+    let bad = || Error::DecompressionError("bad PLIO_1 line list");
+    let ll: Vec<i32> = data
+        .chunks_exact(2)
+        .map(|w| i32::from(i16::from_be_bytes([w[0], w[1]])))
+        .collect();
+    // 1-based, as the line list's own indices are.
+    let word = |i: usize| {
+        i.checked_sub(1)
+            .and_then(|i| ll.get(i).copied())
+            .ok_or_else(bad)
+    };
+    let (lllen, llfirt) = if word(3)? > 0 {
+        (word(3)?, 4)
+    } else {
+        ((word(5)? << 15) + word(4)?, word(2)? + 1)
+    };
+    let mut px = alloc::vec![0i32; npix];
+    if npix == 0 || lllen <= 0 {
+        return Ok(px);
+    }
+    let (llfirt, lllen) = (usize::try_from(llfirt).map_err(|_| bad())?, lllen as usize);
+    let xe = npix as i64;
+    let (mut op, mut x1, mut pv) = (1i64, 1i64, 1i32);
+    let mut set = |at: i64, v: i32| -> Result<()> {
+        let slot = usize::try_from(at - 1)
+            .ok()
+            .and_then(|i| px.get_mut(i))
+            .ok_or_else(bad)?;
+        *slot = v;
+        Ok(())
+    };
+    let mut skip = false;
+    for ip in llfirt..=lllen {
+        if skip {
+            skip = false;
+            continue;
+        }
+        let w = word(ip)?;
+        let (opcode, data) = (w / 4096, w & 4095);
+        match opcode {
+            // A run of zeros (0), of the value (4), or of zeros ending in
+            // the value (5).
+            0 | 4 | 5 => {
+                let x2 = x1 + i64::from(data) - 1;
+                let i1 = x1.max(1);
+                let i2 = x2.min(xe);
+                let np = i2 - i1 + 1;
+                if np > 0 {
+                    let otop = op + np - 1;
+                    for i in op..=otop {
+                        set(i, if opcode == 4 { pv } else { 0 })?;
+                    }
+                    if opcode == 5 && i2 == x2 {
+                        set(otop, pv)?;
+                    }
+                    op = otop + 1;
+                }
+                x1 = x2 + 1;
+            }
+            1 => {
+                pv = (word(ip + 1)? << 12).wrapping_add(data);
+                skip = true;
+            }
+            2 => pv = pv.wrapping_add(data),
+            3 => pv = pv.wrapping_sub(data),
+            // Change the value, then output one pixel of it.
+            6 | 7 => {
+                pv = if opcode == 6 {
+                    pv.wrapping_add(data)
+                } else {
+                    pv.wrapping_sub(data)
+                };
+                if x1 >= 1 && x1 <= xe {
+                    set(op, pv)?;
+                    op += 1;
+                }
+                x1 += 1;
+            }
+            _ => {}
+        }
+        if x1 > xe {
+            break;
+        }
+    }
+    Ok(px)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1446,23 +1588,50 @@ mod tests {
 
     #[test]
     fn test_unsupported_codecs_are_named() {
-        for (zcmptype, msg) in [
-            ("HCOMPRESS_1", "HCOMPRESS_1"),
-            ("PLIO_1", "PLIO_1"),
-            ("RICE_2", "unrecognized ZCMPTYPE"),
+        let (data, hdu) = tiled_hdu(
+            "RICE_2",
+            16,
+            1,
+            &[("COMPRESSED_DATA", "1PB")],
+            &[vec![vec![0, 1]]],
+            None,
+            vec![],
+        );
+        match read_tiled_image(&data, &hdu) {
+            Err(Error::UnsupportedCompression(m)) => assert_eq!(m, "unrecognized ZCMPTYPE"),
+            other => panic!("expected UnsupportedCompression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_corrupt_hcompress_and_plio_tiles_are_errors() {
+        for (zcmptype, tile) in [
+            ("HCOMPRESS_1", vec![0u8, 1]),
+            // Magic and a header claiming a 3x5 tile for a 1-pixel image.
+            (
+                "HCOMPRESS_1",
+                [
+                    &[0xDD, 0x99][..],
+                    &3i32.to_be_bytes(),
+                    &5i32.to_be_bytes(),
+                    &[0; 15],
+                ]
+                .concat(),
+            ),
+            ("PLIO_1", vec![0u8, 1]),
         ] {
             let (data, hdu) = tiled_hdu(
                 zcmptype,
                 16,
                 1,
                 &[("COMPRESSED_DATA", "1PB")],
-                &[vec![vec![0, 1]]],
+                &[vec![tile]],
                 None,
                 vec![],
             );
             match read_tiled_image(&data, &hdu) {
-                Err(Error::UnsupportedCompression(m)) => assert_eq!(m, msg),
-                other => panic!("{zcmptype}: expected UnsupportedCompression, got {other:?}"),
+                Err(Error::DecompressionError(_)) => {}
+                other => panic!("{zcmptype}: expected DecompressionError, got {other:?}"),
             }
         }
     }
