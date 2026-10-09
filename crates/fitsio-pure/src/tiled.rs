@@ -39,6 +39,15 @@ struct ColumnInfo {
     zblank_offset: Option<usize>,
 }
 
+/// A numeric keyword's value, as `f64`.
+fn card_float_value(cards: &[Card], keyword: &str) -> Option<f64> {
+    cards.iter().find_map(|c| match c.value {
+        Some(Value::Float(v)) if c.keyword_str() == keyword => Some(v),
+        Some(Value::Integer(v)) if c.keyword_str() == keyword => Some(v as f64),
+        _ => None,
+    })
+}
+
 fn card_string_value(cards: &[Card], keyword: &str) -> Option<String> {
     cards.iter().find_map(|c| {
         if c.keyword_str() == keyword {
@@ -251,6 +260,9 @@ fn rice_decompress(
     // Initialize bit buffer
     let mut b: u32 = compressed[pos] as u32;
     pos += 1;
+    // Reading past the end yields zero bits, as before, but fails the tile
+    // afterwards, as cfitsio's end-of-stream check does.
+    let mut overrun = false;
     let mut nbits: i32 = 8;
     let mut lastpix = lastpix;
 
@@ -267,7 +279,7 @@ fn rice_decompress(
         nbits -= params.fsbits;
         while nbits < 0 {
             if pos >= compressed.len() {
-                // Pad with zeros if we run out of data
+                overrun = true;
                 b <<= 8;
             } else {
                 b = (b << 8) | (compressed[pos] as u32);
@@ -297,6 +309,7 @@ fn rice_decompress(
                         b = compressed[pos] as u32;
                         pos += 1;
                     } else {
+                        overrun = true;
                         b = 0;
                     }
                     diff |= (b as u64) << k;
@@ -308,6 +321,7 @@ fn rice_decompress(
                         b = compressed[pos] as u32;
                         pos += 1;
                     } else {
+                        overrun = true;
                         b = 0;
                     }
                     diff |= (b >> (-k)) as u64;
@@ -337,6 +351,7 @@ fn rice_decompress(
                         b = compressed[pos] as u32;
                         pos += 1;
                     } else {
+                        overrun = true;
                         b = 0;
                         break;
                     }
@@ -360,6 +375,7 @@ fn rice_decompress(
                         b = (b << 8) | (compressed[pos] as u32);
                         pos += 1;
                     } else {
+                        overrun = true;
                         b <<= 8;
                     }
                     nbits += 8;
@@ -381,6 +397,9 @@ fn rice_decompress(
         }
     }
 
+    if overrun {
+        return Err(Error::DecompressionError("truncated Rice data"));
+    }
     Ok(output)
 }
 
@@ -730,10 +749,13 @@ pub fn read_tiled_image(fits_data: &[u8], hdu: &Hdu) -> Result<ImageData> {
     let col_info = parse_column_layout(&hdu.cards, tfields)?;
     let grid = TileGrid::new(znaxes, ztile);
 
-    // For float types with quantization, we need ZSCALE/ZZERO
+    // A float image is quantized when it has ZSCALE and ZZERO, as per-tile
+    // columns or, when constant, header keywords, unless `ZQUANTIZ = 'NONE'`
+    // says the tiles hold the floats themselves.
     let is_quantized = (zbitpix == -32 || zbitpix == -64)
-        && col_info.zscale_offset.is_some()
-        && col_info.zzero_offset.is_some();
+        && card_string_value(&hdu.cards, "ZQUANTIZ").as_deref() != Some("NONE")
+        && (col_info.zscale_offset.is_some() || card_float_value(&hdu.cards, "ZSCALE").is_some())
+        && (col_info.zzero_offset.is_some() || card_float_value(&hdu.cards, "ZZERO").is_some());
 
     if let Some(codec) = codec {
         decompress_byte_tiles(
@@ -920,6 +942,9 @@ impl IntTiles<'_> {
                     .iter()
                     .map(|&v| v as i64)
                     .collect::<Vec<i64>>()))),
+                -32 | -64 => Err(Error::DecompressionError(
+                    "floating-point tiles coded as integers need ZSCALE/ZZERO",
+                )),
                 other => Err(Error::InvalidBitpix(other)),
             }
         }
@@ -1054,8 +1079,9 @@ fn decompress_byte_tiles(
     let quant = |row: usize| TileQuant::read(fits_data, hdu, naxis1, row, col_info);
     let dither = Dither::from_cards(&hdu.cards);
 
+    // `$conv` returns the tile's pixels, or with `fallible` a `Result` of them.
     macro_rules! scatter {
-        ($fill:expr, $conv:expr) => {
+        (fallible $fill:expr, $conv:expr) => {
             scatter_tiles(
                 fits_data,
                 hdu,
@@ -1067,28 +1093,31 @@ fn decompress_byte_tiles(
                 $fill,
                 |row, tile_data, tile_count, pixels_in_tile| {
                     let raw = codec.decode(&tile_data[..tile_count], pixels_in_tile)?;
-                    Ok($conv(row, raw, pixels_in_tile))
+                    $conv(row, raw, pixels_in_tile)
                 },
             )?
+        };
+        ($fill:expr, $conv:expr) => {
+            scatter!(fallible $fill, |row, raw, n| Ok($conv(row, raw, n)))
         };
     }
 
     if is_quantized && zbitpix == -32 {
         Ok(ImageData::F32(scatter!(
-            0.0f32,
-            |row, raw: Vec<u8>, _n: usize| {
-                dither
-                    .dequantize(row, &bytes_to_i32(&raw), &quant(row))
+            fallible 0.0f32,
+            |row, raw: Vec<u8>, n: usize| -> Result<Vec<f32>> {
+                Ok(dither
+                    .dequantize(row, &quantized_ints(&raw, n)?, &quant(row))
                     .iter()
                     .map(|&v| v as f32)
-                    .collect::<Vec<f32>>()
+                    .collect())
             }
         )))
     } else if is_quantized && zbitpix == -64 {
         Ok(ImageData::F64(scatter!(
-            0.0f64,
-            |row, raw: Vec<u8>, _n: usize| {
-                dither.dequantize(row, &bytes_to_i32(&raw), &quant(row))
+            fallible 0.0f64,
+            |row, raw: Vec<u8>, n: usize| -> Result<Vec<f64>> {
+                Ok(dither.dequantize(row, &quantized_ints(&raw, n)?, &quant(row)))
             }
         )))
     } else {
@@ -1135,6 +1164,20 @@ fn decompress_byte_tiles(
             ))),
             other => Err(Error::InvalidBitpix(other)),
         }
+    }
+}
+
+/// The quantized integers of a gzip or uncompressed float tile of `pixels`
+/// pixels: 32-bit as cfitsio writes them, or 16-bit as some writers do.
+fn quantized_ints(raw: &[u8], pixels: usize) -> Result<Vec<i32>> {
+    if raw.len() == pixels * 4 {
+        Ok(bytes_to_i32(raw))
+    } else if raw.len() == pixels * 2 {
+        Ok(bytes_to_i16(raw).into_iter().map(i32::from).collect())
+    } else {
+        Err(Error::DecompressionError(
+            "quantized tile's byte count doesn't match its pixels",
+        ))
     }
 }
 
@@ -1252,9 +1295,14 @@ impl TileQuant {
             Some(Value::Integer(n)) if c.keyword_str() == "ZBLANK" => Some(n as i32),
             _ => None,
         });
+        // A column per tile, else a header keyword for every tile.
+        let value = |column: Option<usize>, keyword: &str| match column {
+            Some(offset) => read_f64_be(&fits_data[row_start + offset..]),
+            None => card_float_value(&hdu.cards, keyword).unwrap_or(0.0),
+        };
         TileQuant {
-            scale: read_f64_be(&fits_data[row_start + col_info.zscale_offset.unwrap()..]),
-            zero: read_f64_be(&fits_data[row_start + col_info.zzero_offset.unwrap()..]),
+            scale: value(col_info.zscale_offset, "ZSCALE"),
+            zero: value(col_info.zzero_offset, "ZZERO"),
             blank: col_info
                 .zblank_offset
                 .map(|off| read_i32_be(&fits_data[row_start + off..]))

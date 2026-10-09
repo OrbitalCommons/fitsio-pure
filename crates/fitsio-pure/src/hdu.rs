@@ -101,6 +101,46 @@ pub struct FitsData {
     pub hdus: Vec<Hdu>,
 }
 
+impl Hdu {
+    /// Build an HDU from header cards a caller has parsed itself, for
+    /// decoding a data unit with [`crate::image::read_image_data`] and the
+    /// other readers without parsing the whole file with [`parse_fits`].
+    ///
+    /// `header_start` and `data_start` are byte offsets into the buffer the
+    /// readers are given; for a bare data unit `data_start` is 0. The HDU's
+    /// shape and data size come from the cards, as `parse_fits` derives them;
+    /// an extension without `PCOUNT` or `GCOUNT`, as hand-built test headers
+    /// often are, reads them as 0 and 1. An `END` card is optional.
+    pub fn from_cards(cards: Vec<Card>, header_start: usize, data_start: usize) -> Result<Hdu> {
+        let is_primary = is_primary_hdu(&cards);
+        let defaults = [("PCOUNT", 0), ("GCOUNT", 1)]
+            .into_iter()
+            .filter(|(key, _)| !is_primary && card_integer_value(&cards, key).is_none())
+            .map(|(key, value)| Card::new(key, Value::Integer(value)))
+            .collect::<Result<Vec<Card>>>()?;
+        let (info, data_len) = if defaults.is_empty() {
+            (
+                parse_hdu_info(&cards, is_primary)?,
+                compute_data_byte_len(&cards, is_primary)?,
+            )
+        } else {
+            let mut full = cards.clone();
+            full.extend(defaults);
+            (
+                parse_hdu_info(&full, is_primary)?,
+                compute_data_byte_len(&full, is_primary)?,
+            )
+        };
+        Ok(Hdu {
+            info,
+            header_start,
+            data_start,
+            data_len,
+            cards,
+        })
+    }
+}
+
 impl FitsData {
     /// Returns the primary (first) HDU.
     pub fn primary(&self) -> &Hdu {

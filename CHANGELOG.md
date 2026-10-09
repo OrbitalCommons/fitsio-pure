@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.21.6
+
+### Added
+
+- **`hdu::Hdu::from_cards(cards, header_start, data_start)`** builds an HDU from header cards a caller parsed itself, so a data unit can be decoded without `parse_fits` over the whole file. The HDU's shape and data size come from the cards, as `parse_fits` derives them. For a bare data unit, `data_start` is 0. An extension without `PCOUNT`/`GCOUNT`, as hand-built test headers often are, reads them as 0 and 1.
+- **`header::Card::new(keyword, value)`** builds a card, checking the keyword.
+
+### Fixed
+
+Tile-compressed reads now follow these parts of the tiled-image convention, which AstroBurst's tile tests rely on:
+
+- **Constant `ZSCALE`/`ZZERO`:** these given as header keywords, rather than per-tile columns, quantize every tile.
+- **`ZQUANTIZ = 'NONE'`:** marks lossless float tiles. Before, it was ignored when `ZSCALE`/`ZZERO` columns were present, and the floats were wrongly dequantized.
+- **16-bit payloads:** a quantized `GZIP_1`/`GZIP_2`/`NOCOMPRESS` tile may hold 16-bit integers.
+- **Bad byte counts:** a quantized tile whose byte count fits neither 32-bit nor 16-bit integers is an error.
+- **No scale:** a float image whose tiles hold integers but has no `ZSCALE`/`ZZERO` is a clear error, instead of `InvalidBitpix`.
+- **Truncated Rice data:** a Rice tile that ends before its pixels do is an error ("truncated Rice data"), as in cfitsio. Before, the missing bits read as zeros.
+
+### Tests
+
+AstroBurst's 14 tile-decoder unit tests (`compress/tiles.rs`) are ported to fitsio-pure on `Hdu::from_cards`, in `tests/hdu_from_cards.rs`. Each builds a synthetic header from `(key, value)` strings over a bare data unit. They all pass.
+
 ## 0.21.5
 
 ### Added
