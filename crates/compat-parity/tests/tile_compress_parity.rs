@@ -124,10 +124,29 @@ fn cfitsio_writes<T: fitsio::images::WriteImage>(
     pixels: &[T],
 ) {
     let _lock = cfitsio_lock();
+    // `G2` (GZIP_2) and `lossless` aren't cfitsio spec syntax; they are set
+    // through the API instead.
+    let (spec, lossless) = match spec.strip_suffix(" lossless") {
+        Some(spec) => (spec, true),
+        None => (spec, false),
+    };
+    let (spec, gzip2) = match spec.strip_prefix("G2") {
+        Some(rest) => (format!("G{rest}"), true),
+        None => (spec.to_string(), false),
+    };
     let name = format!("{}[compress {spec}]", path.display());
     let mut f = CFits::create(&name).open().unwrap();
     let mut status = 0;
-    unsafe { fitsio::sys::fits_set_dither_seed(f.as_raw(), SEED, &mut status) };
+    unsafe {
+        fitsio::sys::fits_set_dither_seed(f.as_raw(), SEED, &mut status);
+        if gzip2 {
+            fitsio::sys::fits_set_compression_type(f.as_raw(), 22, &mut status);
+        }
+        if lossless {
+            // cfitsio's NO_QUANTIZE.
+            fitsio::sys::fits_set_quantize_level(f.as_raw(), 9999.0, &mut status);
+        }
+    }
     assert_eq!(status, 0);
     let desc = ImageDescription {
         data_type: image_type,
@@ -207,6 +226,12 @@ fn codecs() -> Vec<(&'static str, TileCompression, bool)> {
             false,
         ),
         ("G", TileCompression::gzip().quantize(seed), true),
+        ("G2", TileCompression::gzip2().quantize(seed), true),
+        (
+            "G2 16,8",
+            TileCompression::gzip2().tile_dims(&[16, 8]).quantize(seed),
+            true,
+        ),
         (
             "G 16,8",
             TileCompression::gzip().tile_dims(&[16, 8]).quantize(seed),
@@ -303,6 +328,36 @@ fn f64_tiles_match_cfitsio() {
         let from_c: Vec<f64> = cfitsio_reads(&c);
         let from_p: Vec<f64> = cfitsio_reads(&p);
         assert_eq!(from_c, from_p, "{what}");
+    }
+}
+
+/// Lossless float tiles, as AstroBurst's `write_planes_gzip2_lossless`
+/// writes them, compress alike and read back exactly.
+#[test]
+fn lossless_float_tiles_match_cfitsio() {
+    let f32s = noisy();
+    let f64s: Vec<f64> = f32s.iter().map(|&v| f64::from(v) / 3.0).collect();
+    let dir = tempfile::tempdir().unwrap();
+    for (spec, opts) in [
+        ("G lossless", TileCompression::gzip().lossless()),
+        ("G2 lossless", TileCompression::gzip2().lossless()),
+        (
+            "G2 16,8 lossless",
+            TileCompression::gzip2().lossless().tile_dims(&[16, 8]),
+        ),
+    ] {
+        let (c, p) = (dir.path().join("c.fits"), dir.path().join("p.fits"));
+        let _ = std::fs::remove_file(&c);
+        cfitsio_writes(&c, spec, ImageType::Float, &f32s);
+        pure_writes(&p, &opts, &f32s);
+        assert_same_tiles(&c, &p, true, &format!("f32 [compress {spec}]"));
+        assert_eq!(cfitsio_reads::<Vec<f32>>(&p), f32s, "f32 [compress {spec}]");
+
+        let _ = std::fs::remove_file(&c);
+        cfitsio_writes(&c, spec, ImageType::Double, &f64s);
+        pure_writes(&p, &opts, &f64s);
+        assert_same_tiles(&c, &p, true, &format!("f64 [compress {spec}]"));
+        assert_eq!(cfitsio_reads::<Vec<f64>>(&p), f64s, "f64 [compress {spec}]");
     }
 }
 

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.21.5
+
+### Added
+
+- **`GZIP_2` tile-compressed writes: `TileCompression::gzip2()`.** `GZIP_2` is `GZIP_1` with each tile's bytes shuffled before compressing: all the most significant bytes of its pixels first, then the next.
+  - **Types:** every integer type, quantized `f32`/`f64`, and lossless `f32`/`f64` (`gzip2().lossless()`, which AstroBurst's `write_planes_gzip2_lossless` writes).
+  - **Matches cfitsio:** 8-bit pixels aren't shuffled, and a float tile that can't be quantized falls back to an unshuffled gzip tile, both as in cfitsio.
+  - **Builder:** `.shuffle(bool)` turns shuffling on or off on any gzip builder. `Algorithm` doesn't gain a variant, so the change is additive.
+- **Tests.**
+  - **cfitsio, in CI:** the compat-parity test now compresses with `GZIP_2` through cfitsio (`fits_set_compression_type`) for u8, i16, u16, i32, f32 and f64, with row and 16×8 tiles. Every tile inflates to exactly cfitsio's bytes.
+  - **Lossless, in CI:** a new test does the same for lossless `GZIP_1` and `GZIP_2` `f32`/`f64` (cfitsio's `NO_QUANTIZE`), and cfitsio reads them back exactly.
+  - **astropy 8.0.1, run locally:** astropy decodes all 18 `GZIP_2` combinations of type × tiling as written.
+
 ## 0.21.4
 
 ### Added

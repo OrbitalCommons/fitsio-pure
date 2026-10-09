@@ -165,6 +165,8 @@ pub struct TileCompression {
     algorithm: Algorithm,
     tiling: Tiling,
     gzip_level: u8,
+    /// `GZIP_2`: shuffle each tile's bytes before compressing.
+    shuffle: bool,
     quantize: Option<Quantize>,
 }
 
@@ -180,12 +182,20 @@ impl TileCompression {
         Self::new(Algorithm::Gzip)
     }
 
+    /// `GZIP_2`: [`gzip`](Self::gzip) with each tile's bytes shuffled first,
+    /// all the most significant bytes of its pixels, then the next, and so
+    /// on, which often compresses better.
+    pub fn gzip2() -> Self {
+        Self::gzip().shuffle(true)
+    }
+
     /// `algorithm` with the defaults above.
     pub fn new(algorithm: Algorithm) -> Self {
         TileCompression {
             algorithm,
             tiling: Tiling::Rows(1),
             gzip_level: 1,
+            shuffle: false,
             quantize: Some(Quantize::new()),
         }
     }
@@ -213,7 +223,14 @@ impl TileCompression {
         self
     }
 
-    /// The DEFLATE level for `GZIP_1`, 0 to 9.
+    /// Whether gzip tiles are byte-shuffled, making `GZIP_2` of `GZIP_1`.
+    /// Rice ignores it.
+    pub fn shuffle(mut self, shuffle: bool) -> Self {
+        self.shuffle = shuffle;
+        self
+    }
+
+    /// The DEFLATE level for `GZIP_1` and `GZIP_2`, 0 to 9.
     pub fn gzip_level(mut self, level: u8) -> Self {
         self.gzip_level = level.min(9);
         self
@@ -226,7 +243,7 @@ impl TileCompression {
     }
 
     /// Store floats without quantizing, `ZQUANTIZ = 'NONE'`. Only `GZIP_1`
-    /// supports this.
+    /// and `GZIP_2` support this.
     pub fn lossless(mut self) -> Self {
         self.quantize = None;
         self
@@ -780,6 +797,7 @@ fn header_cards(
     }
     let zcmptype = match opts.algorithm {
         Algorithm::Rice => "RICE_1",
+        Algorithm::Gzip if opts.shuffle => "GZIP_2",
         Algorithm::Gzip => "GZIP_1",
     };
     cards.push(card("ZCMPTYPE", string(zcmptype), "compression algorithm"));
@@ -837,7 +855,7 @@ fn compress_ints<T: Copy>(
                     for v in values {
                         raw.extend_from_slice(&v.to_be_bytes()[4 - bytepix..]);
                     }
-                    crate::gzip::compress(&raw, opts.gzip_level)
+                    gzip_tile(raw, bytepix, opts)
                 }
             };
             Tile {
@@ -928,24 +946,29 @@ fn compress_floats<F: Float>(
     opts: &TileCompression,
 ) -> Result<Tiles> {
     let rects = layout.tiles();
-    let gzip_raw = |values: &[F]| {
+    // Lossless tiles shuffle for GZIP_2; a quantization fallback doesn't,
+    // as in cfitsio.
+    let gzip_raw = |values: &[F], shuffle: bool| {
         let mut raw = Vec::with_capacity(core::mem::size_of_val(values));
         for &v in values {
             v.put_be(&mut raw);
         }
-        crate::gzip::compress(&raw, opts.gzip_level)
+        match shuffle {
+            true => gzip_tile(raw, core::mem::size_of::<F>(), opts),
+            false => crate::gzip::compress(&raw, opts.gzip_level),
+        }
     };
 
     let Some(quantize) = opts.quantize else {
         if opts.algorithm != Algorithm::Gzip {
             return Err(Error::UnsupportedCompression(
-                "lossless floating-point tiles need GZIP_1",
+                "lossless floating-point tiles need GZIP_1 or GZIP_2",
             ));
         }
         let tiles = rects
             .iter()
             .map(|rect| Tile {
-                bytes: gzip_raw(&layout.gather(pixels, rect, |v| v)),
+                bytes: gzip_raw(&layout.gather(pixels, rect, |v| v), true),
                 fallback: false,
                 scale: None,
             })
@@ -997,14 +1020,14 @@ fn compress_floats<F: Float>(
                     Algorithm::Rice => rice_encode(&ints, 4),
                     Algorithm::Gzip => {
                         let raw: Vec<u8> = ints.iter().flat_map(|v| v.to_be_bytes()).collect();
-                        crate::gzip::compress(&raw, opts.gzip_level)
+                        gzip_tile(raw, 4, opts)
                     }
                 },
                 fallback: false,
                 scale: Some((scale, zero)),
             },
             None => Tile {
-                bytes: gzip_raw(&values),
+                bytes: gzip_raw(&values, false),
                 fallback: true,
                 scale: None,
             },
@@ -1019,6 +1042,29 @@ fn compress_floats<F: Float>(
         quantize: Some((Some(quantize.dither), seed)),
         nulls,
     })
+}
+
+/// Gzip one tile of big-endian `width`-byte pixels, shuffled first for
+/// `GZIP_2`.
+fn gzip_tile(raw: Vec<u8>, width: usize, opts: &TileCompression) -> Vec<u8> {
+    let raw = match opts.shuffle && width > 1 {
+        true => shuffle(&raw, width),
+        false => raw,
+    };
+    crate::gzip::compress(&raw, opts.gzip_level)
+}
+
+/// cfitsio's `fits_shuffle_2bytes`/`4bytes`/`8bytes`: byte `j` of pixel `i`
+/// moves to `j * pixels + i`.
+fn shuffle(raw: &[u8], width: usize) -> Vec<u8> {
+    let pixels = raw.len() / width;
+    let mut out = vec![0u8; raw.len()];
+    for (i, pixel) in raw.chunks_exact(width).enumerate() {
+        for (j, &b) in pixel.iter().enumerate() {
+            out[j * pixels + i] = b;
+        }
+    }
+    out
 }
 
 /// C's `NINT`: round half away from zero.
@@ -1518,7 +1564,11 @@ mod tests {
 
     fn options() -> Vec<TileCompression> {
         let mut out = Vec::new();
-        for base in [TileCompression::rice(), TileCompression::gzip()] {
+        for base in [
+            TileCompression::rice(),
+            TileCompression::gzip(),
+            TileCompression::gzip2(),
+        ] {
             out.push(base.clone());
             out.push(base.clone().tile_rows(3));
             out.push(base.tile_dims(&[16, 8]));
@@ -1648,6 +1698,16 @@ mod tests {
             read_back(&file_with(&[31, 7], &f32s, &opts)),
             ImageData::F32(f32s.clone())
         );
+        let opts = TileCompression::gzip2().lossless();
+        assert_eq!(
+            read_back(&file_with(&[31, 7], &f32s, &opts)),
+            ImageData::F32(f32s.clone())
+        );
+        let f64s: Vec<f64> = f32s.iter().map(|&v| f64::from(v) / 3.0).collect();
+        assert_eq!(
+            read_back(&file_with(&[31, 7], &f64s, &opts)),
+            ImageData::F64(f64s)
+        );
         assert!(
             compress_image_hdu(&[31, 7], &f32s, &TileCompression::rice().lossless(), &[]).is_err()
         );
@@ -1662,7 +1722,11 @@ mod tests {
         // Row 3 has NaNs, which come back as NaN.
         pixels[3 * w + 5] = f32::NAN;
         pixels[3 * w + 30] = f32::NAN;
-        for opts in [TileCompression::rice(), TileCompression::gzip()] {
+        for opts in [
+            TileCompression::rice(),
+            TileCompression::gzip(),
+            TileCompression::gzip2(),
+        ] {
             let file = file_with(&[w, h], &pixels, &opts);
             let text = String::from_utf8_lossy(&file[2880..5760]).into_owned();
             assert!(text.contains("GZIP_COMPRESSED_DATA"));
