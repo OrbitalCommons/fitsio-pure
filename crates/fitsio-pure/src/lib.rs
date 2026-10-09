@@ -30,6 +30,7 @@ pub mod error;
 pub mod extension;
 /// Gzip decompression for whole `.fits.gz` files and gzip tile data.
 pub mod gzip;
+mod hdecompress;
 /// Top-level FITS parsing: HDU discovery and metadata extraction.
 pub mod hdu;
 /// Header card parsing and serialization.
@@ -48,7 +49,7 @@ pub mod primary;
 pub mod stream;
 /// ASCII table (TABLE) column parsing and data extraction.
 pub mod table;
-/// Tile-compressed image decompression (RICE_1, GZIP_1).
+/// Tile-compressed image decompression (RICE_1, GZIP_1, GZIP_2, HCOMPRESS_1, PLIO_1).
 pub mod tiled;
 /// FITS header value representation (integer, float, string, logical).
 pub mod value;
