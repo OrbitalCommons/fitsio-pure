@@ -1,5 +1,6 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use super::compression::CompressSpec;
@@ -38,6 +39,9 @@ pub struct FitsFile {
     /// How saves reach the disk: atomically, as cfitsio's level by default,
     /// or also durably on request.
     durability: Durability,
+    /// Whether the bytes differ from the file on disk: set by every change
+    /// and on create, cleared by a save. Saves only happen when it is set.
+    dirty: AtomicBool,
 }
 
 /// Where an open file's bytes are.
@@ -157,6 +161,7 @@ impl FitsFile {
             cached_parse: OnceLock::new(),
             compression: None,
             durability: Durability::Atomic,
+            dirty: AtomicBool::new(false),
         };
         // As cfitsio does, fail to open a file that isn't FITS.
         let mut first = [0u8; 8];
@@ -191,6 +196,7 @@ impl FitsFile {
             cached_parse: OnceLock::new(),
             compression: None,
             durability: Durability::Atomic,
+            dirty: AtomicBool::new(false),
         })
     }
 
@@ -209,6 +215,7 @@ impl FitsFile {
             cached_parse: OnceLock::new(),
             compression: None,
             durability: Durability::Atomic,
+            dirty: AtomicBool::new(false),
         };
         file.parsed()?;
         Ok(file)
@@ -241,6 +248,7 @@ impl FitsFile {
             cached_parse: OnceLock::new(),
             compression: None,
             durability: Durability::Atomic,
+            dirty: AtomicBool::new(false),
         })
     }
 
@@ -436,6 +444,7 @@ impl FitsFile {
     pub fn set_data(&mut self, data: Vec<u8>) {
         self.storage = Storage::Memory(data);
         self.invalidate_cache();
+        self.dirty.store(true, Ordering::Relaxed);
     }
 
     /// The whole file in memory, to change it, reading it in first if needed.
@@ -445,6 +454,7 @@ impl FitsFile {
             self.storage = Storage::Memory(data);
         }
         self.invalidate_cache();
+        self.dirty.store(true, Ordering::Relaxed);
         match &mut self.storage {
             Storage::Memory(data) => Ok(data),
             Storage::Disk { .. } => unreachable!("loaded into memory above"),
@@ -458,6 +468,13 @@ impl FitsFile {
         range: std::ops::Range<usize>,
         bytes: &[u8],
     ) -> Result<()> {
+        // Rewriting bytes with the same bytes, such as setting a key to the
+        // value it has, changes nothing, so the file stays unchanged.
+        if let Storage::Memory(data) = &self.storage {
+            if data.get(range.clone()) == Some(bytes) {
+                return Ok(());
+            }
+        }
         let data = self.bytes_mut()?;
         if range.len() == bytes.len() {
             data[range].copy_from_slice(bytes);
@@ -473,15 +490,21 @@ impl FitsFile {
         Ok(self.bytes_mut()?)
     }
 
-    /// Flush the in-memory data to disk if opened for writing from a path.
-    /// Does nothing for a file from [`FitsFile::create_in_memory`].
+    /// Save the file to disk if it was opened for writing from a path and
+    /// has changed since it was opened or last saved. A new file from
+    /// [`FitsFile::create`] counts as changed until its first save. Does
+    /// nothing for a file from [`FitsFile::create_in_memory`].
     ///
     /// The file is replaced atomically with [`crate::io::write_atomic_with`],
     /// so a failed or interrupted flush leaves the previous file intact. It
     /// isn't fsynced unless the file is [durable](FitsFile::set_durable).
     pub fn flush(&self) -> Result<()> {
-        if self.mode == FileOpenMode::ReadWrite && !self.in_memory {
+        if self.mode == FileOpenMode::ReadWrite
+            && !self.in_memory
+            && self.dirty.load(Ordering::Relaxed)
+        {
             write_atomic_with(&self.filename, &self.saved_bytes()?, self.durability)?;
+            self.dirty.store(false, Ordering::Relaxed);
         }
         Ok(())
     }
@@ -555,13 +578,8 @@ impl FitsFile {
 
 impl Drop for FitsFile {
     fn drop(&mut self) {
-        if let (FileOpenMode::ReadWrite, false, Storage::Memory(_)) =
-            (self.mode, self.in_memory, &self.storage)
-        {
-            if let Ok(bytes) = self.saved_bytes() {
-                let _ = write_atomic_with(&self.filename, &bytes, self.durability);
-            }
-        }
+        // As flush does: only a changed (or new) file is saved.
+        let _ = self.flush();
     }
 }
 
@@ -622,6 +640,8 @@ impl<'a> NewFitsFile<'a> {
                 true => Durability::Durable,
                 false => Durability::Atomic,
             },
+            // Not on disk yet: the first save writes it.
+            dirty: AtomicBool::new(true),
         })
     }
 }
@@ -1306,5 +1326,71 @@ mod tests {
         assert!(!f.durable());
         f.set_durable(true);
         assert!(f.durable());
+    }
+
+    /// Each save renames a new file into place, so the inode tells whether a
+    /// save happened.
+    #[cfg(unix)]
+    fn inode(path: &Path) -> u64 {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path).unwrap().ino()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_changed_files_are_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("saves.fits");
+        let desc = ImageDescription {
+            data_type: ImageType::Short,
+            dimensions: &[4, 3],
+        };
+        let mut f = FitsFile::create(&path)
+            .with_custom_primary(&desc)
+            .open()
+            .unwrap();
+        let hdu = f.primary_hdu().unwrap();
+        hdu.write_key(&mut f, "A", 1i64).unwrap();
+        // A new file is written by its first save, here the explicit flush.
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+        f.flush().unwrap();
+        let flushed = inode(&path);
+        assert_eq!(std::fs::read(&path).unwrap(), f.data().unwrap());
+        // Unchanged since the flush: neither flush nor drop saves again.
+        f.flush().unwrap();
+        drop(f);
+        assert_eq!(inode(&path), flushed);
+
+        // Opened for editing and left unchanged: not rewritten.
+        drop(FitsFile::edit(&path).unwrap());
+        assert_eq!(inode(&path), flushed);
+
+        // Setting a key to the value it already has changes nothing either.
+        let mut f = FitsFile::edit(&path).unwrap();
+        let hdu = f.primary_hdu().unwrap();
+        hdu.write_key(&mut f, "A", 1i64).unwrap();
+        drop(f);
+        assert_eq!(inode(&path), flushed);
+
+        // Changed: saved on drop.
+        let mut f = FitsFile::edit(&path).unwrap();
+        let hdu = f.primary_hdu().unwrap();
+        hdu.write_key(&mut f, "B", 2i64).unwrap();
+        let bytes = f.data().unwrap().to_vec();
+        drop(f);
+        assert_ne!(inode(&path), flushed);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+
+        // Changed after a flush: saved again on drop.
+        let mut f = FitsFile::edit(&path).unwrap();
+        let hdu = f.primary_hdu().unwrap();
+        hdu.write_key(&mut f, "C", 3i64).unwrap();
+        f.flush().unwrap();
+        let after_flush = inode(&path);
+        hdu.write_image(&mut f, &[5i16; 12]).unwrap();
+        let bytes = f.data().unwrap().to_vec();
+        drop(f);
+        assert_ne!(inode(&path), after_flush);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
     }
 }
