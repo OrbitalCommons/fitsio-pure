@@ -11,7 +11,7 @@ pub use std::io::{Cursor, Read, Result, Seek, SeekFrom, Write};
 #[cfg(feature = "std")]
 mod atomic;
 #[cfg(feature = "std")]
-pub use atomic::{write_atomic, AtomicFile};
+pub use atomic::{write_atomic, write_atomic_with, AtomicFile, Durability};
 
 // ── no_std: provide our own implementations ──
 

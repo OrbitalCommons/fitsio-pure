@@ -1,4 +1,16 @@
 //! Compatibility layer mirroring the [`fitsio`](https://crates.io/crates/fitsio) crate API.
+//!
+//! # Durability
+//!
+//! Saves (`flush`, and the save when a writable
+//! [`FitsFile`](crate::compat::FitsFile) is dropped) match
+//! cfitsio's durability: each replaces the file atomically, through a
+//! temporary file and a rename, so other readers never see a partly written
+//! file, but nothing is fsynced. After a power loss or OS crash the latest
+//! save may be lost, as with cfitsio. For saves that also survive a crash,
+//! opt in with [`NewFitsFile::durable`](crate::compat::fitsfile::NewFitsFile::durable) or
+//! [`FitsFile::set_durable`](crate::compat::FitsFile::set_durable), at the cost of two
+//! fsyncs per save.
 #![allow(missing_docs)]
 
 mod compression;
