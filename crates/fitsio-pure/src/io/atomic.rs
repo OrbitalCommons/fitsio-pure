@@ -1,4 +1,4 @@
-//! Atomic, durable file replacement.
+//! Atomic file replacement, durable on request.
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, ErrorKind, Write};
@@ -12,14 +12,31 @@ const MAX_ATTEMPTS: u32 = 64;
 /// Distinguishes temporary names created by one process.
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// How a [`commit`](AtomicFile::commit) reaches the disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Durability {
+    /// Write a temporary file and rename it over the target. Other readers
+    /// see the old file or the complete new one, never a partial write, but
+    /// the new content is only as durable as the OS makes it: after a power
+    /// loss or OS crash the latest commit may be lost. cfitsio gives the same
+    /// guarantee, and it is what compat saves use by default.
+    Atomic,
+    /// [`Atomic`](Self::Atomic), plus `sync_all` of the temporary file before
+    /// the rename and, on Unix, an fsync of the directory after it, so a
+    /// finished commit also survives a crash. Costs two fsyncs per commit.
+    Durable,
+}
+
 /// A file that replaces its target only when [`commit`](Self::commit) is called.
 ///
 /// Bytes are written to a temporary file next to the target, named
-/// `.<target name>.<unique>.tmp`. `commit` flushes it, `sync_all`s it, renames
-/// it over the target, and on Unix fsyncs the directory, so after a crash the
-/// target holds either its old content or the complete new content, never a
-/// partial write. Dropping an `AtomicFile` without committing removes the
-/// temporary file and leaves the target untouched.
+/// `.<target name>.<unique>.tmp`. `commit` flushes it and renames it over the
+/// target, so readers see either the old content or the complete new content,
+/// never a partial write. With [`Durability::Durable`], the default for
+/// [`AtomicFile::new`], it also `sync_all`s the file and on Unix fsyncs the
+/// directory, so after a crash the target holds one or the other too.
+/// Dropping an `AtomicFile` without committing removes the temporary file and
+/// leaves the target untouched.
 ///
 /// On Unix, replacing an existing file keeps its permission bits. A new file
 /// gets the same permissions [`std::fs::write`] would give it. If the target
@@ -40,13 +57,23 @@ pub struct AtomicFile {
     file: Option<BufWriter<File>>,
     temp_path: PathBuf,
     target: PathBuf,
+    durability: Durability,
 }
 
 impl AtomicFile {
-    /// Create a temporary file that will replace `path` on commit.
+    /// Create a temporary file that will replace `path` on commit, durably
+    /// ([`Durability::Durable`]).
     ///
     /// Fails if `path` has no file name or its directory is not writable.
     pub fn new<P: AsRef<Path>>(path: P) -> std::io::Result<Self> {
+        Self::with_durability(path, Durability::Durable)
+    }
+
+    /// [`AtomicFile::new`] with the given [`Durability`].
+    pub fn with_durability<P: AsRef<Path>>(
+        path: P,
+        durability: Durability,
+    ) -> std::io::Result<Self> {
         let target = resolve_target(path.as_ref());
         let name = target
             .file_name()
@@ -79,6 +106,7 @@ impl AtomicFile {
             file: Some(BufWriter::new(file)),
             temp_path,
             target,
+            durability,
         };
         #[cfg(unix)]
         if let Ok(metadata) = std::fs::metadata(&atomic.target) {
@@ -97,21 +125,30 @@ impl AtomicFile {
         &self.temp_path
     }
 
-    /// Flush and `sync_all` the temporary file, rename it over the target,
-    /// and on Unix fsync the target's directory.
+    /// The [`Durability`] of [`commit`](Self::commit).
+    pub fn durability(&self) -> Durability {
+        self.durability
+    }
+
+    /// Flush the temporary file and rename it over the target. With
+    /// [`Durability::Durable`], `sync_all` it first and on Unix fsync the
+    /// target's directory after.
     ///
     /// On error before the rename the target is untouched and the temporary
     /// file is removed.
     pub fn commit(mut self) -> std::io::Result<()> {
         let writer = self.file.take().expect("file is present until commit");
         let file = writer.into_inner().map_err(|e| e.into_error())?;
-        file.sync_all()?;
+        let durable = self.durability == Durability::Durable;
+        if durable {
+            file.sync_all()?;
+        }
         drop(file);
         std::fs::rename(&self.temp_path, &self.target)?;
         // The temporary name is gone; nothing for Drop to clean up.
         self.temp_path = PathBuf::new();
         #[cfg(unix)]
-        {
+        if durable {
             let dir = match self.target.parent() {
                 Some(dir) if !dir.as_os_str().is_empty() => dir,
                 _ => Path::new("."),
@@ -160,12 +197,21 @@ impl Drop for AtomicFile {
     }
 }
 
-/// Atomically replace the file at `path` with `bytes`.
+/// Atomically and durably replace the file at `path` with `bytes`.
 ///
 /// Equivalent to [`AtomicFile::new`], `write_all`, then
 /// [`AtomicFile::commit`]: on any error the existing file is left as it was.
 pub fn write_atomic<P: AsRef<Path>>(path: P, bytes: &[u8]) -> std::io::Result<()> {
-    let mut file = AtomicFile::new(path)?;
+    write_atomic_with(path, bytes, Durability::Durable)
+}
+
+/// [`write_atomic`] with the given [`Durability`].
+pub fn write_atomic_with<P: AsRef<Path>>(
+    path: P,
+    bytes: &[u8],
+    durability: Durability,
+) -> std::io::Result<()> {
+    let mut file = AtomicFile::with_durability(path, durability)?;
     file.write_all(bytes)?;
     file.commit()
 }
@@ -246,6 +292,25 @@ mod tests {
 
         assert_eq!(std::fs::read(&path).unwrap(), b"new content");
         assert_eq!(dir_entries(dir.path()), ["out.fits"]);
+    }
+
+    #[test]
+    fn both_durabilities_write_the_same_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        for durability in [Durability::Atomic, Durability::Durable] {
+            let path = dir.path().join(format!("{durability:?}.fits"));
+            std::fs::write(&path, b"old").unwrap();
+            write_atomic_with(&path, b"new contents", durability).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"new contents");
+            let file = AtomicFile::with_durability(&path, durability).unwrap();
+            assert_eq!(file.durability(), durability);
+        }
+        // Only the targets are left: no temporary files.
+        assert_eq!(dir_entries(dir.path()), ["Atomic.fits", "Durable.fits"]);
+        assert_eq!(
+            AtomicFile::new(dir.path().join("x")).unwrap().durability(),
+            Durability::Durable
+        );
     }
 
     #[test]

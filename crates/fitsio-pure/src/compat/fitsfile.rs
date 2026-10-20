@@ -7,7 +7,7 @@ use super::errors::{Error, Result};
 use super::hdu::FitsHdu;
 use super::images::ImageDescription;
 use super::sys;
-use crate::io::write_atomic;
+use crate::io::{write_atomic_with, Durability};
 
 /// Whether a file is opened for reading or writing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +35,9 @@ pub struct FitsFile {
     /// A `[compress …]` spec given to `create`: images are tile-compressed
     /// when the file is saved.
     compression: Option<CompressSpec>,
+    /// How saves reach the disk: atomically, as cfitsio's level by default,
+    /// or also durably on request.
+    durability: Durability,
 }
 
 /// Where an open file's bytes are.
@@ -55,6 +58,7 @@ pub struct NewFitsFile<'a> {
     path: PathBuf,
     image_description: Option<ImageDescription<'a>>,
     overwrite: bool,
+    durable: bool,
 }
 
 /// Trait for types that can identify an HDU (by index or name).
@@ -152,6 +156,7 @@ impl FitsFile {
             in_memory: false,
             cached_parse: OnceLock::new(),
             compression: None,
+            durability: Durability::Atomic,
         };
         // As cfitsio does, fail to open a file that isn't FITS.
         let mut first = [0u8; 8];
@@ -185,6 +190,7 @@ impl FitsFile {
             in_memory: false,
             cached_parse: OnceLock::new(),
             compression: None,
+            durability: Durability::Atomic,
         })
     }
 
@@ -202,6 +208,7 @@ impl FitsFile {
             in_memory: true,
             cached_parse: OnceLock::new(),
             compression: None,
+            durability: Durability::Atomic,
         };
         file.parsed()?;
         Ok(file)
@@ -233,6 +240,7 @@ impl FitsFile {
             in_memory: true,
             cached_parse: OnceLock::new(),
             compression: None,
+            durability: Durability::Atomic,
         })
     }
 
@@ -276,6 +284,7 @@ impl FitsFile {
             path: path.as_ref().to_path_buf(),
             image_description: None,
             overwrite: false,
+            durable: false,
         }
     }
 
@@ -467,13 +476,33 @@ impl FitsFile {
     /// Flush the in-memory data to disk if opened for writing from a path.
     /// Does nothing for a file from [`FitsFile::create_in_memory`].
     ///
-    /// The file is replaced atomically with [`crate::io::write_atomic`], so a
-    /// failed or interrupted flush leaves the previous file intact.
+    /// The file is replaced atomically with [`crate::io::write_atomic_with`],
+    /// so a failed or interrupted flush leaves the previous file intact. It
+    /// isn't fsynced unless the file is [durable](FitsFile::set_durable).
     pub fn flush(&self) -> Result<()> {
         if self.mode == FileOpenMode::ReadWrite && !self.in_memory {
-            write_atomic(&self.filename, &self.saved_bytes()?)?;
+            write_atomic_with(&self.filename, &self.saved_bytes()?, self.durability)?;
         }
         Ok(())
+    }
+
+    /// Make saves durable, or not.
+    ///
+    /// By default a save is atomic but, like cfitsio's, not fsynced: other
+    /// readers never see a partly written file, but after a power loss or
+    /// OS crash the latest save may be lost. With `durable` set, each save
+    /// also fsyncs the file and its directory ([`Durability::Durable`]),
+    /// which costs two fsyncs per save.
+    pub fn set_durable(&mut self, durable: bool) {
+        self.durability = match durable {
+            true => Durability::Durable,
+            false => Durability::Atomic,
+        };
+    }
+
+    /// Whether saves are durable; see [`FitsFile::set_durable`].
+    pub fn durable(&self) -> bool {
+        self.durability == Durability::Durable
     }
 
     /// The bytes a save writes: the file as it is, or, for a file created
@@ -530,7 +559,7 @@ impl Drop for FitsFile {
             (self.mode, self.in_memory, &self.storage)
         {
             if let Ok(bytes) = self.saved_bytes() {
-                let _ = write_atomic(&self.filename, &bytes);
+                let _ = write_atomic_with(&self.filename, &bytes, self.durability);
             }
         }
     }
@@ -540,6 +569,12 @@ impl<'a> NewFitsFile<'a> {
     /// Set whether to overwrite an existing file.
     pub fn overwrite(mut self) -> Self {
         self.overwrite = true;
+        self
+    }
+
+    /// Make the file's saves durable; see [`FitsFile::set_durable`].
+    pub fn durable(mut self, durable: bool) -> Self {
+        self.durable = durable;
         self
     }
 
@@ -583,6 +618,10 @@ impl<'a> NewFitsFile<'a> {
             in_memory: false,
             cached_parse: OnceLock::new(),
             compression,
+            durability: match self.durable {
+                true => Durability::Durable,
+                false => Durability::Atomic,
+            },
         })
     }
 }
@@ -1237,5 +1276,35 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"old contents");
         f.flush().unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), f.data().unwrap());
+    }
+
+    #[test]
+    fn durable_and_default_saves_write_the_same_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let desc = ImageDescription {
+            data_type: ImageType::Short,
+            dimensions: &[4, 3],
+        };
+        let mut saved = Vec::new();
+        for durable in [false, true] {
+            let path = dir.path().join(format!("{durable}.fits"));
+            let mut f = FitsFile::create(&path)
+                .with_custom_primary(&desc)
+                .durable(durable)
+                .open()
+                .unwrap();
+            assert_eq!(f.durable(), durable);
+            let hdu = f.primary_hdu().unwrap();
+            hdu.write_image(&mut f, &[7i16; 12]).unwrap();
+            hdu.write_key(&mut f, "EXPTIME", 1.5).unwrap();
+            drop(f);
+            saved.push(std::fs::read(&path).unwrap());
+        }
+        assert_eq!(saved[0], saved[1]);
+
+        let mut f = FitsFile::edit(dir.path().join("false.fits")).unwrap();
+        assert!(!f.durable());
+        f.set_durable(true);
+        assert!(f.durable());
     }
 }
