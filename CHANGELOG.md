@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.22.0
+
+### Changed: compat saves are no longer fsynced by default
+
+**Compat saves now match cfitsio's durability.** (#138) A save, whether `flush` or the save when a writable `FitsFile` is dropped, still replaces the file atomically: a temporary file is renamed over the target, so other readers never see a partly written file. It no longer fsyncs the file or its directory.
+
+- **What you lose:** after a power loss or OS crash, the latest save may be lost, as it can be with cfitsio. Before, each save made two fsyncs.
+- **To keep the old behaviour:** use `NewFitsFile::durable(true)` when creating a file, or `FitsFile::set_durable(true)` on any open file. A durable save fsyncs the file and its directory, as every save did before.
+- **The native `io` API is unchanged:** `io::write_atomic` and `io::AtomicFile::new` stay durable.
+- **Speed:** on FastFitsCutter (50 cutouts written through compat), fsync calls drop from 200 to 0 and wall time from 0.27 s to 0.03–0.04 s, the same as its cfitsio build. Output bytes are identical either way.
+
+### Changed
+
+- **Compat saves only files that have changed.** (#139) `flush` and the save on drop write the file only if it changed since it was opened or last saved. A file new from `create` counts as changed until its first save. Before, every drop and every `flush` rewrote the file.
+  - A file opened with `edit` and dropped unchanged is no longer rewritten.
+  - A drop after a `flush` writes again only if something changed after it.
+  - Setting a key to the value it already has is not a change.
+  - `create` still writes the file once, at its first save, and still fails at once for an existing file without `overwrite()`.
+
+### Added
+
+- **`io::Durability`,** with `Atomic` (rename only) and `Durable` (rename plus fsyncs), and `io::write_atomic_with` and `io::AtomicFile::with_durability` to choose one. `AtomicFile::durability()` reports it.
+- **Compat `NewFitsFile::durable(bool)`, `FitsFile::set_durable(bool)` and `FitsFile::durable()`.**
+
 ## 0.21.6
 
 ### Added
