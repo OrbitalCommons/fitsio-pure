@@ -93,6 +93,42 @@ impl FitsHdu {
         FitsHdu::at(file, self.number)
     }
 
+    /// Read `out.len()` bits of bit (`X`) or byte (`B`) column `name` into
+    /// `out`, from bit `first_bit` of row `first_row` on (both 0-based), as
+    /// cfitsio's `ffgcx` (`fits_read_col_bit`) reads them.
+    ///
+    /// Bits are most significant first. A read longer than a row runs on
+    /// through the row's remaining bytes, its padding bits included, then into
+    /// the next row. Reading past the last row is `BAD_ROW_NUM`, and a first
+    /// bit past the row's bytes `BAD_ELEM_NUM`. Read a bit column's packed
+    /// bytes, as `ffgcvb` does, with `read_col::<u8>`.
+    pub fn read_col_bit(
+        &self,
+        file: &FitsFile,
+        name: &str,
+        first_row: usize,
+        first_bit: usize,
+        out: &mut [bool],
+    ) -> Result<()> {
+        super::tables::read_bits(file, self, name, first_row, first_bit, out)
+    }
+
+    /// Write `bits` to bit (`X`) or byte (`B`) column `name` from bit
+    /// `first_bit` of row `first_row` on (both 0-based), as cfitsio's `ffpclx`
+    /// (`fits_write_col_bit`) writes them, laid out as
+    /// [`read_col_bit`](Self::read_col_bit) reads them. Bits not written keep
+    /// their values, and writing past the last row extends the table.
+    pub fn write_col_bit(
+        &self,
+        file: &mut FitsFile,
+        name: &str,
+        first_row: usize,
+        first_bit: usize,
+        bits: &[bool],
+    ) -> Result<()> {
+        super::tables::write_bits(file, self, name, first_row, first_bit, bits)
+    }
+
     /// Append `COMMENT` cards holding `text`, as cfitsio's `ffpcom`
     /// (`fits_write_comment`) does: one card per 72 bytes, with anything but
     /// printable ASCII written as a blank. Empty text writes nothing.
