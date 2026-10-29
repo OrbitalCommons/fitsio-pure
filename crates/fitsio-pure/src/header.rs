@@ -591,6 +591,9 @@ fn write_quoted(field: &mut [u8], s: &str, continued: bool) {
 }
 
 /// Insert a ` / comment` string into a 70-byte value field.
+///
+/// As cfitsio lays it out, the `/` is at column 32 after any value that ends
+/// by column 30, a short string included, and one blank after a longer one.
 fn insert_comment(field: &mut [u8; 70], comment: &str) {
     let content_end = if field[0] == b'\'' {
         let mut i = 1;
@@ -608,6 +611,7 @@ fn insert_comment(field: &mut [u8; 70], comment: &str) {
                 i += 1;
             }
         }
+        .max(20)
     } else {
         20
     };
@@ -1275,6 +1279,31 @@ mod write_tests {
         let buf = format_card(&card);
         let s = core::str::from_utf8(&buf).unwrap();
         assert!(s.contains("/ number of axes"));
+    }
+
+    #[test]
+    fn string_comments_start_at_column_32_as_cfitsio_writes_them() {
+        let card = |value: &str| {
+            let card = Card {
+                keyword: make_keyword("KEY"),
+                value: Some(Value::String(String::from(value))),
+                comment: Some(String::from("c")),
+            };
+            String::from(
+                core::str::from_utf8(&format_card(&card))
+                    .unwrap()
+                    .trim_end(),
+            )
+        };
+        assert_eq!(card("OGIP 1.0"), "KEY     = 'OGIP 1.0'           / c");
+        assert_eq!(
+            card("eighteen chars ok!"),
+            "KEY     = 'eighteen chars ok!' / c"
+        );
+        assert_eq!(
+            card("a value too long for column 30"),
+            "KEY     = 'a value too long for column 30' / c"
+        );
     }
 
     #[test]

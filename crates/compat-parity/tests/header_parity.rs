@@ -676,3 +676,76 @@ fn string_reads_of_any_value_match_ffgkys() {
         assert_eq!(p_value, c_value, "{name}");
     }
 }
+
+/// The header of `path`'s primary HDU, as 80-byte cards up to `END`.
+fn primary_header_cards(path: &std::path::Path) -> Vec<String> {
+    let bytes = std::fs::read(path).unwrap();
+    let mut cards = Vec::new();
+    for card in bytes.chunks(80) {
+        let card = String::from_utf8_lossy(card).into_owned();
+        let end = card.starts_with("END ");
+        cards.push(card);
+        if end {
+            break;
+        }
+    }
+    cards
+}
+
+/// `write_comment`, `write_history` and `write_key_longwarn` write the same
+/// cards as cfitsio's `ffpcom`, `ffphis` and `ffplsw`, byte for byte.
+#[test]
+fn commentary_and_longstrn_cards_match_cfitsio() {
+    use std::ffi::CString;
+    let texts: Vec<String> = vec![
+        "ten chars!".to_string(),
+        "x".repeat(72),
+        "y".repeat(73),
+        (0..300)
+            .map(|i| char::from(b'a' + (i % 26) as u8))
+            .collect(),
+        "   leading and trailing blanks   ".to_string(),
+        "tab\there, é and ~".to_string(),
+        String::new(),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("base.fits");
+    {
+        let mut f = PureFits::create(&base).open().unwrap();
+        let hdu = f.primary_hdu().unwrap();
+        hdu.write_key(&mut f, "OBJECT", "M31").unwrap();
+    }
+    let c_path = dir.path().join("c.fits");
+    let p_path = dir.path().join("p.fits");
+    std::fs::copy(&base, &c_path).unwrap();
+    std::fs::copy(&base, &p_path).unwrap();
+    {
+        let mut c = CFits::edit(&c_path).unwrap();
+        let mut status = 0;
+        unsafe {
+            for text in &texts {
+                let text = CString::new(text.as_str()).unwrap();
+                fitsio::sys::ffpcom(c.as_raw(), text.as_ptr(), &mut status);
+                fitsio::sys::ffphis(c.as_raw(), text.as_ptr(), &mut status);
+            }
+            fitsio::sys::ffplsw(c.as_raw(), &mut status);
+            // A second call finds LONGSTRN and writes nothing.
+            fitsio::sys::ffplsw(c.as_raw(), &mut status);
+        }
+        assert_eq!(status, 0);
+    }
+    {
+        let mut p = PureFits::edit(&p_path).unwrap();
+        let hdu = p.primary_hdu().unwrap();
+        for text in &texts {
+            hdu.write_comment(&mut p, text).unwrap();
+            hdu.write_history(&mut p, text).unwrap();
+        }
+        hdu.write_key_longwarn(&mut p).unwrap();
+        hdu.write_key_longwarn(&mut p).unwrap();
+    }
+    let c_cards = primary_header_cards(&c_path);
+    let p_cards = primary_header_cards(&p_path);
+    assert!(c_cards.len() > 20, "{c_cards:#?}");
+    assert_eq!(p_cards, c_cards);
+}

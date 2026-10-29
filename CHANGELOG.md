@@ -24,6 +24,17 @@ These are also breaking. With them, mwalib's and mwa_hyperdrive's call sites com
 - **`FitsHdu::read_row(file, row)`,** as in `fitsio`.
 - **`hdu::DescribesHdu`** is re-exported where `fitsio` has it.
 
+### Changed
+
+- **A string value's comment starts at column 32, as cfitsio writes it.** (#149) A short string is now padded to column 30 before ` / comment`, as numbers already were: `LONGSTRN= 'OGIP 1.0'           / The HEASARC…`. A longer string is still followed by one blank. Only the layout changes; values and comments read back the same.
+
+### Added
+
+- **`FitsHdu::write_comment` and `FitsHdu::write_history`** append `COMMENT`/`HISTORY` cards as cfitsio's `ffpcom`/`ffphis` do. (#149) Text over 72 bytes is split across cards, any byte that isn't printable ASCII is written as a blank, and empty text writes nothing. marlu's uvfits writer and hyperdrive's FITS writers call these through raw cfitsio.
+- **`FitsHdu::write_key_longwarn`** writes `LONGSTRN = 'OGIP 1.0'` and its four standard `COMMENT` cards, as cfitsio's `ffplsw` does, unless `LONGSTRN` is already there. Long string values themselves already go through `write_key`, which continues them over `CONTINUE` cards as `ffpkls` does.
+
+Comment, history and `LONGSTRN` cards for text of 0, 10, 72, 73 and 300 bytes, blanks, a tab and non-ASCII are byte-identical to cfitsio's.
+
 ## 0.22.1
 
 ### Fixed

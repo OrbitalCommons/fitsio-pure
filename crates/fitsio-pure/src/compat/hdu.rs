@@ -93,6 +93,29 @@ impl FitsHdu {
         FitsHdu::at(file, self.number)
     }
 
+    /// Append `COMMENT` cards holding `text`, as cfitsio's `ffpcom`
+    /// (`fits_write_comment`) does: one card per 72 bytes, with anything but
+    /// printable ASCII written as a blank. Empty text writes nothing.
+    pub fn write_comment(&self, file: &mut FitsFile, text: &str) -> Result<()> {
+        super::headers::write_commentary(file, self, "COMMENT", text)
+    }
+
+    /// Append `HISTORY` cards holding `text`, as cfitsio's `ffphis`
+    /// (`fits_write_history`) does, split as [`write_comment`](Self::write_comment)
+    /// splits it.
+    pub fn write_history(&self, file: &mut FitsFile, text: &str) -> Result<()> {
+        super::headers::write_commentary(file, self, "HISTORY", text)
+    }
+
+    /// Write `LONGSTRN = 'OGIP 1.0'` and the four `COMMENT` cards that
+    /// describe the long-string convention, as cfitsio's `ffplsw`
+    /// (`fits_write_key_longwarn`) does, unless the header has `LONGSTRN`
+    /// already. A string value too long for one card is written with
+    /// `CONTINUE` cards by [`write_key`](Self::write_key), as `ffpkls` writes it.
+    pub fn write_key_longwarn(&self, file: &mut FitsFile) -> Result<()> {
+        super::headers::write_longwarn(file, self)
+    }
+
     /// Return information about the type and shape of data in this HDU as
     /// the file holds it now.
     pub fn info(&self, file: &FitsFile) -> Result<HduInfo> {
