@@ -1,9 +1,13 @@
 use super::errors::{Error, Result};
 use super::fitsfile::FitsFile;
 use super::headers::{ReadsKey, WritesKey};
-use super::images::{ReadsImage, WriteImage};
-use super::tables::{ConcreteColumnDescription, ReadsCol, ReadsColRange, WritesCol};
+use super::images::{ReadImage, WriteImage};
+use super::tables::{ConcreteColumnDescription, ReadsCol, WritesCol};
 use std::ops::Range;
+
+/// Re-exported here too, where `fitsio` has it, so `use fitsio::hdu::DescribesHdu`
+/// ports unchanged.
+pub use super::fitsfile::DescribesHdu;
 
 /// Handle to one HDU within a FITS file.
 ///
@@ -66,7 +70,7 @@ impl FitsHdu {
     }
 
     /// Read a range of rows from a binary table column.
-    pub fn read_col_range<T: ReadsColRange>(
+    pub fn read_col_range<T: ReadsCol>(
         &self,
         file: &FitsFile,
         name: &str,
@@ -76,14 +80,17 @@ impl FitsHdu {
         T::read_col_range(file, self, name, start_row, num_rows)
     }
 
-    /// Write data to a column in a binary table HDU.
-    pub fn write_col<T: WritesCol>(
+    /// Write data to a column in a binary table HDU, growing the table to fit.
+    /// As in `fitsio`, the name may be any `Into<String>`, and the result is
+    /// a fresh handle to the HDU, whose info reflects the write.
+    pub fn write_col<T: WritesCol, N: Into<String>>(
         &self,
         file: &mut FitsFile,
-        name: &str,
+        name: N,
         data: &[T],
-    ) -> Result<()> {
-        T::write_col(file, self, name, data)
+    ) -> Result<FitsHdu> {
+        T::write_col(file, self, &name.into(), data)?;
+        FitsHdu::at(file, self.number)
     }
 
     /// Return information about the type and shape of data in this HDU as
@@ -100,39 +107,43 @@ impl FitsHdu {
 
     /// Read the whole image into a `Vec<T>` or, with the `array` feature, an
     /// `ArrayD<T>`, as `hdu.read_image(&mut f)` does in `fitsio`.
-    pub fn read_image<T: ReadsImage>(&self, file: &FitsFile) -> Result<T> {
-        T::image(file, self)
+    pub fn read_image<T: ReadImage>(&self, file: &FitsFile) -> Result<T> {
+        T::read_image(file, self)
     }
 
     /// Read the pixels `start..end` of the flat, `NAXIS1`-fastest pixel order.
-    pub fn read_section<T: ReadsImage>(
+    pub fn read_section<T: ReadImage>(
         &self,
         file: &FitsFile,
         start: usize,
         end: usize,
     ) -> Result<T> {
-        T::section(file, self, start..end)
+        T::read_section(file, self, start..end)
     }
 
     /// Read `num_rows` rows (runs along `NAXIS1`) from `start_row` on.
-    pub fn read_rows<T: ReadsImage>(
+    pub fn read_rows<T: ReadImage>(
         &self,
         file: &FitsFile,
         start_row: usize,
         num_rows: usize,
     ) -> Result<T> {
-        T::rows(file, self, start_row, num_rows)
+        T::read_rows(file, self, start_row, num_rows)
+    }
+
+    /// Read row `row` (a run along `NAXIS1`).
+    pub fn read_row<T: ReadImage>(&self, file: &FitsFile, row: usize) -> Result<T> {
+        T::read_row(file, self, row)
     }
 
     /// Read a rectangular region, one range per axis, `NAXIS1` first, as
     /// `fitsio` passes them to cfitsio.
-    pub fn read_region<T: ReadsImage>(
+    pub fn read_region<T: ReadImage>(
         &self,
         file: &FitsFile,
         ranges: &[&Range<usize>],
     ) -> Result<T> {
-        let ranges: Vec<Range<usize>> = ranges.iter().map(|&r| r.clone()).collect();
-        T::region(file, self, &ranges)
+        T::read_region(file, self, ranges)
     }
 
     /// Write `data` from the first pixel on, converting it to the image's
@@ -166,7 +177,7 @@ impl FitsHdu {
     }
 
     /// Read the value in row `idx` of table column `name`.
-    pub fn read_cell_value<T: ReadsColRange>(
+    pub fn read_cell_value<T: ReadsCol>(
         &self,
         file: &FitsFile,
         name: &str,
@@ -175,6 +186,36 @@ impl FitsHdu {
         T::read_col_range(file, self, name, idx, 1)?
             .pop()
             .ok_or_else(|| Error::Message(format!("row {idx} of column '{name}' not found")))
+    }
+}
+
+/// Iterator over a file's HDUs, from [`FitsFile::iter`], as in `fitsio`.
+pub struct FitsHduIterator<'a> {
+    file: &'a FitsFile,
+    current: usize,
+    max: usize,
+}
+
+impl<'a> FitsHduIterator<'a> {
+    pub(crate) fn new(file: &'a FitsFile) -> Self {
+        FitsHduIterator {
+            file,
+            current: 0,
+            max: file.num_hdus().unwrap_or(0),
+        }
+    }
+}
+
+impl Iterator for FitsHduIterator<'_> {
+    type Item = FitsHdu;
+
+    fn next(&mut self) -> Option<FitsHdu> {
+        if self.current >= self.max {
+            return None;
+        }
+        let hdu = FitsHdu::at(self.file, self.current).ok()?;
+        self.current += 1;
+        Some(hdu)
     }
 }
 

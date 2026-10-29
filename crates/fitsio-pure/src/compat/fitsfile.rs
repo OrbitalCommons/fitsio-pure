@@ -314,10 +314,10 @@ impl FitsFile {
         Ok(fits_data.len())
     }
 
-    /// Return handles to all HDUs in the file.
-    pub fn iter(&self) -> Result<Vec<FitsHdu>> {
-        let count = self.parsed()?.len();
-        (0..count).map(|i| FitsHdu::at(self, i)).collect()
+    /// Iterate over handles to the file's HDUs, primary first, as `fitsio`
+    /// does, so `f.iter().count()` is the number of HDUs.
+    pub fn iter(&self) -> super::hdu::FitsHduIterator<'_> {
+        super::hdu::FitsHduIterator::new(self)
     }
 
     /// Create a new image extension HDU with the given name and description.
@@ -838,7 +838,7 @@ mod tests {
 
     #[test]
     fn in_memory_file_round_trips_through_bytes() {
-        use crate::compat::images::{ReadImage, WriteImage};
+        use crate::compat::images::{ReadPixels, WriteImage};
 
         let mut f = FitsFile::create_in_memory().unwrap();
         assert_eq!(f.mode(), FileOpenMode::ReadWrite);
@@ -1086,14 +1086,17 @@ mod tests {
         };
         f.create_image("EXT1", &desc).unwrap();
         f.create_image("EXT2", &desc).unwrap();
-        let hdus = f.iter().unwrap();
-        assert_eq!(hdus.len(), 3);
+        assert_eq!(f.iter().count(), 3);
+        let names: Vec<String> = f.iter().map(|hdu| hdu.name(&f).unwrap()).collect();
+        assert_eq!(names, ["", "EXT1", "EXT2"]);
+        let numbers: Vec<usize> = f.iter().map(|hdu| hdu.number).collect();
+        assert_eq!(numbers, [0, 1, 2]);
     }
 
     #[test]
     fn custom_primary_holds_the_image() {
         use crate::compat::hdu::HduInfo;
-        use crate::compat::images::{ReadImage, WriteImage};
+        use crate::compat::images::{ReadPixels, WriteImage};
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.fits");
@@ -1131,7 +1134,7 @@ mod tests {
 
     #[test]
     fn custom_primary_unsigned_keeps_bzero() {
-        use crate::compat::images::{ReadImage, WriteImage};
+        use crate::compat::images::{ReadPixels, WriteImage};
 
         let desc = ImageDescription {
             data_type: ImageType::UnsignedShort,
@@ -1151,7 +1154,7 @@ mod tests {
 
     #[test]
     fn custom_primary_comes_before_extensions() {
-        use crate::compat::images::{ReadImage, WriteImage};
+        use crate::compat::images::{ReadPixels, WriteImage};
 
         let primary = ImageDescription {
             data_type: ImageType::Short,

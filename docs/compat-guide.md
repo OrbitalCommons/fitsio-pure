@@ -64,13 +64,14 @@ As in `fitsio`, `ImageDescription` borrows its `dimensions` (`&[100, 100]`, or `
 
 ```rust
 use fitsio_pure::compat::fitsfile::FitsFile;
-use fitsio_pure::compat::images::ReadImage;
 
 let fitsfile = FitsFile::open("input.fits").unwrap();
 let hdu = fitsfile.hdu("SCI").unwrap();
 
-let pixels: Vec<f32> = f32::read_image(&fitsfile, &hdu).unwrap();
+let pixels: Vec<f32> = hdu.read_image(&fitsfile).unwrap();
 ```
+
+As in `fitsio`, `ReadImage` is implemented by what a read returns, `Vec<T>` (or `ArrayD<T>` with the `array` feature), so generic code bounds on `T: ReadImage`. The per-pixel reads, such as `f32::read_image(&fitsfile, &hdu)`, are on the `ReadPixels` trait.
 
 ### Reading and writing header keywords
 

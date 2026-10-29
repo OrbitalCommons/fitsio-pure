@@ -140,8 +140,11 @@ fn validate_hdu_index(file: &FitsFile, hdu: &FitsHdu) -> Result<usize> {
     Ok(hdu.number)
 }
 
-/// Trait for types that can read image pixel data from a FITS file.
-pub trait ReadImage: Sized {
+/// Pixel types an image can be read as: `u8`, `i8`, `i16`, `u16`, `i32`,
+/// `u32`, `i64`, `u64`, `f32` and `f64`. Each read returns the pixels in a
+/// `Vec`, flat and `NAXIS1`-fastest; [`ReadImage`] is the `fitsio`-shaped
+/// trait over these.
+pub trait ReadPixels: Sized {
     fn read_image(file: &FitsFile, hdu: &FitsHdu) -> Result<Vec<Self>>;
     fn read_section(
         file: &FitsFile,
@@ -161,42 +164,77 @@ pub trait ReadImage: Sized {
     ) -> Result<Vec<Self>>;
 }
 
-/// The output of an image read through [`FitsHdu`]'s methods: `Vec<T>` or,
-/// with the `array` feature, `ndarray::ArrayD<T>`, as in `fitsio`. This is
-/// what lets `let pixels: Vec<f32> = hdu.read_image(&mut f)?` pick its type
-/// from the binding.
+/// What an image read returns, as `fitsio`'s `ReadImage` is: `Vec<T>` or,
+/// with the `array` feature, `ndarray::ArrayD<T>`, for any [`ReadPixels`]
+/// type `T`. This is what lets `let pixels: Vec<f32> = hdu.read_image(&mut f)?`
+/// pick its type from the binding, and what generic code bounds on:
 ///
-/// Its methods are named apart from [`ReadImage`]'s so the two traits can be
-/// in scope together without making `ArrayD::<f32>::read_image(…)` ambiguous.
-pub trait ReadsImage: Sized {
-    fn image(file: &FitsFile, hdu: &FitsHdu) -> Result<Self>;
-    fn section(file: &FitsFile, hdu: &FitsHdu, range: std::ops::Range<usize>) -> Result<Self>;
-    fn rows(file: &FitsFile, hdu: &FitsHdu, start_row: usize, num_rows: usize) -> Result<Self>;
-    fn region(file: &FitsFile, hdu: &FitsHdu, ranges: &[std::ops::Range<usize>]) -> Result<Self>;
+/// ```
+/// use fitsio_pure::compat::errors::Result;
+/// use fitsio_pure::compat::hdu::FitsHdu;
+/// use fitsio_pure::compat::images::ReadImage;
+/// use fitsio_pure::compat::FitsFile;
+///
+/// fn image<T: ReadImage>(f: &mut FitsFile, hdu: &FitsHdu) -> Result<T> {
+///     hdu.read_image(f)
+/// }
+/// ```
+pub trait ReadImage: Sized {
+    /// The whole image.
+    fn read_image(file: &FitsFile, hdu: &FitsHdu) -> Result<Self>;
+    /// The pixels `range` covers in the flat, `NAXIS1`-fastest order.
+    fn read_section(file: &FitsFile, hdu: &FitsHdu, range: std::ops::Range<usize>) -> Result<Self>;
+    /// `num_rows` rows (runs along `NAXIS1`) from `start_row` on.
+    fn read_rows(file: &FitsFile, hdu: &FitsHdu, start_row: usize, num_rows: usize)
+        -> Result<Self>;
+    /// Row `row`.
+    fn read_row(file: &FitsFile, hdu: &FitsHdu, row: usize) -> Result<Self> {
+        Self::read_rows(file, hdu, row, 1)
+    }
+    /// A rectangular region, one range per axis, `NAXIS1` first.
+    fn read_region(
+        file: &FitsFile,
+        hdu: &FitsHdu,
+        ranges: &[&std::ops::Range<usize>],
+    ) -> Result<Self>;
 }
 
-impl<T: ReadImage> ReadsImage for Vec<T> {
-    fn image(file: &FitsFile, hdu: &FitsHdu) -> Result<Self> {
+/// The ranges `fitsio` passes by reference, owned.
+pub(crate) fn owned_ranges(ranges: &[&std::ops::Range<usize>]) -> Vec<std::ops::Range<usize>> {
+    ranges.iter().map(|&r| r.clone()).collect()
+}
+
+impl<T: ReadPixels> ReadImage for Vec<T> {
+    fn read_image(file: &FitsFile, hdu: &FitsHdu) -> Result<Self> {
         T::read_image(file, hdu)
     }
 
-    fn section(file: &FitsFile, hdu: &FitsHdu, range: std::ops::Range<usize>) -> Result<Self> {
+    fn read_section(file: &FitsFile, hdu: &FitsHdu, range: std::ops::Range<usize>) -> Result<Self> {
         T::read_section(file, hdu, range)
     }
 
-    fn rows(file: &FitsFile, hdu: &FitsHdu, start_row: usize, num_rows: usize) -> Result<Self> {
+    fn read_rows(
+        file: &FitsFile,
+        hdu: &FitsHdu,
+        start_row: usize,
+        num_rows: usize,
+    ) -> Result<Self> {
         T::read_rows(file, hdu, start_row, num_rows)
     }
 
-    fn region(file: &FitsFile, hdu: &FitsHdu, ranges: &[std::ops::Range<usize>]) -> Result<Self> {
-        T::read_region(file, hdu, ranges)
+    fn read_region(
+        file: &FitsFile,
+        hdu: &FitsHdu,
+        ranges: &[&std::ops::Range<usize>],
+    ) -> Result<Self> {
+        T::read_region(file, hdu, &owned_ranges(ranges))
     }
 }
 
 /// Image reads into a caller-owned buffer, as cfitsio's `ffgpv` reads them.
 ///
 /// Values are physical, with `BSCALE`/`BZERO` applied, exactly as
-/// [`ReadImage::read_image`] returns them. An uncompressed image is read from
+/// [`ReadPixels::read_image`] returns them. An uncompressed image is read from
 /// the file a block at a time straight into the buffer, without allocating;
 /// a tile-compressed one is decompressed from its own data unit.
 pub trait ReadImageIntoBuffer: Sized {
@@ -215,7 +253,7 @@ pub trait ReadImageIntoBuffer: Sized {
         buf: &mut [Self],
     ) -> Result<()>
     where
-        Self: ReadImage + Copy,
+        Self: ReadPixels + Copy,
     {
         let pixels = Self::read_section(file, hdu, first..first + buf.len())?;
         buf.copy_from_slice(&pixels);
@@ -595,12 +633,12 @@ macro_rules! impl_from_physical_float {
 
 impl_from_physical_float!(f32, f64);
 
-/// Implement `ReadImage` for a type: every read returns physical values
+/// Implement `ReadPixels` for a type: every read returns physical values
 /// (`BSCALE`/`BZERO` applied) and fails where a value does not fit, matching
 /// cfitsio rather than wrapping or returning stored values.
 macro_rules! impl_read_image {
     ($($t:ty),*) => {$(
-        impl ReadImage for $t {
+        impl ReadPixels for $t {
             fn read_image(file: &FitsFile, hdu: &FitsHdu) -> Result<Vec<Self>> {
                 read_physical(
                     file,
@@ -1041,7 +1079,7 @@ mod tests {
 
     fn roundtrip_unsigned<T>(data_type: ImageType, pixels: Vec<T>)
     where
-        T: ReadImage + WriteImage + Clone + PartialEq + std::fmt::Debug,
+        T: ReadPixels + WriteImage + Clone + PartialEq + std::fmt::Debug,
     {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("img.fits");
@@ -1054,7 +1092,7 @@ mod tests {
         let hdu = f.create_image("SCI", &desc).unwrap();
         <T as WriteImage>::write_image(&mut f, &hdu, &pixels).unwrap();
 
-        let read_back = <T as ReadImage>::read_image(&f, &hdu).unwrap();
+        let read_back = <T as ReadPixels>::read_image(&f, &hdu).unwrap();
         assert_eq!(read_back, pixels);
     }
 
@@ -1296,7 +1334,7 @@ mod tests {
     /// in part, on a scaled image.
     fn check_scaled_into_buffer<T>(f: &FitsFile, hdu: &FitsHdu)
     where
-        T: ReadImage + ReadImageIntoBuffer + Copy + Default + PartialEq + std::fmt::Debug,
+        T: ReadPixels + ReadImageIntoBuffer + Copy + Default + PartialEq + std::fmt::Debug,
     {
         let want = T::read_image(f, hdu).unwrap();
         assert_eq!(want.len(), 12);

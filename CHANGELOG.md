@@ -12,6 +12,18 @@ These are breaking changes, so code written against `fitsio` compiles unchanged.
 - **`ColumnDataType` has all 15 of `fitsio`'s types,** adding `Bit`, `SignedByte`, `UnsignedShort`, `UnsignedLong`, `LongLong`, `UnsignedLongLong` and `Text`. The unsigned types and `SignedByte` are written as cfitsio writes them: the signed type with a `TZEROn` offset (`B` with -128 for `SignedByte`). `Bit` writes an `X` column.
 - **`FitsFile::create_table(extname: impl Into<String>, &[ConcreteColumnDescription])`,** as in `fitsio`, replacing `(&str, &[bintable::BinaryColumnDescriptor])`. `fitsio`'s documented `create_table` example compiles unchanged. A table made from the same descriptions has the same `TFORMn`/`TZEROn` as `fitsio`'s.
 
+### Changed: compat API shapes match `fitsio` 0.21
+
+These are also breaking. With them, mwalib's and mwa_hyperdrive's call sites compile unchanged. (#148)
+
+- **`images::ReadImage` is `fitsio`'s container trait,** implemented for `Vec<T>` and, with `array`, `ArrayD<T>`. Its methods are `read_image`, `read_section`, `read_rows`, `read_row` and `read_region` (which takes `&[&Range<usize>]`). Generic code such as `fn image<T: ReadImage>(…) -> Result<T> { hdu.read_image(f) }` now compiles. It replaces `ReadsImage` and its `image`/`section`/`rows`/`region` methods.
+- **The per-pixel trait is now `ReadPixels`** (it was `ReadImage`): `f32::read_image(&f, &hdu)` needs `use compat::images::ReadPixels`. `ArrayD<T>` reads now return the array itself, not a one-element `Vec` of it.
+- **`FitsFile::iter()` returns an iterator,** `hdu::FitsHduIterator`, of `FitsHdu`, as in `fitsio`, so `f.iter().count()` is the number of HDUs. It returned `Result<Vec<FitsHdu>>`.
+- **`FitsHdu::write_col` takes the name as any `Into<String>`** and returns a fresh `FitsHdu` whose info reflects the write, as in `fitsio`. `hdu.write_col(&mut f, format!("FLUX{n}"), &data)?` now compiles.
+- **`FitsHdu::read_cell_value` and `read_col_range` are bounded on `T: ReadsCol`,** as in `fitsio`. `ReadsCol` now has `ReadsColRange` as a supertrait, so generic code bounded on `ReadsCol` can read cells.
+- **`FitsHdu::read_row(file, row)`,** as in `fitsio`.
+- **`hdu::DescribesHdu`** is re-exported where `fitsio` has it.
+
 ## 0.22.1
 
 ### Fixed
