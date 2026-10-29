@@ -127,14 +127,80 @@ impl FromCardValue for bool {
     }
 }
 
-impl FromCardValue for String {
-    fn from_card_value(value: crate::value::Value) -> Result<Self> {
-        match value {
-            crate::value::Value::String(s) => Ok(s.trim().to_string()),
-            _ => Err(Error::Message(format!(
-                "keyword value {value:?} is not a string"
-            ))),
+/// The value and comment of `name` as text, as cfitsio's `ffgkys` returns
+/// it: a string unquoted, keeping leading blanks, which FITS counts as
+/// significant, with any `CONTINUE` cards merged; and any other
+/// value as it is written on the card, so `1.5E+08` stays `1.5E+08` and a
+/// logical is `T` or `F`.
+fn read_string_key(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<(String, Option<String>)> {
+    let (value, comment) = find_card(file, hdu, name)?;
+    match value {
+        crate::value::Value::String(s) => Ok((s.trim_end().to_string(), comment)),
+        _ => Ok((written_value(file, hdu, name.trim())?, comment)),
+    }
+}
+
+/// The value of the first card named `name` with a value, as written on the
+/// card.
+fn written_value(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<String> {
+    let core_hdu = file
+        .parsed()?
+        .get(hdu.number)
+        .ok_or(Error::status(sys::END_OF_FILE))?;
+    let mut header = vec![0u8; core_hdu.data_start - core_hdu.header_start];
+    file.read_at(core_hdu.header_start, &mut header)?;
+    for card in header.chunks_exact(crate::CARD_SIZE) {
+        let keyword = core::str::from_utf8(&card[..8]).unwrap_or("").trim_end();
+        if keyword.eq_ignore_ascii_case(name) && &card[8..10] == b"= " {
+            if let Some(text) = value_token(&card[10..]) {
+                return Ok(text);
+            }
         }
+    }
+    let name = crate::header::strip_hierarch(name);
+    for card in &core_hdu.cards {
+        if let Some((key, _)) = crate::header::hierarch_entry(card) {
+            if key.eq_ignore_ascii_case(name) {
+                let text = card.comment.as_deref().unwrap_or("");
+                let after_eq = text.find('=').map_or("", |eq| &text[eq + 1..]);
+                if let Some(text) = value_token(after_eq.as_bytes()) {
+                    return Ok(text);
+                }
+            }
+        }
+    }
+    Err(Error::status(sys::KEY_NO_EXIST))
+}
+
+/// The non-string value at the start of a card's value field, as cfitsio's
+/// `ffpsvc` takes it: a complex value through its `)`, anything else up to
+/// the next blank or `/`. `None` for an empty field.
+fn value_token(field: &[u8]) -> Option<String> {
+    let start = field.iter().position(|&b| b != b' ')?;
+    let field = &field[start..];
+    let end = if field[0] == b'/' {
+        return None;
+    } else if field[0] == b'(' {
+        field.iter().position(|&b| b == b')')? + 1
+    } else {
+        field
+            .iter()
+            .position(|&b| b == b' ' || b == b'/')
+            .unwrap_or(field.len())
+    };
+    Some(String::from_utf8_lossy(&field[..end]).into_owned())
+}
+
+impl ReadsKey for String {
+    fn read_key(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<Self> {
+        Ok(read_string_key(file, hdu, name)?.0)
+    }
+}
+
+impl ReadsKey for HeaderValue<String> {
+    fn read_key(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<Self> {
+        let (value, comment) = read_string_key(file, hdu, name)?;
+        Ok(HeaderValue { value, comment })
     }
 }
 
@@ -159,7 +225,7 @@ macro_rules! reads_key_impl {
     )*};
 }
 
-reads_key_impl!(i32, i64, f32, f64, bool, String);
+reads_key_impl!(i32, i64, f32, f64, bool);
 
 fn make_keyword(name: &str) -> [u8; 8] {
     let mut kw = [b' '; 8];
@@ -738,5 +804,43 @@ mod hierarch_tests {
         String::write_key(&mut f, &hdu, "OBSERVER", &"Edwin".to_string()).unwrap();
         assert_eq!(String::read_key(&f, &hdu, "OBSERVER").unwrap(), "Edwin");
         assert!(header_cards(f).is_empty());
+    }
+
+    #[test]
+    fn string_reads_return_any_value_as_written() {
+        let mut header = Vec::new();
+        for card in [
+            "SIMPLE  =                    T",
+            "BITPIX  =                    8",
+            "NAXIS   =                    0",
+            "FREQCENT=               154.24 / [MHz] centre frequency",
+            "BIGFLT  =              1.5E+08",
+            "LOGIC   =                    F",
+            "CMPLX   = (1.5, -2.0) / complex",
+            "FREE    = 42/no blank before the comment",
+            "HA      = ' 02:00:36.46'",
+            "HIERARCH ESO DET DIT = 1.5E+01 / exposure",
+            "END",
+        ] {
+            header.extend_from_slice(format!("{card:<80}").as_bytes());
+        }
+        header.resize(2880, b' ');
+        let f = FitsFile::from_bytes(header).unwrap();
+        let hdu = f.primary_hdu().unwrap();
+        for (name, want) in [
+            ("FREQCENT", "154.24"),
+            ("BIGFLT", "1.5E+08"),
+            ("LOGIC", "F"),
+            ("CMPLX", "(1.5, -2.0)"),
+            ("FREE", "42"),
+            ("HA", " 02:00:36.46"),
+            ("ESO DET DIT", "1.5E+01"),
+            ("naxis", "0"),
+        ] {
+            assert_eq!(String::read_key(&f, &hdu, name).unwrap(), want, "{name}");
+        }
+        let freq: HeaderValue<String> = hdu.read_key(&f, "FREQCENT").unwrap();
+        assert_eq!(freq.comment.as_deref(), Some("[MHz] centre frequency"));
+        assert_eq!(i64::read_key(&f, &hdu, "FREE").unwrap(), 42);
     }
 }

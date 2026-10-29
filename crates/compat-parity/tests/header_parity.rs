@@ -605,3 +605,74 @@ fn keyword_names_are_normalised_as_cfitsio_does() {
         assert_eq!(p_value, c_value, "{name:?}");
     }
 }
+
+/// A primary HDU holding `cards`, each padded to 80 bytes, with no data.
+fn header_only_file(cards: &[&str]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let fixed = [
+        "SIMPLE  =                    T",
+        "BITPIX  =                    8",
+        "NAXIS   =                    0",
+    ];
+    for card in fixed.iter().chain(cards).chain(&["END"]) {
+        assert!(card.len() <= 80, "{card:?}");
+        bytes.extend_from_slice(format!("{card:<80}").as_bytes());
+    }
+    bytes.resize(bytes.len().div_ceil(2880) * 2880, b' ');
+    bytes
+}
+
+/// `read_key::<String>` returns any value as text, as `ffgkys` does: numbers
+/// and logicals as written on the card, strings unquoted.
+#[test]
+fn string_reads_of_any_value_match_ffgkys() {
+    let cards = [
+        "FREQCENT=               154.24 / [MHz] Centre frequency",
+        "FINECHAN=                   10 / [kHz] Fine channel width",
+        "GPSTIME =           1101503312 / [s] GPS time",
+        "BIGFLT  =              1.5E+08",
+        "NEGFLT  =             -0.00125D-3",
+        "PLUSINT =                  +42",
+        "LOGICT  =                    T / a logical",
+        "LOGICF  =                    F",
+        "CMPLX   = (1.5, -2.0) / a complex value",
+        "FREE    = 42/no blank before the comment",
+        "LEFT    = 7",
+        "QUOTED  = 'a ''quoted'' string' / comment",
+        "HA      = ' 02:00:36.46'        / leading blanks are significant",
+        "HIERARCH ESO DET DIT = 1.5E+01 / exposure",
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("values.fits");
+    std::fs::write(&path, header_only_file(&cards)).unwrap();
+
+    let mut c = CFits::open(&path).unwrap();
+    let c_hdu = c.primary_hdu().unwrap();
+    let p = PureFits::open(&path).unwrap();
+    let p_hdu = p.primary_hdu().unwrap();
+    for name in [
+        "FREQCENT",
+        "FINECHAN",
+        "GPSTIME",
+        "BIGFLT",
+        "NEGFLT",
+        "PLUSINT",
+        "LOGICT",
+        "LOGICF",
+        "CMPLX",
+        "FREE",
+        "LEFT",
+        "QUOTED",
+        "HA",
+        "ESO DET DIT",
+        "BITPIX",
+        "NAXIS",
+        "simple",
+    ] {
+        let c_value: String = c_hdu.read_key(&mut c, name).unwrap();
+        let p_value: String = p_hdu
+            .read_key(&p, name)
+            .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        assert_eq!(p_value, c_value, "{name}");
+    }
+}
