@@ -317,16 +317,7 @@ fn read_into<T: FromPhysical>(
     let scale = Scale::new(bscale, bzero);
     match &core.info {
         crate::hdu::HduInfo::Primary { bitpix, .. } | crate::hdu::HduInfo::Image { bitpix, .. } => {
-            let bytes_per_pixel = crate::image::bytes_per_pixel(*bitpix)?;
-            let mut raw = [0u8; 16 * 1024];
-            let block = raw.len() / bytes_per_pixel;
-            for (i, out) in buf.chunks_mut(block).enumerate() {
-                let raw = &mut raw[..out.len() * bytes_per_pixel];
-                let pixel = first + i * block;
-                file.read_at(core.data_start + pixel * bytes_per_pixel, raw)?;
-                scale.apply_raw(raw, *bitpix, out)?;
-            }
-            Ok(())
+            read_run(file, core.data_start, *bitpix, first, scale, buf)
         }
         _ => {
             let (bytes, local) = file.hdu_data(core)?;
@@ -334,6 +325,154 @@ fn read_into<T: FromPhysical>(
             scale.apply_data(&data, first, buf)
         }
     }
+}
+
+/// Fill `out` with `out.len()` contiguous stored values of `bitpix` from
+/// value `first` of the data unit at `data_start`, scaled by `scale`. They
+/// are read from the file a block at a time straight into `out`.
+fn read_run<T: FromPhysical>(
+    file: &FitsFile,
+    data_start: usize,
+    bitpix: i64,
+    first: usize,
+    scale: Scale,
+    out: &mut [T],
+) -> Result<()> {
+    let bytes_per_value = crate::image::bytes_per_pixel(bitpix)?;
+    let mut raw = [0u8; 16 * 1024];
+    let block = raw.len() / bytes_per_value;
+    for (i, out) in out.chunks_mut(block).enumerate() {
+        let raw = &mut raw[..out.len() * bytes_per_value];
+        let value = first + i * block;
+        file.read_at(data_start + value * bytes_per_value, raw)?;
+        scale.apply_raw(raw, bitpix, out)?;
+    }
+    Ok(())
+}
+
+/// Reads of random-groups (UVFITS) HDUs, as cfitsio's `ffggp*` and `ffgpv*`
+/// read them, into any numeric type.
+///
+/// Each read starts at a 0-based `group` and a 0-based element within its
+/// parameters or data array, and may run on through later groups, so the
+/// parameters of many groups can be read in one call. Only the values asked
+/// for are read from the file.
+pub trait ReadGroups: Sized {
+    /// Fill `out` with parameters from parameter `first` of `group` on, as
+    /// `ffggpe` reads them: stored values, with neither `PSCALn`/`PZEROn` nor
+    /// `BSCALE`/`BZERO` applied. Past the last parameter of a group come the
+    /// next group's. A `first` past `PCOUNT` is `BAD_ELEM_NUM`, and a read
+    /// past the last group `BAD_ROW_NUM`.
+    fn read_group_params(
+        file: &FitsFile,
+        hdu: &FitsHdu,
+        group: usize,
+        first: usize,
+        out: &mut [Self],
+    ) -> Result<()>;
+
+    /// Fill `out` with data-array values from element `first` of `group` on,
+    /// as `ffgpve` reads them: with `BSCALE`/`BZERO` applied. Past the end
+    /// of a group's data array comes the next group's. A `first` past the
+    /// data array is `BAD_ELEM_NUM`, and a read past the last group
+    /// `BAD_ROW_NUM`.
+    fn read_group_data(
+        file: &FitsFile,
+        hdu: &FitsHdu,
+        group: usize,
+        first: usize,
+        out: &mut [Self],
+    ) -> Result<()>;
+}
+
+macro_rules! impl_read_groups {
+    ($($t:ty),*) => {$(
+        impl ReadGroups for $t {
+            fn read_group_params(
+                file: &FitsFile,
+                hdu: &FitsHdu,
+                group: usize,
+                first: usize,
+                out: &mut [Self],
+            ) -> Result<()> {
+                read_groups(file, hdu, GroupPart::Params, group, first, out)
+            }
+
+            fn read_group_data(
+                file: &FitsFile,
+                hdu: &FitsHdu,
+                group: usize,
+                first: usize,
+                out: &mut [Self],
+            ) -> Result<()> {
+                read_groups(file, hdu, GroupPart::Data, group, first, out)
+            }
+        }
+    )*};
+}
+
+impl_read_groups!(u8, i8, i16, u16, i32, u32, i64, u64, f32, f64);
+
+/// Which part of each random group a read is from.
+#[derive(Clone, Copy, PartialEq)]
+enum GroupPart {
+    Params,
+    Data,
+}
+
+fn read_groups<T: FromPhysical>(
+    file: &FitsFile,
+    hdu: &FitsHdu,
+    part: GroupPart,
+    group: usize,
+    first: usize,
+    out: &mut [T],
+) -> Result<()> {
+    if out.is_empty() {
+        return Ok(());
+    }
+    let idx = validate_hdu_index(file, hdu)?;
+    let core = &file.parsed()?.hdus[idx];
+    let crate::hdu::HduInfo::RandomGroups {
+        bitpix,
+        naxes,
+        pcount,
+        gcount,
+    } = &core.info
+    else {
+        return Err(Error::Message(format!(
+            "HDU {idx} is not a random-groups HDU"
+        )));
+    };
+    let data_len = pixel_count(naxes);
+    let (part_len, part_offset, scale) = match part {
+        GroupPart::Params => (*pcount, 0, Scale::new(1.0, 0.0)),
+        GroupPart::Data => {
+            let (bscale, bzero) = crate::image::extract_bscale_bzero(&core.cards);
+            (data_len, *pcount, Scale::new(bscale, bzero))
+        }
+    };
+    if first >= part_len {
+        return Err(Error::status(sys::BAD_ELEM_NUM));
+    }
+    // The values asked for, numbered through this part of every group.
+    let start = group * part_len + first;
+    let end = start + out.len();
+    if group >= *gcount || end > gcount * part_len {
+        return Err(Error::status(sys::BAD_ROW_NUM));
+    }
+    let group_len = pcount + data_len;
+    let mut rest = out;
+    let mut at = start;
+    while !rest.is_empty() {
+        let (group, within) = (at / part_len, at % part_len);
+        let (run, tail) = rest.split_at_mut((part_len - within).min(rest.len()));
+        let first_value = group * group_len + part_offset + within;
+        read_run(file, core.data_start, *bitpix, first_value, scale, run)?;
+        at += run.len();
+        rest = tail;
+    }
+    Ok(())
 }
 
 /// Trait for types that can write image pixel data to a FITS file.
@@ -508,6 +647,9 @@ impl Scale {
         for (out, s) in out.iter_mut().zip(stored) {
             let value = match (s.exact(), self.exact_offset) {
                 (Some(x), Some(offset)) => T::from_exact(x + offset),
+                // Unscaled floats are copied, as cfitsio copies them, so
+                // -0.0 stays -0.0 rather than becoming -0.0 + 0.0 = 0.0.
+                (None, Some(0)) => T::from_scaled(s.float()),
                 _ => T::from_scaled(s.float() * self.bscale + self.bzero),
             };
             *out = value.ok_or_else(|| Error::status(sys::NUM_OVERFLOW))?;
@@ -1498,5 +1640,93 @@ mod tests {
     #[test]
     fn sections_and_rows_of_gzip2_compressed_images() {
         check_compressed_windows(crate::compress::TileCompression::gzip2());
+    }
+
+    /// Four groups of two parameters and a 2x3 data array holding stored
+    /// values 0..32, with `BSCALE = 2`, `BZERO = 10`, `PSCAL1 = 3` and
+    /// `PZERO1 = 100`: the file the cfitsio values below were read from.
+    fn groups_file() -> (FitsFile, FitsHdu) {
+        use crate::header::{serialize_header, Card};
+        use crate::value::Value;
+        let mut cards = Vec::new();
+        for (key, value) in [
+            ("SIMPLE", Value::Logical(true)),
+            ("BITPIX", Value::Integer(-32)),
+            ("NAXIS", Value::Integer(3)),
+            ("NAXIS1", Value::Integer(0)),
+            ("NAXIS2", Value::Integer(2)),
+            ("NAXIS3", Value::Integer(3)),
+            ("GROUPS", Value::Logical(true)),
+            ("PCOUNT", Value::Integer(2)),
+            ("GCOUNT", Value::Integer(4)),
+            ("BSCALE", Value::Float(2.0)),
+            ("BZERO", Value::Float(10.0)),
+            ("PSCAL1", Value::Float(3.0)),
+            ("PZERO1", Value::Float(100.0)),
+        ] {
+            cards.push(Card::new(key, value).unwrap());
+        }
+        let mut bytes = serialize_header(&cards).unwrap();
+        bytes.extend((0..32).flat_map(|v| (v as f32).to_be_bytes()));
+        bytes.resize(2 * 2880, 0);
+        let f = FitsFile::from_bytes(bytes).unwrap();
+        let hdu = f.primary_hdu().unwrap();
+        (f, hdu)
+    }
+
+    #[test]
+    fn group_params_read_unscaled_and_across_groups_as_ffggpe_does() {
+        let (f, hdu) = groups_file();
+        let read = |group, first, n| {
+            let mut out = vec![0f32; n];
+            hdu.read_group_params(&f, group, first, &mut out)
+                .map(|()| out)
+        };
+        assert_eq!(read(0, 0, 6).unwrap(), [0.0, 1.0, 8.0, 9.0, 16.0, 17.0]);
+        assert_eq!(read(1, 1, 1).unwrap(), [9.0]);
+        assert_eq!(read(0, 1, 2).unwrap(), [1.0, 8.0]);
+        assert_eq!(status(read(3, 0, 3).unwrap_err()), sys::BAD_ROW_NUM);
+        assert_eq!(status(read(4, 0, 1).unwrap_err()), sys::BAD_ROW_NUM);
+        assert_eq!(status(read(0, 2, 1).unwrap_err()), sys::BAD_ELEM_NUM);
+        let mut ints = [0i32; 2];
+        hdu.read_group_params(&f, 3, 0, &mut ints).unwrap();
+        assert_eq!(ints, [24, 25]);
+    }
+
+    #[test]
+    fn group_data_reads_scaled_and_across_groups_as_ffgpve_does() {
+        let (f, hdu) = groups_file();
+        let read = |group, first, n| {
+            let mut out = vec![0f64; n];
+            hdu.read_group_data(&f, group, first, &mut out)
+                .map(|()| out)
+        };
+        assert_eq!(
+            read(0, 0, 8).unwrap(),
+            [14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 30.0, 32.0]
+        );
+        assert_eq!(read(3, 5, 1).unwrap(), [72.0]);
+        let all: Vec<f64> = (0..4)
+            .flat_map(|g| (0..6).map(move |e| f64::from(g * 8 + 2 + e) * 2.0 + 10.0))
+            .collect();
+        assert_eq!(read(0, 0, 24).unwrap(), all);
+        assert_eq!(status(read(3, 5, 2).unwrap_err()), sys::BAD_ROW_NUM);
+        assert_eq!(status(read(0, 6, 1).unwrap_err()), sys::BAD_ELEM_NUM);
+    }
+
+    #[test]
+    fn unscaled_float_reads_keep_negative_zero() {
+        let mut f = FitsFile::create_in_memory().unwrap();
+        let desc = ImageDescription {
+            data_type: ImageType::Float,
+            dimensions: &[2],
+        };
+        let hdu = f.create_image("SCI", &desc).unwrap();
+        f32::write_image(&mut f, &hdu, &[-0.0, 0.0]).unwrap();
+        let read = f32::read_image(&f, &hdu).unwrap();
+        assert!(read[0].is_sign_negative() && read[1].is_sign_positive());
+        let mut buf = [0.0f64; 2];
+        f64::read_image_into_buffer(&f, &hdu, &mut buf).unwrap();
+        assert!(buf[0].is_sign_negative());
     }
 }
