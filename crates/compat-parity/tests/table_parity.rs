@@ -270,3 +270,61 @@ fn write_col_extends_the_table_like_cfitsio() {
     assert_eq!(expected, (5, a.to_vec(), vec![0.5, 1.5, 2.5, 0.0, 0.0]));
     assert_eq!(read(&by_pure), expected);
 }
+
+/// String cells end at the first NUL, and lose trailing blanks when they have
+/// none, as cfitsio's `fits_read_col_str` returns them, for whole-column and
+/// single-cell reads. Only NUL padding is compared: `fitsio` deletes every
+/// NUL from what cfitsio returns, so bytes after a NUL reappear through it.
+#[test]
+fn string_cells_end_at_the_first_nul_like_cfitsio() {
+    let rows: [&[u8; 8]; 4] = [b"RRI\0\0\0\0\0", b"AB \0\0\0\0\0", b" lead\0  ", b"noNULs  "];
+    let mut bytes = Vec::new();
+    let card = |text: &str| format!("{text:<80}").into_bytes();
+    for text in [
+        "SIMPLE  =                    T",
+        "BITPIX  =                    8",
+        "NAXIS   =                    0",
+        "EXTEND  =                    T",
+        "END",
+    ] {
+        bytes.extend(card(text));
+    }
+    bytes.resize(2880, b' ');
+    for text in [
+        "XTENSION= 'BINTABLE'",
+        "BITPIX  =                    8",
+        "NAXIS   =                    2",
+        "NAXIS1  =                    8",
+        "NAXIS2  =                    4",
+        "PCOUNT  =                    0",
+        "GCOUNT  =                    1",
+        "TFIELDS =                    1",
+        "TTYPE1  = 'NAME    '",
+        "TFORM1  = '8A      '",
+        "EXTNAME = 'DATA    '",
+        "END",
+    ] {
+        bytes.extend(card(text));
+    }
+    bytes.resize(2 * 2880, b' ');
+    for row in rows {
+        bytes.extend_from_slice(row);
+    }
+    bytes.resize(3 * 2880, 0);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nul.fits");
+    std::fs::write(&path, bytes).unwrap();
+
+    let mut c = CFits::open(&path).unwrap();
+    let c_hdu = c.hdu(1).unwrap();
+    let expected: Vec<String> = c_hdu.read_col(&mut c, "NAME").unwrap();
+    let p = PureFits::open(&path).unwrap();
+    let p_hdu = p.hdu(1).unwrap();
+    let actual: Vec<String> = p_hdu.read_col(&p, "NAME").unwrap();
+    assert_eq!(actual, expected);
+    for row in 0..rows.len() {
+        let c_cell: String = c_hdu.read_cell_value(&mut c, "NAME", row).unwrap();
+        let p_cell: String = p_hdu.read_cell_value(&p, "NAME", row).unwrap();
+        assert_eq!(p_cell, c_cell, "row {row}");
+    }
+}

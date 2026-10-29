@@ -585,11 +585,14 @@ fn read_column_cells(
             for row in 0..naxis2 {
                 let base = data_start + row * naxis1 + col_offset;
                 let bytes = &fits_data[base..base + col.repeat];
-                let s = core::str::from_utf8(bytes)
-                    .map_err(|_| Error::InvalidValue)?
-                    .trim_end()
-                    .into();
-                values.push(s);
+                // As cfitsio's `fits_read_col_str` returns it: the field
+                // loses its trailing blanks, then a NUL ends the string, so
+                // what comes before a NUL is kept as it is.
+                let s = match bytes.iter().position(|&b| b == 0) {
+                    Some(nul) => core::str::from_utf8(&bytes[..nul]),
+                    None => core::str::from_utf8(bytes).map(str::trim_end),
+                };
+                values.push(s.map_err(|_| Error::InvalidValue)?.into());
             }
             Ok(BinaryColumnData::Ascii(values))
         }
@@ -1548,6 +1551,22 @@ mod tests {
                 assert_eq!(vals[0], "Hello");
                 assert_eq!(vals[1], "World");
             }
+            other => panic!("Expected Ascii, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ascii_cells_end_at_the_first_nul() {
+        let naxis1 = 8;
+        let rows: [&[u8; 8]; 4] = [b"RRI\0\0\0\0\0", b"AB \0\xffxy ", b" lead\0  ", b"noNULs  "];
+        let header = make_bintable_header(naxis1, rows.len(), 1, &["8A"], &[Some("NAME")]);
+        let raw_data: Vec<u8> = rows.iter().flat_map(|r| r.iter().copied()).collect();
+
+        let fits_data = build_bintable_hdu(&header, &raw_data);
+        let (full_fits, hdu) = parse_test_hdu(&fits_data);
+
+        match read_binary_column(&full_fits, &hdu, 0).unwrap() {
+            BinaryColumnData::Ascii(vals) => assert_eq!(vals, ["RRI", "AB ", " lead", "noNULs"]),
             other => panic!("Expected Ascii, got {:?}", other),
         }
     }
