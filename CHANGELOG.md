@@ -12,6 +12,7 @@
 - **A comment may follow a non-string value without a blank before the `/`,** as in `NAXIS = 2/comment`, as cfitsio accepts. Before, such a card had no value.
 - **Compat `read_section`, `read_rows` and `read_region` on tile-compressed images return the right pixels.** (#147) They indexed the compressed table's bytes rather than the image, so they silently returned wrong values, or failed with `END_OF_FILE` (107) near the end of the image. The image is now decompressed from its own data unit and the window taken from it. `BSCALE`/`BZERO` apply as for any image, and a window past the end is `BAD_ROW_NUM`, as for an uncompressed image. These reads match cfitsio for `RICE_1` and `GZIP_2` windows, including those crossing tiles and the partial last tiles.
 - **Image reads of a table HDU fail with `NOT_IMAGE` (233),** as in cfitsio.
+- **Binary-table string (`A`) cells end at the first NUL,** as cfitsio's `fits_read_col_str` and astropy end them. (#144) An `8A` cell holding `RRI` and NUL padding read as `"RRI\0\0\0\0\0"`. mwalib then failed to parse metafits `TILEDATA` lengths such as `"EL_-756.49\0…"`. Trailing blanks are still trimmed from a cell without a NUL. As in cfitsio, the text before a NUL is kept as it is. This applies to `read_col`, `read_col_range` and `read_cell_value`. All 20528 string cells in 26 MWA metafits files now match cfitsio.
 
 ### Added
 
