@@ -542,3 +542,38 @@ fn inflate_or_same(bytes: &[u8], spec: &str) -> Vec<u8> {
         bytes.to_vec()
     }
 }
+
+/// Sections and rows of a tile-compressed image cfitsio wrote read as cfitsio
+/// reads them, including windows crossing tiles and the partial last tiles.
+#[test]
+fn compressed_sections_and_rows_match_cfitsio() {
+    let pixels: Vec<i32> = (0..(W * H) as i32).map(|v| v * 3 - 1000).collect();
+    for spec in ["R 16,8", "G2 16,8"] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("windows.fits");
+        cfitsio_writes(&path, spec, ImageType::Long, &pixels);
+
+        let _lock = cfitsio_lock();
+        let mut c = CFits::open(&path).unwrap();
+        let c_hdu = c.hdu(1).unwrap();
+        let p = PFits::open(&path).unwrap();
+        let p_hdu = p.hdu(1).unwrap();
+        let n = W * H;
+        let windows = (0..n)
+            .step_by(37)
+            .flat_map(|start| (start..=n).step_by(41).map(move |end| start..end))
+            .chain([n - W..n, n - 1..n, 0..n]);
+        for range in windows {
+            let c_values: Vec<i32> = c_hdu.read_section(&mut c, range.start, range.end).unwrap();
+            let p_values: Vec<i32> = p_hdu.read_section(&p, range.start, range.end).unwrap();
+            assert_eq!(p_values, c_values, "[compress {spec}] section {range:?}");
+        }
+        for start in 0..H {
+            for rows in 0..=H - start {
+                let c_values: Vec<i32> = c_hdu.read_rows(&mut c, start, rows).unwrap();
+                let p_values: Vec<i32> = p_hdu.read_rows(&p, start, rows).unwrap();
+                assert_eq!(p_values, c_values, "[compress {spec}] rows {start}+{rows}");
+            }
+        }
+    }
+}
