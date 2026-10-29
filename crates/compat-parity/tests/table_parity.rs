@@ -277,7 +277,12 @@ fn write_col_extends_the_table_like_cfitsio() {
 /// NUL from what cfitsio returns, so bytes after a NUL reappear through it.
 #[test]
 fn string_cells_end_at_the_first_nul_like_cfitsio() {
-    let rows: [&[u8; 8]; 4] = [b"RRI\0\0\0\0\0", b"AB \0\0\0\0\0", b" lead\0  ", b"noNULs  "];
+    let rows: [&[u8; 8]; 4] = [
+        b"RRI\0\0\0\0\0",
+        b"AB \0\0\0\0\0",
+        b" lead\0  ",
+        b"noNULs  ",
+    ];
     let mut bytes = Vec::new();
     let card = |text: &str| format!("{text:<80}").into_bytes();
     for text in [
@@ -326,5 +331,112 @@ fn string_cells_end_at_the_first_nul_like_cfitsio() {
         let c_cell: String = c_hdu.read_cell_value(&mut c, "NAME", row).unwrap();
         let p_cell: String = p_hdu.read_cell_value(&p, "NAME", row).unwrap();
         assert_eq!(p_cell, c_cell, "row {row}");
+    }
+}
+
+/// A column with exactly the name given is found as `fitsio` finds it.
+/// Any other name picks a column as cfitsio's `ffgcno` with `CASEINSEN`
+/// picks it: ignoring case, with `*`, `?` and `#` wildcards and a column
+/// number as a fallback, and with its status when nothing or more than one
+/// column matches.
+#[test]
+fn column_lookup_matches_fitsio_then_ffgcno() {
+    let names = [
+        "Corrections",
+        "TILE1",
+        "TILE22",
+        "AB*DE",
+        "flag",
+        "FLAG",
+        "FLAGS",
+        "X 2",
+        "Y",
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("names.fits");
+    {
+        let mut f = CFits::create(&path).open().unwrap();
+        let cols: Vec<_> = names
+            .iter()
+            .map(|n| CColDesc::new(*n).with_type(CColType::Int).create().unwrap())
+            .collect();
+        f.create_table("DATA", &cols).unwrap();
+    }
+    {
+        // `fitsio` writes through `ffgcno`, which can't tell `flag` from
+        // `FLAG`, so write each column's index through compat.
+        let mut f = PureFits::edit(&path).unwrap();
+        let hdu = f.hdu(1).unwrap();
+        for (i, name) in names.iter().enumerate() {
+            <i32 as WritesCol>::write_col(&mut f, &hdu, name, &[i as i32]).unwrap();
+        }
+    }
+    let templates = [
+        "Corrections",
+        "corrections",
+        "CORRECTIONS ",
+        " corrections",
+        "Corr*ions",
+        "*s",
+        "tile#",
+        "TILE?",
+        "TILE??",
+        "TILE*",
+        "t*2",
+        "T*1",
+        "AB*DE",
+        "ab*",
+        "a?*e",
+        "flag",
+        "FLAG",
+        "Flag",
+        "flag*",
+        "FLAG?",
+        "x 2",
+        "X*",
+        "*",
+        "?",
+        "y",
+        "3",
+        "9",
+        "0",
+        "10",
+        "missing",
+        "",
+    ];
+    let mut c = CFits::open(&path).unwrap();
+    let c_hdu = c.hdu(1).unwrap();
+    let p = PureFits::open(&path).unwrap();
+    let p_hdu = p.hdu(1).unwrap();
+    for template in templates {
+        let expected = match c_hdu.read_col::<i32>(&mut c, template) {
+            Ok(values) => Ok(values),
+            Err(_) => {
+                let (mut status, mut colnum) = (0, 0);
+                let name = std::ffi::CString::new(template).unwrap();
+                unsafe {
+                    fitsio::sys::ffgcno(
+                        c.as_raw(),
+                        0,
+                        name.as_ptr() as *mut _,
+                        &mut colnum,
+                        &mut status,
+                    );
+                }
+                match status {
+                    0 => Ok(vec![colnum - 1]),
+                    status => Err(status),
+                }
+            }
+        };
+        let actual = <i32 as ReadsCol>::read_col(&p, &p_hdu, template).map_err(|e| match e {
+            fitsio_pure::compat::errors::Error::Fits(e) => e.status,
+            other => panic!("{template:?}: {other:?}"),
+        });
+        assert_eq!(actual, expected, "{template:?}");
+        if let Ok(values) = &actual {
+            let cell: i32 = p_hdu.read_cell_value(&p, template, 0).unwrap();
+            assert_eq!(cell, values[0], "{template:?}");
+        }
     }
 }
