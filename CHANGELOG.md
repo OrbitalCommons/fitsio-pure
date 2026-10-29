@@ -39,6 +39,15 @@ Comment, history and `LONGSTRN` cards for text of 0, 10, 72, 73 and 300 bytes, b
   - **`FitsHdu::read_col_bit` and `write_col_bit`** read and write bits as cfitsio's `ffgcx` and `ffpclx` do, from any row and bit, most significant bit first. A run longer than a row carries on through the row's padding bits into the next row, as cfitsio's does. Writing past the last row extends the table. Byte (`B`) columns work the same way.
   - **Numeric reads and writes of a bit column use its packed bytes,** `ceil(repeat / 8)` a row, as cfitsio's `ffgcv*`/`ffpcl*` do. `read_col::<u8>` gives what `ffgcvb` gives, and hyperdrive's `1X` `Flag` column reads and writes as `i32`s. These failed with "not numeric type" before.
   - Checked against cfitsio: all 10 cotter- and birli-written mwaf files in the Birli and hyperdrive test data read bit-identical, both as bits and as bytes. A birli mwaf rewritten through compat reads identically in cfitsio and astropy.
+- **Writing random groups (UVFITS):** the new `groups` module. (#96, #97)
+  - **`GroupsWriter`** streams a random-groups primary HDU to any `Write` sink, as cfitsio's `ffphpr` and `ffpgpe` write one, holding only one conversion buffer, so a UVFITS file of any size is written in fixed memory.
+  - **The header** has the same cards and comments as `ffphpr`'s, plus each parameter's `PTYPEn`/`PSCALn`/`PZEROn` and any extra cards.
+  - **Groups:** `write_group` writes the next group's parameters and then its data. Values past a group's end run on into the next group, and a group written short is zero-filled. `finish` zero-fills the groups never written, up to `GCOUNT`, pads the block, and returns the sink, so extensions such as the `AIPS AN` antenna table can follow. Values are stored as given, without `PSCALn`/`PZEROn`, as `ffpgpe` stores them.
+  - **`GroupParam`** (`ptype`, optional `pscal` and `pzero`) and **`group_params(cards, pcount)`** read and write the parameter list in order. Names may repeat and the scale and zero may be absent, as for UVFITS's Julian date split over two `DATE` parameters. `GroupParam::physical`/`stored` apply or undo the scaling.
+  - **Checked against cfitsio and astropy:**
+    - groups written by cfitsio and by `GroupsWriter`, including short and unwritten ones, give byte-identical data units and the same header up to the parameters;
+    - all 8 UVFITS fixtures in the Marlu, Birli and hyperdrive test data, including two with duplicate `DATE` pairs, round-trip through `group_params` and `GroupsWriter` with equal parameters, visibilities and antenna tables in astropy's `GroupsHDU`;
+    - Marlu's own tests pass (139 + 8) with its UVFITS writer running on `GroupsWriter`.
 
 ## 0.22.1
 

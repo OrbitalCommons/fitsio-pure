@@ -143,9 +143,8 @@ impl<W: Write> ImageWriter<W> {
 
     /// Like [`new`](Self::new), with a conversion buffer of `chunk_bytes`
     /// (at least 8). Samples reach `inner` in writes of at most this size.
-    pub fn with_chunk_size(mut inner: W, cards: &[Card], chunk_bytes: usize) -> Result<Self> {
+    pub fn with_chunk_size(inner: W, cards: &[Card], chunk_bytes: usize) -> Result<Self> {
         let (bitpix, naxes) = image_shape(cards)?;
-        let sample_size = bytes_per_pixel(bitpix)?;
         let expected = if naxes.is_empty() {
             0
         } else {
@@ -154,6 +153,18 @@ impl<W: Write> ImageWriter<W> {
                 .try_fold(1u64, |acc, &n| acc.checked_mul(n as u64))
                 .ok_or(Error::InvalidHeader("NAXISn product overflows"))?
         };
+        Self::start(inner, cards, bitpix, expected, chunk_bytes)
+    }
+
+    /// Write the header `cards`, then stream `expected` samples of `bitpix`.
+    pub(crate) fn start(
+        mut inner: W,
+        cards: &[Card],
+        bitpix: i64,
+        expected: u64,
+        chunk_bytes: usize,
+    ) -> Result<Self> {
+        let sample_size = bytes_per_pixel(bitpix)?;
         expected
             .checked_mul(sample_size as u64)
             .and_then(|bytes| usize::try_from(bytes).ok())
@@ -296,6 +307,30 @@ impl<W: Write> ImageWriter<W> {
             -32 => self.write_iter(values.map(|v| raw(v) as f32)),
             _ => self.write_iter(values.map(raw)),
         }
+    }
+
+    /// Append `count` samples whose stored bytes are all zero: 0 of any
+    /// integer type, or 0.0. Writing past the header's count is an error.
+    pub(crate) fn write_zeros(&mut self, mut count: u64) -> Result<()> {
+        if count > self.expected - self.written {
+            return Err(TOO_MANY);
+        }
+        while count > 0 {
+            if self.filled == self.buf.len() {
+                self.drain()?;
+            }
+            let room = ((self.buf.len() - self.filled) / self.sample_size) as u64;
+            let n = room.min(count) as usize;
+            let end = self.filled + n * self.sample_size;
+            self.buf[self.filled..end].fill(0);
+            self.filled = end;
+            self.written += n as u64;
+            count -= n as u64;
+            if n == 0 {
+                self.drain()?;
+            }
+        }
+        Ok(())
     }
 
     /// Write any buffered samples, check that the header's sample count was
