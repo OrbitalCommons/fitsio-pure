@@ -57,6 +57,7 @@ Comment, history and `LONGSTRN` cards for text of 0, 10, 72, 73 and 300 bytes, b
 
 ### Fixed
 
+- **Reading a column no table has fails with `fitsio`'s error again.** 0.22.1 (#145) made `read_col`, `read_col_range` and `read_cell_value` fail with `COL_NOT_FOUND` (219). `fitsio` reads columns with its own lookup and fails with `Error::Message("Cannot find column \"NAME\"")`, and code written for `fitsio` matches on that message to treat a column as optional. mwa_hyperdrive's solutions reader does, so 12 of its tests failed on 0.22.1. Reads return that message again. Writes still fail with `COL_NOT_FOUND`, as `fitsio`'s writes do through cfitsio's `ffgcno`. The case-insensitive and wildcard lookup from #145 is unchanged.
 - **Compat table writes no longer copy the whole file.** (#151) Each `write_col`, `write_col_range` and `write_col_bit` copied and reparsed the whole file, and growing a table reserialized every header in it.
   - **Now:** writes go into the file's bytes in place. Growing a table inserts whole 2880-byte blocks at the end of its HDU, only when the rows outgrow the padding. It moves a heap down and rewrites just the `NAXIS2` and `THEAP` cards, so every other card keeps its exact bytes.
   - **Speed:** appending a row at a time is linear in the rows written. 10,000 one-row appends of 1 KiB took 23 s before and take 0.5 s now; birli appends its mwaf flags this way. 10,000 appends to a `128X` column plus 500 to a two-column table give a file byte-identical to cfitsio's `ffpclx`/`ffpcl` appends.

@@ -409,9 +409,12 @@ fn column_lookup_matches_fitsio_then_ffgcno() {
     let p = PureFits::open(&path).unwrap();
     let p_hdu = p.hdu(1).unwrap();
     for template in templates {
+        // `fitsio`'s own lookup first; failing that `ffgcno`, whose column
+        // or ambiguity compat reports, while a name it can't find either is
+        // `fitsio`'s error.
         let expected = match c_hdu.read_col::<i32>(&mut c, template) {
             Ok(values) => Ok(values),
-            Err(_) => {
+            Err(fitsio::errors::Error::Message(message)) => {
                 let (mut status, mut colnum) = (0, 0);
                 let name = std::ffi::CString::new(template).unwrap();
                 unsafe {
@@ -425,12 +428,15 @@ fn column_lookup_matches_fitsio_then_ffgcno() {
                 }
                 match status {
                     0 => Ok(vec![colnum - 1]),
-                    status => Err(status),
+                    219 => Err(message),
+                    status => Err(format!("status {status}")),
                 }
             }
+            Err(other) => panic!("{template:?}: {other:?}"),
         };
         let actual = <i32 as ReadsCol>::read_col(&p, &p_hdu, template).map_err(|e| match e {
-            fitsio_pure::compat::errors::Error::Fits(e) => e.status,
+            fitsio_pure::compat::errors::Error::Fits(e) => format!("status {}", e.status),
+            fitsio_pure::compat::errors::Error::Message(message) => message,
             other => panic!("{template:?}: {other:?}"),
         });
         assert_eq!(actual, expected, "{template:?}");

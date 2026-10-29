@@ -754,7 +754,7 @@ fn read_scaled<T: ColumnScalar>(
     name: &str,
     rows: Option<(usize, usize)>,
 ) -> Result<Vec<T>> {
-    let (idx, col_idx) = resolve_column(file, hdu, name)?;
+    let (idx, col_idx) = resolve_read_column(file, hdu, name)?;
     let parsed = file.parsed()?;
     let core_hdu = &parsed.hdus[idx];
     let data = read_column(file, core_hdu, col_idx, rows)?;
@@ -854,7 +854,7 @@ impl ReadsCol for String {
         let parsed = file.parsed()?;
         let core_hdu = &parsed.hdus[idx];
         let tfields = get_tfields(core_hdu)?;
-        let col_idx = find_column_index(&core_hdu.cards, name, tfields)?;
+        let col_idx = read_column_index(&core_hdu.cards, name, tfields)?;
         let col_data = read_column(file, core_hdu, col_idx, None)?;
         match col_data {
             crate::bintable::BinaryColumnData::Ascii(v) => Ok(v),
@@ -869,7 +869,7 @@ impl ReadsCol for bool {
         let parsed = file.parsed()?;
         let core_hdu = &parsed.hdus[idx];
         let tfields = get_tfields(core_hdu)?;
-        let col_idx = find_column_index(&core_hdu.cards, name, tfields)?;
+        let col_idx = read_column_index(&core_hdu.cards, name, tfields)?;
         let col_data = read_column(file, core_hdu, col_idx, None)?;
         match col_data {
             crate::bintable::BinaryColumnData::Logical(v) => Ok(v),
@@ -898,6 +898,30 @@ fn resolve_column(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<(usize, 
     Ok((idx, col_idx))
 }
 
+/// [`resolve_column`] for a column read, with a missing column reported as
+/// `fitsio`'s reads report it (see [`read_column_index`]).
+fn resolve_read_column(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<(usize, usize)> {
+    resolve_column(file, hdu, name).map_err(|e| not_found_as_read(e, name))
+}
+
+/// [`find_column_index`] for a column read. `fitsio` reads a column by its
+/// own exact-name lookup, and a name no column has is
+/// `Error::Message("Cannot find column \"name\"")`, which callers such as
+/// mwa_hyperdrive match on to treat a column as optional. Writes go through
+/// cfitsio's `ffgcno` in `fitsio`, so for them it stays `COL_NOT_FOUND`.
+fn read_column_index(cards: &[crate::header::Card], name: &str, tfields: usize) -> Result<usize> {
+    find_column_index(cards, name, tfields).map_err(|e| not_found_as_read(e, name))
+}
+
+fn not_found_as_read(err: Error, name: &str) -> Error {
+    match err {
+        Error::Fits(e) if e.status == sys::COL_NOT_FOUND as i32 => {
+            Error::Message(format!("Cannot find column {name:?}"))
+        }
+        other => other,
+    }
+}
+
 macro_rules! impl_reads_col_range {
     ($t:ty, $convert:expr) => {
         impl ReadsColRange for $t {
@@ -908,7 +932,7 @@ macro_rules! impl_reads_col_range {
                 start_row: usize,
                 num_rows: usize,
             ) -> Result<Vec<Self>> {
-                let (idx, col_idx) = resolve_column(file, hdu, name)?;
+                let (idx, col_idx) = resolve_read_column(file, hdu, name)?;
                 let parsed = file.parsed()?;
                 let core_hdu = &parsed.hdus[idx];
                 let col_data = read_column(file, core_hdu, col_idx, Some((start_row, num_rows)))?;
@@ -1410,7 +1434,26 @@ mod tests {
         f.set_data(data);
 
         let hdu = f.hdu(1usize).unwrap();
-        match i32::read_col(&f, &hdu, "MISSING") {
+        // As in `fitsio`: reads fail with its message, writes (through
+        // cfitsio's `ffgcno`) with COL_NOT_FOUND.
+        let message = |e: Error| match e {
+            Error::Message(m) => m,
+            other => panic!("expected fitsio's message, got {other:?}"),
+        };
+        let missing = "Cannot find column \"MISSING\"";
+        assert_eq!(
+            message(i32::read_col(&f, &hdu, "MISSING").unwrap_err()),
+            missing
+        );
+        assert_eq!(
+            message(String::read_col(&f, &hdu, "MISSING").unwrap_err()),
+            missing
+        );
+        let err = hdu.read_col_range::<f64>(&f, "MISSING", 0, 1).unwrap_err();
+        assert_eq!(message(err), missing);
+        let err = hdu.read_cell_value::<i64>(&f, "MISSING", 0).unwrap_err();
+        assert_eq!(message(err), missing);
+        match hdu.write_col(&mut f, "MISSING", &[1i32]) {
             Err(Error::Fits(e)) => assert_eq!(e.status, sys::COL_NOT_FOUND as i32),
             other => panic!("expected COL_NOT_FOUND, got {other:?}"),
         }
