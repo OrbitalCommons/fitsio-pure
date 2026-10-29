@@ -1,6 +1,57 @@
 # Changelog
 
-## Unreleased
+## 0.23.0
+
+This release brings compat's API in line with `fitsio` 0.21. It also adds what the MWA chain (mwalib → Marlu → Birli → mwa_hyperdrive) needed to drop cfitsio: bit columns, random groups (UVFITS) read and write, in-place and seek-based table I/O, and `COMMENT`/`HISTORY`/`HIERARCH` writers that match cfitsio. It is a minor release because compat's table and image-read types changed shape; the migration notes below list each change.
+
+Scratch ports of the chain onto this release pass their test suites, with the small port changes the migration table describes:
+
+| crate | tests |
+|---|---|
+| mwalib | 317/317 |
+| Marlu | 139 + 8 |
+| Birli | 120 + 7 + 9 |
+| mwa_hyperdrive | 332 + 26 |
+
+### Migrating from 0.22
+
+Old name or shape → new, all in `fitsio_pure::compat`:
+
+| 0.22 | 0.23 |
+|---|---|
+| `HduInfo::TableInfo { column_count, row_count }` | `HduInfo::TableInfo { column_descriptions, num_rows }`; `column_count` is `column_descriptions.len()` |
+| `ColumnDescription { name, data_type: ColumnDataDescription }` | `ColumnDescription { name, data_type: Option<ColumnDataDescription> }`, built with `ColumnDescription::new(name).with_type(t).that_repeats(n).with_width(w)` |
+| `ColumnDescription::to_concrete()` | `ColumnDescription::create()?` |
+| `ConcreteColumnDescription { name, data_type: ColumnDataType, repeat, width }` | `ConcreteColumnDescription { name, data_type: ColumnDataDescription }` |
+| `ColumnDataDescription { data_type, repeat, width }` | `ColumnDataDescription { repeat, width, typ }` |
+| `ColumnDataDescription::new(t).with_repeat(n).with_width(w)` | `ColumnDataDescription::new(t, n, w)`, `::scalar(t)` or `::vector(t, n)` |
+| `ColumnDataType` with 8 variants | 15 variants; exhaustive `match`es need the new ones (`Bit`, `SignedByte`, `UnsignedShort`, `UnsignedLong`, `LongLong`, `UnsignedLongLong`, `Text`) |
+| `FitsFile::create_table(&str, &[bintable::BinaryColumnDescriptor])` | `FitsFile::create_table(impl Into<String>, &[ConcreteColumnDescription])` |
+| `images::ReadImage` (per pixel type: `f32::read_image(&f, &hdu)`) | `images::ReadPixels`; the calls are unchanged once it is imported |
+| `images::ReadsImage` with `image`/`section`/`rows`/`region` | `images::ReadImage` (`fitsio`'s container trait, for `Vec<T>` and `ArrayD<T>`) with `read_image`/`read_section`/`read_rows`/`read_row`/`read_region` |
+| `ArrayD::<T>::read_image(…)` returning `Vec<ArrayD<T>>` (one element) | returns the `ArrayD<T>` |
+| `ReadImage::read_region(…, &[Range<usize>])` on the container | `&[&Range<usize>]`, as `FitsHdu::read_region` already took |
+| `FitsFile::iter() -> Result<Vec<FitsHdu>>` | `FitsFile::iter() -> FitsHduIterator`: drop the `?`, and use `.count()` for `.len()` |
+| `FitsHdu::write_col(&self, file, name: &str, data) -> Result<()>` | `write_col<T, N: Into<String>>(…) -> Result<FitsHdu>`; a trailing `?;` is unaffected |
+| `FitsHdu::read_cell_value`/`read_col_range` with `T: ReadsColRange` | `T: ReadsCol`, which now has `ReadsColRange` as a supertrait: generic code bounded on `ReadsColRange` that calls these bounds on `ReadsCol` |
+| `WritesCol::write_col` (required) | `WritesCol::write_col_range` is required and `write_col` provided, as in `fitsio`; only custom implementations change |
+| `bool` reads of a bit (`X`) column: a `Message` error | still an error; read bits with `FitsHdu::read_col_bit`, or packed bytes with `read_col::<u8>` |
+| 0.22.1: reading a missing column fails with `COL_NOT_FOUND` (219) | `Error::Message("Cannot find column \"NAME\"")`, as in `fitsio` and 0.22.0; writes still give 219 |
+
+**Bytes written change in two places** (values and comments read back the same):
+- **Comment position:** a string value's comment starts at column 32 after a short value, as cfitsio writes it (#149).
+- **Long strings:** a string continued over `CONTINUE` cards with a comment is laid out as cfitsio's `ffpkls` lays it out (#102).
+
+Tools that diff FITS output byte for byte will see both.
+
+**cargo-semver-checks** against 0.22.1 (`--all-features`): 202 checks, 192 pass, 10 fail, all expected:
+- the `TableInfo` fields, `ColumnDataDescription`/`ConcreteColumnDescription` fields, `to_concrete`/`with_repeat`/`with_width` removed;
+- `ColumnDataDescription::new`'s parameters;
+- `create_table`'s and `write_col`'s generic parameters;
+- the `ReadsImage` trait removed;
+- the new `ColumnDataType` variants and their discriminants.
+
+It doesn't see the `ReadImage`/`ReadPixels` rename, `iter()`'s return type, the `ArrayD` read results, or the `ReadsCol` and `WritesCol` trait changes listed above.
 
 ### Changed: compat table types match `fitsio` 0.21
 
