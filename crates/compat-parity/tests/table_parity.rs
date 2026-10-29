@@ -440,3 +440,208 @@ fn column_lookup_matches_fitsio_then_ffgcno() {
         }
     }
 }
+
+/// Every `.fits` file under `dir`, recursively, smaller than 20 MB.
+fn fits_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            fits_files(&path, out);
+        } else if path.extension().is_some_and(|e| e == "fits")
+            && path.metadata().unwrap().len() < 20 << 20
+        {
+            out.push(path);
+        }
+    }
+}
+
+/// `HduInfo::TableInfo` describes every corpus binary table as `fitsio` does.
+/// `fitsio` panics on complex and variable-length columns, so tables with
+/// those are skipped.
+#[test]
+fn table_info_matches_fitsio_on_the_corpus() {
+    use fitsio::hdu::HduInfo as CInfo;
+    use fitsio_pure::compat::hdu::HduInfo as PInfo;
+
+    let mut files = Vec::new();
+    fits_files(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fits-test-cases"),
+        &mut files,
+    );
+    files.sort();
+    let mut tables = 0;
+    for path in files {
+        let Ok(p) = PureFits::open(&path) else {
+            continue;
+        };
+        let Ok(mut c) = CFits::open(&path) else {
+            continue;
+        };
+        for i in 0..p.num_hdus().unwrap() {
+            let Ok(p_hdu) = p.hdu(i) else { continue };
+            let PInfo::TableInfo {
+                column_descriptions,
+                num_rows,
+            } = &p_hdu.info
+            else {
+                continue;
+            };
+            let is_binary =
+                p_hdu.read_key::<String>(&p, "XTENSION").ok().as_deref() == Some("BINTABLE");
+            let tforms: Vec<String> = (1..=column_descriptions.len())
+                .map(|n| p_hdu.read_key::<String>(&p, &format!("TFORM{n}")).unwrap())
+                .collect();
+            if !is_binary || tforms.iter().any(|t| t.contains(['C', 'M', 'P', 'Q'])) {
+                continue;
+            }
+            let c_hdu = c.hdu(i).unwrap();
+            let CInfo::TableInfo {
+                column_descriptions: c_columns,
+                num_rows: c_rows,
+            } = &c_hdu.info
+            else {
+                panic!("{} HDU {i}: fitsio sees no table", path.display());
+            };
+            assert_eq!(num_rows, c_rows, "{} HDU {i}", path.display());
+            assert_eq!(
+                column_descriptions.len(),
+                c_columns.len(),
+                "{} HDU {i}",
+                path.display()
+            );
+            for (p_col, c_col) in column_descriptions.iter().zip(c_columns) {
+                let what = format!("{} HDU {i} column {:?}", path.display(), c_col.name);
+                assert_eq!(p_col.name, c_col.name, "{what}");
+                assert_eq!(p_col.data_type.repeat, c_col.data_type.repeat, "{what}");
+                assert_eq!(p_col.data_type.width, c_col.data_type.width, "{what}");
+                assert_eq!(
+                    String::from(p_col.data_type.typ),
+                    String::from(c_col.data_type.typ),
+                    "{what}"
+                );
+            }
+            tables += 1;
+        }
+    }
+    assert!(tables >= 15, "only {tables} corpus tables compared");
+}
+
+/// Tables `create_table` makes from the same descriptions as `fitsio` have
+/// the same columns, and each library reads the other's.
+#[test]
+fn create_table_matches_fitsio() {
+    use fitsio_pure::compat::tables::{ColumnDataType as PColType, ColumnDescription as PColDesc};
+    let types = [
+        (CColType::Logical, PColType::Logical),
+        (CColType::Bit, PColType::Bit),
+        (CColType::Byte, PColType::Byte),
+        (CColType::SignedByte, PColType::SignedByte),
+        (CColType::Short, PColType::Short),
+        (CColType::UnsignedShort, PColType::UnsignedShort),
+        (CColType::Int, PColType::Int),
+        (CColType::Long, PColType::Long),
+        (CColType::UnsignedLong, PColType::UnsignedLong),
+        (CColType::Float, PColType::Float),
+        (CColType::Text, PColType::Text),
+        (CColType::Double, PColType::Double),
+        (CColType::LongLong, PColType::LongLong),
+        (CColType::UnsignedLongLong, PColType::UnsignedLongLong),
+        (CColType::String, PColType::String),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let c_path = dir.path().join("c.fits");
+    let p_path = dir.path().join("p.fits");
+    {
+        let mut f = CFits::create(&c_path).open().unwrap();
+        let cols: Vec<_> = types
+            .iter()
+            .enumerate()
+            .map(|(i, (t, _))| {
+                CColDesc::new(format!("C{i}"))
+                    .with_type(*t)
+                    .that_repeats(3)
+                    .create()
+                    .unwrap()
+            })
+            .collect();
+        f.create_table("ALL".to_string(), &cols).unwrap();
+    }
+    {
+        let mut f = PureFits::create(&p_path).open().unwrap();
+        let cols: Vec<_> = types
+            .iter()
+            .enumerate()
+            .map(|(i, (_, t))| {
+                PColDesc::new(format!("C{i}"))
+                    .with_type(*t)
+                    .that_repeats(3)
+                    .create()
+                    .unwrap()
+            })
+            .collect();
+        f.create_table("ALL".to_string(), &cols).unwrap();
+    }
+    // The same TFORMn and TZEROn, read by cfitsio.
+    for path in [&c_path, &p_path] {
+        let mut c = CFits::open(path).unwrap();
+        let hdu = c.hdu("ALL").unwrap();
+        let mut keys = Vec::new();
+        for n in 1..=types.len() {
+            let tform: String = hdu.read_key(&mut c, &format!("TFORM{n}")).unwrap();
+            let tzero: Option<f64> = hdu.read_key(&mut c, &format!("TZERO{n}")).ok();
+            keys.push((tform, tzero));
+        }
+        let mut c2 = CFits::open(&c_path).unwrap();
+        let hdu2 = c2.hdu("ALL").unwrap();
+        for (n, (tform, tzero)) in keys.into_iter().enumerate() {
+            let want_tform: String = hdu2.read_key(&mut c2, &format!("TFORM{}", n + 1)).unwrap();
+            let want_tzero: Option<f64> = hdu2.read_key(&mut c2, &format!("TZERO{}", n + 1)).ok();
+            assert_eq!(
+                (tform, tzero),
+                (want_tform, want_tzero),
+                "{} column {n}",
+                path.display()
+            );
+        }
+    }
+    // And both libraries describe both files alike.
+    for path in [&c_path, &p_path] {
+        let mut c = CFits::open(path).unwrap();
+        let p = PureFits::open(path).unwrap();
+        let fitsio::hdu::HduInfo::TableInfo {
+            column_descriptions: c_cols,
+            ..
+        } = c.hdu("ALL").unwrap().info
+        else {
+            panic!("not a table");
+        };
+        let fitsio_pure::compat::hdu::HduInfo::TableInfo {
+            column_descriptions: p_cols,
+            ..
+        } = p.hdu("ALL").unwrap().info
+        else {
+            panic!("not a table");
+        };
+        let c_cols: Vec<_> = c_cols
+            .iter()
+            .map(|c| {
+                (
+                    c.name.clone(),
+                    c.data_type.repeat,
+                    String::from(c.data_type.typ),
+                )
+            })
+            .collect();
+        let p_cols: Vec<_> = p_cols
+            .iter()
+            .map(|c| {
+                (
+                    c.name.clone(),
+                    c.data_type.repeat,
+                    String::from(c.data_type.typ),
+                )
+            })
+            .collect();
+        assert_eq!(p_cols, c_cols, "{}", path.display());
+    }
+}

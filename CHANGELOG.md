@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Changed: compat table types match `fitsio` 0.21
+
+These are breaking changes, so code written against `fitsio` compiles unchanged. (#91, #98)
+
+- **`HduInfo::TableInfo` is `{ column_descriptions, num_rows }`,** as in `fitsio`, replacing `{ column_count, row_count }`. `column_descriptions` describes each column as `fitsio` does, from cfitsio's `ffgbcl`: the stored type whatever `TZEROn` is, the `TFORMn` repeat, and a width of 1. It matches `fitsio` on all 21 binary tables in the test corpus that `fitsio` can open. `fitsio` panics on complex and variable-length columns; here those are described as `Float`/`Double` pairs and by their element type.
+- **`ColumnDescription` is `fitsio`'s builder:** `ColumnDescription::new(name).with_type(t).that_repeats(n).with_width(w).create()?` gives a `ConcreteColumnDescription`. `data_type` is now an `Option<ColumnDataDescription>`, and the old `to_concrete` is gone.
+- **`ConcreteColumnDescription` is `{ name, data_type: ColumnDataDescription }`** and **`ColumnDataDescription` is `{ repeat, width, typ }`,** with `new(typ, repeat, width)`, `scalar` and `vector`. `with_repeat`/`with_width` on `ColumnDataDescription` are gone. `ColumnDataDescription` parses from a `TFORMn` (`"60A12".parse()`) and renders to one (`String::from`), as in `fitsio`. `ColumnDataType` renders to its letter.
+- **`ColumnDataType` has all 15 of `fitsio`'s types,** adding `Bit`, `SignedByte`, `UnsignedShort`, `UnsignedLong`, `LongLong`, `UnsignedLongLong` and `Text`. The unsigned types and `SignedByte` are written as cfitsio writes them: the signed type with a `TZEROn` offset (`B` with -128 for `SignedByte`). `Bit` writes an `X` column.
+- **`FitsFile::create_table(extname: impl Into<String>, &[ConcreteColumnDescription])`,** as in `fitsio`, replacing `(&str, &[bintable::BinaryColumnDescriptor])`. `fitsio`'s documented `create_table` example compiles unchanged. A table made from the same descriptions has the same `TFORMn`/`TZEROn` as `fitsio`'s.
+
 ## 0.22.1
 
 ### Fixed
