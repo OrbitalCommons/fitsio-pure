@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -127,8 +128,8 @@ impl FitsFile {
     ///
     /// Only the headers are read here. Image reads then read just the pixels
     /// they return, so cutting a small region from a large image is fast and
-    /// uses little memory. Table reads, and reads of tile-compressed images,
-    /// read the whole file once.
+    /// uses little memory. A tile-compressed image read reads its own data
+    /// unit. Table reads read the whole file once.
     ///
     /// A gzip-compressed file (`.fits.gz`, `.fit.gz`) is decompressed into
     /// memory, as cfitsio does.
@@ -438,6 +439,38 @@ impl FitsFile {
             .ok_or(crate::Error::UnexpectedEof)?;
         buf.copy_from_slice(bytes);
         Ok(())
+    }
+
+    /// The bytes holding `hdu`'s data unit, and `hdu` with its offsets into
+    /// them. That is the whole file when it is already in memory; otherwise
+    /// just the data unit is read from disk, so memory scales with the HDU
+    /// rather than the file.
+    pub(crate) fn hdu_data<'a>(
+        &'a self,
+        hdu: &'a crate::hdu::Hdu,
+    ) -> Result<(Cow<'a, [u8]>, Cow<'a, crate::hdu::Hdu>)> {
+        let in_memory = match &self.storage {
+            Storage::Memory(data) => Some(data.as_slice()),
+            Storage::Disk { loaded, .. } => loaded.get().map(Vec::as_slice),
+        };
+        if let Some(data) = in_memory {
+            return Ok((Cow::Borrowed(data), Cow::Borrowed(hdu)));
+        }
+        let mut data = vec![0u8; hdu.data_len];
+        self.read_at(hdu.data_start, &mut data)?;
+        let mut local = hdu.clone();
+        local.header_start = 0;
+        local.data_start = 0;
+        Ok((Cow::Owned(data), Cow::Owned(local)))
+    }
+
+    /// Whether the whole file is in memory.
+    #[cfg(test)]
+    pub(crate) fn is_loaded(&self) -> bool {
+        match &self.storage {
+            Storage::Memory(_) => true,
+            Storage::Disk { loaded, .. } => loaded.get().is_some(),
+        }
     }
 
     /// Replace the in-memory FITS bytes (used by write operations).

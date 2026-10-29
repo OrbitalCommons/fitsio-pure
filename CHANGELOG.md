@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Compat `read_image_into_buffer` applies `BSCALE`/`BZERO`.** (#146) It returned stored values, so an `i16` image of 0..11 with `BSCALE = 0.5` read as 0, 1, 2, 3 instead of 0, 0.5, 1, 1.5. Legacy MWA gpubox HDUs carry `BSCALE = 0.5`, so mwalib read every visibility doubled. It now returns exactly what `read_image` returns, for uncompressed and tile-compressed images.
+- **A buffer shorter than the image reads its leading pixels,** as cfitsio's `ffgpv` does with `nelements` below the image size. Before, any buffer that wasn't exactly the image size was refused. A longer one is still an error, now `BAD_ROW_NUM` (307) as in cfitsio.
+- **Into-buffer reads no longer load the whole file.** An uncompressed image is read from disk 16 KiB at a time straight into the buffer, with no allocation. A tile-compressed one reads only its own data unit.
+
+### Added
+
+- **`ReadImageIntoBuffer` for every pixel type:** `u8`, `i8`, `i16`, `u16`, `i32`, `u32`, `i64` and `u64`, besides `f32` and `f64`. (#94) Integer types truncate scaled values and fail on overflow (`NUM_OVERFLOW`), as `read_image` does.
+- **`ReadImageIntoBuffer::read_section_into_buffer(file, hdu, first, buf)`** fills `buf` from pixel `first` on, as `ffgpv` with `firstelem = first + 1`. A `first` past the last pixel is `BAD_ELEM_NUM` (308).
+
 ## 0.22.0
 
 ### Changed: compat saves are no longer fsynced by default
