@@ -749,3 +749,173 @@ fn commentary_and_longstrn_cards_match_cfitsio() {
     assert!(c_cards.len() > 20, "{c_cards:#?}");
     assert_eq!(p_cards, c_cards);
 }
+
+/// The cards after `SIMPLE`/`BITPIX`/`NAXIS` of `path`'s primary header.
+fn written_cards(path: &std::path::Path) -> Vec<String> {
+    primary_header_cards(path)
+        .into_iter()
+        .skip(3)
+        .filter(|c| {
+            !c.starts_with("END ") && !c.starts_with("COMMENT   ") && !c.starts_with("EXTEND  ")
+        })
+        .collect()
+}
+
+/// A string `write_key` writes as cfitsio writes it: on one card, as
+/// `ffpkys` does, when it fits, and otherwise over `CONTINUE` cards as
+/// `ffpkls` lays it out, for standard and `HIERARCH` names, with and without
+/// comments, across the card boundaries.
+#[test]
+fn string_keys_are_laid_out_as_cfitsio_lays_them_out() {
+    use std::ffi::CString;
+    let pattern = "abcdefghijklmnopqrstuvwxyz0123456789 ";
+    let text = |n: usize, quotes: bool| -> String {
+        let mut s = format!("{n}:");
+        let mut k = s.len();
+        while k < n {
+            let c = if quotes && k % 9 == 0 {
+                '\''
+            } else {
+                pattern.as_bytes()[(k + 33) % 37] as char
+            };
+            s.push(c);
+            k += 1;
+        }
+        s
+    };
+    let names = [
+        "LONGVAL",
+        "HIERARCH ESO OBS LONGSTR",
+        "ESO OBS LONGSTR",
+        "HIERARCH A",
+        "LONGKEYWORD9",
+    ];
+    let lengths = [
+        10, 18, 19, 40, 50, 51, 52, 53, 56, 59, 60, 66, 67, 68, 69, 85, 86, 100, 120, 134, 135,
+        150, 200,
+    ];
+    let comments = [
+        None,
+        Some("a comment"),
+        Some("a much longer comment of forty-one chars"),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let mut failures = Vec::new();
+    for name in names {
+        let hierarch_name = if name.len() > 8 || name.contains(' ') {
+            Some(if name.starts_with("HIERARCH ") {
+                name.to_string()
+            } else {
+                format!("HIERARCH {name}")
+            })
+        } else {
+            None
+        };
+        for &n in &lengths {
+            for comment in comments {
+                for quotes in [false, true] {
+                    let value = text(n, quotes);
+                    let escaped = value.len() + value.matches('\'').count();
+                    let one_card = match &hierarch_name {
+                        None => escaped <= 68,
+                        Some(h) => escaped <= 80 - h.len() - 4,
+                    };
+                    let c_path = dir.path().join("c.fits");
+                    let p_path = dir.path().join("p.fits");
+                    let _ = std::fs::remove_file(&c_path);
+                    let _ = std::fs::remove_file(&p_path);
+                    {
+                        CFits::create(&c_path).open().unwrap();
+                        let mut c = CFits::edit(&c_path).unwrap();
+                        let (key, val) = (
+                            CString::new(name).unwrap(),
+                            CString::new(value.as_str()).unwrap(),
+                        );
+                        let com = comment.map(|c| CString::new(c).unwrap());
+                        let com_ptr = com
+                            .as_ref()
+                            .map_or(std::ptr::null_mut(), |c| c.as_ptr() as *mut _);
+                        let mut status = 0;
+                        unsafe {
+                            if one_card {
+                                fitsio::sys::ffpkys(
+                                    c.as_raw(),
+                                    key.as_ptr(),
+                                    val.as_ptr(),
+                                    com_ptr,
+                                    &mut status,
+                                );
+                            } else {
+                                fitsio::sys::ffpkls(
+                                    c.as_raw(),
+                                    key.as_ptr(),
+                                    val.as_ptr(),
+                                    com_ptr,
+                                    &mut status,
+                                );
+                            }
+                        }
+                        assert_eq!(status, 0);
+                    }
+                    {
+                        let mut p = PureFits::create(&p_path).open().unwrap();
+                        let hdu = p.primary_hdu().unwrap();
+                        let result = match comment {
+                            Some(comment) => hdu.write_key(&mut p, name, (value.as_str(), comment)),
+                            None => hdu.write_key(&mut p, name, value.as_str()),
+                        };
+                        if let Err(e) = result {
+                            failures.push(format!("{name}|{n}|{comment:?}|{quotes}: {e:?}"));
+                            continue;
+                        }
+                    }
+                    let (c_cards, p_cards) = (written_cards(&c_path), written_cards(&p_path));
+                    if c_cards != p_cards {
+                        failures.push(format!("{name}|{n}|{comment:?}|{quotes}:\n  c: {c_cards:#?}\n  p: {p_cards:#?}"));
+                    }
+                    // Compat reads cfitsio's cards back as `ffgkls` reads them.
+                    let want = {
+                        let mut c = CFits::open(&c_path).unwrap();
+                        let key = CString::new(name).unwrap();
+                        let mut status = 0;
+                        let mut comment = [0 as std::os::raw::c_char; 81];
+                        unsafe {
+                            let mut value: *mut std::os::raw::c_char = std::ptr::null_mut();
+                            fitsio::sys::ffgkls(
+                                c.as_raw(),
+                                key.as_ptr(),
+                                &mut value,
+                                comment.as_mut_ptr(),
+                                &mut status,
+                            );
+                            assert_eq!(status, 0);
+                            let read = std::ffi::CStr::from_ptr(value)
+                                .to_string_lossy()
+                                .into_owned();
+                            fitsio::sys::fffree(value as *mut _, &mut status);
+                            let comment = std::ffi::CStr::from_ptr(comment.as_ptr())
+                                .to_string_lossy()
+                                .into_owned();
+                            (read, (!comment.is_empty()).then_some(comment))
+                        }
+                    };
+                    let p = PureFits::open(&c_path).unwrap();
+                    let read: fitsio_pure::compat::headers::HeaderValue<String> =
+                        p.primary_hdu().unwrap().read_key(&p, name).unwrap();
+                    if (read.value.clone(), read.comment.clone()) != want {
+                        failures.push(format!(
+                            "read {name}|{n}|{comment:?}|{quotes}: {:?} != {want:?}",
+                            (read.value, read.comment)
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} cases differ:\n{}",
+        failures.len(),
+        failures[..failures.len().min(6)].join("\n")
+    );
+}

@@ -59,14 +59,49 @@ fn find_card(
     // Like cfitsio, find HIERARCH keywords by name ignoring case, with or
     // without the `HIERARCH ` prefix.
     let name = crate::header::strip_hierarch(name);
-    for card in &core_hdu.cards {
-        if let Some((key, value)) = crate::header::hierarch_entry(card) {
+    for (i, card) in core_hdu.cards.iter().enumerate() {
+        if let Some((key, _)) = crate::header::hierarch_entry(card) {
             if key.eq_ignore_ascii_case(name) {
-                return Ok((value, hierarch_comment(card)));
+                if let Some((value, comment, _)) = hierarch_value(&core_hdu.cards, i) {
+                    return Ok((value, comment));
+                }
             }
         }
     }
     Err(Error::status(sys::KEY_NO_EXIST))
+}
+
+/// The value and comment of the `HIERARCH` card `cards[i]`, and how many
+/// `CONTINUE` cards after it hold the rest of its value. A string ending in
+/// `&` continues on the `CONTINUE` cards that follow, as cfitsio's `ffgkls`
+/// reads it; the comment is the last one among them.
+fn hierarch_value(
+    cards: &[crate::header::Card],
+    i: usize,
+) -> Option<(crate::value::Value, Option<String>, usize)> {
+    use crate::value::{parse_value, Value};
+    let (_, value) = crate::header::hierarch_entry(&cards[i])?;
+    let mut comment = hierarch_comment(&cards[i]);
+    let Value::String(mut text) = value else {
+        return Some((value, comment, 0));
+    };
+    let mut continued = 0;
+    while text.ends_with('&') {
+        let next = cards
+            .get(i + 1 + continued)
+            .filter(|c| c.keyword_str() == "CONTINUE")
+            .and_then(|c| parse_value(c.comment.as_deref()?.as_bytes()));
+        let Some((Value::String(part), part_comment)) = next else {
+            break;
+        };
+        text.pop();
+        text.push_str(&part);
+        if let Some(part_comment) = part_comment {
+            comment = Some(String::from(part_comment));
+        }
+        continued += 1;
+    }
+    Some((Value::String(text), comment, continued))
 }
 
 /// The comment after the value of a `HIERARCH` card, if it has one.
@@ -235,18 +270,6 @@ fn make_keyword(name: &str) -> [u8; 8] {
     kw
 }
 
-/// Append ` / comment` to a `HIERARCH` card's text, cut to fit the card, as
-/// cfitsio does.
-fn add_hierarch_comment(card: &mut crate::header::Card, comment: &str) {
-    if let Some(text) = card.comment.as_mut() {
-        let room = crate::CARD_SIZE.saturating_sub(8 + text.len() + 3);
-        if room > 0 {
-            text.push_str(" / ");
-            text.extend(comment.chars().take(room));
-        }
-    }
-}
-
 /// Set `name` to `value` in `hdu`, replacing the comment when one is given.
 /// An existing card keeps its comment when `comment` is `None`.
 fn write_key_to_file(
@@ -280,17 +303,28 @@ fn write_key_to_file(
             key.eq_ignore_ascii_case(wanted)
                 .then(|| (i, key.to_string()))
         });
-        // An existing key keeps the name as the file spells it.
+        // An existing key keeps the name as the file spells it, and its
+        // comment when none is given.
         let key = existing.as_ref().map_or(wanted, |(_, key)| key.as_str());
+        let old_comment = existing
+            .as_ref()
+            .and_then(|&(i, _)| hierarch_value(&cards, i).map(|(_, comment, _)| comment))
+            .flatten();
+        let comment = comment.map(String::from).or(old_comment);
         // cfitsio rejects a name too long to fit as BAD_KEYCHAR too.
-        let mut card = crate::header::hierarch_card(key, &value)
+        let new = crate::header::hierarch_cards(key, &value, comment.as_deref())
             .map_err(|_| Error::status(sys::BAD_KEYCHAR))?;
-        if let Some(comment) = comment {
-            add_hierarch_comment(&mut card, comment);
-        }
         match existing {
-            Some((i, _)) => cards[i] = card,
-            None => insert_before_end(&mut cards, card),
+            Some((i, _)) => {
+                // The old value's CONTINUE cards go with it.
+                let continued = hierarch_value(&cards, i).map_or(0, |(_, _, n)| n);
+                cards.splice(i..=i + continued, new);
+            }
+            None => {
+                for card in new {
+                    insert_before_end(&mut cards, card);
+                }
+            }
         }
     } else if let Some(card) = cards.iter_mut().find(|c| c.keyword_str() == name) {
         card.value = Some(value);
@@ -847,11 +881,37 @@ mod hierarch_tests {
     }
 
     #[test]
-    fn a_hierarch_card_that_does_not_fit_is_an_error() {
+    fn a_hierarch_string_too_long_for_its_card_continues() {
         let mut f = FitsFile::create_in_memory().unwrap();
         let hdu = f.primary_hdu().unwrap();
         let value = "v".repeat(60);
-        assert!(String::write_key(&mut f, &hdu, "ESO A VERY LONG KEYWORD NAME", &value).is_err());
+        let name = "ESO A VERY LONG KEYWORD NAME";
+        String::write_key(&mut f, &hdu, name, &value).unwrap();
+        assert_eq!(String::read_key(&f, &hdu, name).unwrap(), value);
+        // Rewriting the key replaces its CONTINUE cards too.
+        String::write_key(&mut f, &hdu, name, &"w".repeat(90)).unwrap();
+        String::write_key(&mut f, &hdu, "OBJECT", &"M31".to_string()).unwrap();
+        assert_eq!(String::read_key(&f, &hdu, name).unwrap(), "w".repeat(90));
+        let cards = header_cards_all(f);
+        let continued = cards.iter().filter(|c| c.starts_with("CONTINUE")).count();
+        assert_eq!(continued, 1, "{cards:#?}");
+    }
+
+    #[test]
+    fn a_hierarch_name_with_no_room_for_a_value_is_an_error() {
+        let mut f = FitsFile::create_in_memory().unwrap();
+        let hdu = f.primary_hdu().unwrap();
+        let name = "ESO ".to_string() + &"X".repeat(66);
+        let err = String::write_key(&mut f, &hdu, &name, &"v".to_string()).unwrap_err();
+        assert!(matches!(err, Error::Fits(e) if e.status == sys::BAD_KEYCHAR as i32));
+    }
+
+    fn header_cards_all(f: FitsFile) -> Vec<String> {
+        let bytes = f.into_bytes().unwrap();
+        bytes[..2880]
+            .chunks(80)
+            .map(|c| String::from_utf8_lossy(c).trim_end().to_string())
+            .collect()
     }
 
     #[test]
