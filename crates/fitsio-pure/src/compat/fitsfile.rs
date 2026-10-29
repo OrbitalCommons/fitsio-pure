@@ -21,7 +21,8 @@ pub enum FileOpenMode {
 /// An open FITS file.
 ///
 /// A file opened with [`FitsFile::open`] is read on demand: opening it reads
-/// the headers alone, and image reads fetch only the pixels they return.
+/// the headers alone, and image and table reads fetch only the pixels or
+/// rows they return.
 /// Writable and in-memory files are held in memory whole.
 ///
 /// The parse cache is a [`OnceLock`], so `&FitsFile` is `Sync` and one open
@@ -129,7 +130,7 @@ impl FitsFile {
     /// Only the headers are read here. Image reads then read just the pixels
     /// they return, so cutting a small region from a large image is fast and
     /// uses little memory. A tile-compressed image read reads its own data
-    /// unit. Table reads read the whole file once.
+    /// unit. Table reads read just the rows they return.
     ///
     /// A gzip-compressed file (`.fits.gz`, `.fit.gz`) is decompressed into
     /// memory, as cfitsio does.

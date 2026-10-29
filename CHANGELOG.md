@@ -61,6 +61,7 @@ Comment, history and `LONGSTRN` cards for text of 0, 10, 72, 73 and 300 bytes, b
   - **Now:** writes go into the file's bytes in place. Growing a table inserts whole 2880-byte blocks at the end of its HDU, only when the rows outgrow the padding. It moves a heap down and rewrites just the `NAXIS2` and `THEAP` cards, so every other card keeps its exact bytes.
   - **Speed:** appending a row at a time is linear in the rows written. 10,000 one-row appends of 1 KiB took 23 s before and take 0.5 s now; birli appends its mwaf flags this way. 10,000 appends to a `128X` column plus 500 to a two-column table give a file byte-identical to cfitsio's `ffpclx`/`ffpcl` appends.
   - **Unchanged:** `edit()` still reads the file into memory once and saves it atomically. A disk-backed edit that doesn't load the whole file is #166.
+- **Compat table reads read only the rows they return.** (#153) On a file from `open`, `read_col`, `read_col_range`, `read_cell_value` and `read_col_bit` used to read the whole file into memory first. Now they read just the requested rows' bytes from the file, as cfitsio does. Reading the 128-row `AIPS AN` table of a 2.1 GB UVFITS raised peak RSS by 2040.6 MB before and by 0.4 MB now, and the values match cfitsio.
 - **Unscaled float reads keep `-0.0`,** as cfitsio's do. Image and group-data reads computed `v * 1.0 + 0.0`, which turns `-0.0` into `0.0`. They now copy unscaled values. Two cotter UVFITS fixtures hold about 5000 `-0.0` visibilities each.
 
 ## 0.22.1
