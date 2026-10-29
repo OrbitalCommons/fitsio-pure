@@ -7,6 +7,9 @@
 - **Compat `read_image_into_buffer` applies `BSCALE`/`BZERO`.** (#146) It returned stored values, so an `i16` image of 0..11 with `BSCALE = 0.5` read as 0, 1, 2, 3 instead of 0, 0.5, 1, 1.5. Legacy MWA gpubox HDUs carry `BSCALE = 0.5`, so mwalib read every visibility doubled. It now returns exactly what `read_image` returns, for uncompressed and tile-compressed images.
 - **A buffer shorter than the image reads its leading pixels,** as cfitsio's `ffgpv` does with `nelements` below the image size. Before, any buffer that wasn't exactly the image size was refused. A longer one is still an error, now `BAD_ROW_NUM` (307) as in cfitsio.
 - **Into-buffer reads no longer load the whole file.** An uncompressed image is read from disk 16 KiB at a time straight into the buffer, with no allocation. A tile-compressed one reads only its own data unit.
+- **Compat `read_key::<String>` reads any value, as cfitsio's `ffgkys` does.** (#143) A number, logical or complex value comes back exactly as written on the card: `1.5E+08` stays `1.5E+08`, and a logical is `T` or `F`. Before, these failed with "is not a string". mwalib and mwa_hyperdrive read most metafits and uvfits keys this way. Across 23 MWA metafits and uvfits files, all 3011 non-`CONTINUE` keys now match `ffgkys` byte for byte.
+- **String values keep their leading blanks,** which FITS counts as significant, as cfitsio keeps them. `HA = ' 02:00:36.46'` reads as `" 02:00:36.46"`. Trailing blanks are still dropped.
+- **A comment may follow a non-string value without a blank before the `/`,** as in `NAXIS = 2/comment`, as cfitsio accepts. Before, such a card had no value.
 
 ### Added
 

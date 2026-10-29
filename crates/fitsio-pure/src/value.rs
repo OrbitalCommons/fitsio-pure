@@ -28,31 +28,24 @@ pub enum Value {
 /// leading separator.
 ///
 /// The FITS standard uses ` / ` (space-slash-space) but real-world files
-/// produced by IDL and other tools omit the trailing space (e.g.
-/// `BITPIX = -32 /No. of bits per pixel`).  Both cfitsio and fitsrs accept
-/// ` /` without requiring a trailing space, so we do the same.
+/// omit either space (e.g. `BITPIX = -32 /No. of bits per pixel` from IDL,
+/// or `NAXIS = 2/comment`). A non-string value never holds a `/`, so, as
+/// cfitsio does, the comment starts at the first one.
 fn split_comment(field: &[u8]) -> (&[u8], Option<&str>) {
     // For string values the comment starts after the closing quote, so the
-    // caller must handle strings separately.  For non-string values we scan
-    // for ` /` (space then slash).
-    let len = field.len();
-    let mut i = 0;
-    while i + 1 < len {
-        if field[i] == b' ' && field[i + 1] == b'/' {
-            let value_part = &field[..i];
-            // Skip the slash; also skip one optional space after it.
-            let mut comment_start = i + 2;
-            if comment_start < len && field[comment_start] == b' ' {
-                comment_start += 1;
-            }
-            let comment = str::from_utf8(&field[comment_start..])
-                .ok()
-                .map(|s| s.trim_end());
-            return (value_part, comment.filter(|s| !s.is_empty()));
-        }
-        i += 1;
+    // caller must handle strings separately.
+    let Some(slash) = field.iter().position(|&b| b == b'/') else {
+        return (field, None);
+    };
+    // Skip the slash; also skip one optional space after it.
+    let mut comment_start = slash + 1;
+    if field.get(comment_start) == Some(&b' ') {
+        comment_start += 1;
     }
-    (field, None)
+    let comment = str::from_utf8(&field[comment_start..])
+        .ok()
+        .map(|s| s.trim_end());
+    (&field[..slash], comment.filter(|s| !s.is_empty()))
 }
 
 /// Parse a FITS character-string value from the 70-byte value field.
