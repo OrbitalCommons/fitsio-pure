@@ -757,18 +757,40 @@ fn read_scaled<T: ColumnScalar>(
     let (idx, col_idx) = resolve_column(file, hdu, name)?;
     let parsed = file.parsed()?;
     let core_hdu = &parsed.hdus[idx];
-    let data = match rows {
-        None => crate::bintable::read_binary_column(file.data()?, core_hdu, col_idx)?,
-        Some((start_row, num_rows)) => crate::bintable::read_binary_column_range(
-            file.data()?,
-            core_hdu,
-            col_idx,
-            start_row,
-            num_rows,
-        )?,
-    };
+    let data = read_column(file, core_hdu, col_idx, rows)?;
     let (tscal, tzero) = crate::bintable::extract_column_scaling(&core_hdu.cards, col_idx + 1);
     scale_column(data, tscal, tzero, name)
+}
+
+/// Column `col_idx` of binary table `core_hdu`, for `rows` (first row and
+/// count) or for every row, reading only those rows' bytes from the file,
+/// as cfitsio does, rather than the whole file.
+fn read_column(
+    file: &FitsFile,
+    core_hdu: &crate::hdu::Hdu,
+    col_idx: usize,
+    rows: Option<(usize, usize)>,
+) -> Result<BinaryColumnData> {
+    let crate::hdu::HduInfo::BinaryTable { naxis1, naxis2, .. } = core_hdu.info else {
+        return Err(Error::status(sys::NOT_BTABLE));
+    };
+    let (first, count) = rows.unwrap_or((0, naxis2));
+    if first + count > naxis2 {
+        return Err(crate::error::Error::InvalidValue.into());
+    }
+    let mut bytes = vec![0u8; count * naxis1];
+    file.read_at(core_hdu.data_start + first * naxis1, &mut bytes)?;
+    // The rows read, as a table of their own.
+    let mut rows_hdu = core_hdu.clone();
+    rows_hdu.header_start = 0;
+    rows_hdu.data_start = 0;
+    rows_hdu.data_len = bytes.len();
+    if let crate::hdu::HduInfo::BinaryTable { naxis2, .. } = &mut rows_hdu.info {
+        *naxis2 = count;
+    }
+    Ok(crate::bintable::read_binary_column(
+        &bytes, &rows_hdu, col_idx,
+    )?)
 }
 
 fn write_scaled<T: ColumnScalar>(
@@ -833,7 +855,7 @@ impl ReadsCol for String {
         let core_hdu = &parsed.hdus[idx];
         let tfields = get_tfields(core_hdu)?;
         let col_idx = find_column_index(&core_hdu.cards, name, tfields)?;
-        let col_data = crate::bintable::read_binary_column(file.data()?, core_hdu, col_idx)?;
+        let col_data = read_column(file, core_hdu, col_idx, None)?;
         match col_data {
             crate::bintable::BinaryColumnData::Ascii(v) => Ok(v),
             _ => Err(Error::Message("column is not string type".to_string())),
@@ -848,7 +870,7 @@ impl ReadsCol for bool {
         let core_hdu = &parsed.hdus[idx];
         let tfields = get_tfields(core_hdu)?;
         let col_idx = find_column_index(&core_hdu.cards, name, tfields)?;
-        let col_data = crate::bintable::read_binary_column(file.data()?, core_hdu, col_idx)?;
+        let col_data = read_column(file, core_hdu, col_idx, None)?;
         match col_data {
             crate::bintable::BinaryColumnData::Logical(v) => Ok(v),
             _ => Err(Error::Message("column is not boolean type".to_string())),
@@ -889,13 +911,7 @@ macro_rules! impl_reads_col_range {
                 let (idx, col_idx) = resolve_column(file, hdu, name)?;
                 let parsed = file.parsed()?;
                 let core_hdu = &parsed.hdus[idx];
-                let col_data = crate::bintable::read_binary_column_range(
-                    file.data()?,
-                    core_hdu,
-                    col_idx,
-                    start_row,
-                    num_rows,
-                )?;
+                let col_data = read_column(file, core_hdu, col_idx, Some((start_row, num_rows)))?;
                 #[allow(clippy::redundant_closure_call)]
                 $convert(col_data)
             }
@@ -1115,10 +1131,14 @@ pub(crate) fn read_bits(
     if end.div_ceil(8).div_ceil(column.bytes_per_row) > column.naxis2 {
         return Err(Error::status(sys::BAD_ROW_NUM));
     }
-    let data = file.data()?;
+    // Read only the rows the bits are in.
+    let (span_start, _) = column.locate(start);
+    let (span_end, _) = column.locate(end - 1);
+    let mut span = vec![0u8; span_end + 1 - span_start];
+    file.read_at(span_start, &mut span)?;
     for (bit, out) in (start..end).zip(out) {
         let (byte, mask) = column.locate(bit);
-        *out = data[byte] & mask != 0;
+        *out = span[byte - span_start] & mask != 0;
     }
     Ok(())
 }
@@ -1989,5 +2009,47 @@ mod tests {
         assert!(hdu
             .write_col_range(&mut f, "XY", &[1.0f64], &(0..1))
             .is_err());
+    }
+
+    #[test]
+    fn table_reads_read_only_their_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("table.fits");
+        {
+            let mut f = FitsFile::create(&path).open().unwrap();
+            let image = crate::compat::images::ImageDescription {
+                data_type: crate::compat::images::ImageType::Float,
+                dimensions: &[64, 64],
+            };
+            f.create_image("BIG", &image).unwrap();
+            let hdu = f
+                .create_table(
+                    "T",
+                    &[
+                        concrete("ID", ColumnDataType::Int, 1),
+                        concrete("NAME", ColumnDataType::String, 6),
+                        concrete("F", ColumnDataType::Bit, 12),
+                    ],
+                )
+                .unwrap();
+            hdu.write_col(&mut f, "ID", &[1i32, 2, 3]).unwrap();
+            let names = ["a", "bb", "ccc"].map(String::from);
+            hdu.write_col(&mut f, "NAME", &names).unwrap();
+            hdu.write_col_bit(&mut f, "F", 1, 2, &[true; 3]).unwrap();
+        }
+        let f = FitsFile::open(&path).unwrap();
+        let hdu = f.hdu("T").unwrap();
+        assert_eq!(hdu.read_col::<i32>(&f, "ID").unwrap(), [1, 2, 3]);
+        assert_eq!(hdu.read_col_range::<i64>(&f, "ID", 1, 2).unwrap(), [2, 3]);
+        assert_eq!(hdu.read_cell_value::<String>(&f, "NAME", 2).unwrap(), "ccc");
+        assert_eq!(
+            hdu.read_col::<String>(&f, "NAME").unwrap(),
+            ["a", "bb", "ccc"]
+        );
+        let mut bits = [false; 4];
+        hdu.read_col_bit(&f, "F", 1, 1, &mut bits).unwrap();
+        assert_eq!(bits, [false, true, true, true]);
+        assert!(hdu.read_col_range::<i32>(&f, "ID", 2, 2).is_err());
+        assert!(!f.is_loaded());
     }
 }
