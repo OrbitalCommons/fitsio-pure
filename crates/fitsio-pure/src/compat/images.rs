@@ -334,10 +334,6 @@ pub trait WriteImage: Sized {
     ) -> Result<()>;
 }
 
-fn ranges_to_tuples(ranges: &[std::ops::Range<usize>]) -> Vec<(usize, usize)> {
-    ranges.iter().map(|r| (r.start, r.end)).collect()
-}
-
 /// Region ranges for an image with `naxis` axes. cfitsio reads only the
 /// first `NAXIS` ranges, so `fitsio` callers can pass ranges for axes the
 /// image doesn't have, such as a `0..1` per degenerate Stokes and frequency
@@ -363,49 +359,50 @@ fn image_naxes(hdu: &FitsHdu) -> Option<Vec<usize>> {
 
 /// Read pixels and apply the HDU's `BSCALE`/`BZERO`.
 ///
-/// For an uncompressed image, `runs` gives the pixels to read from the
-/// image's axis lengths (`NAXIS1` first), and only those are read from the
-/// file. Any other HDU is read whole with `read`, from its data unit alone.
-fn read_physical<T, R, F>(file: &FitsFile, hdu: &FitsHdu, runs: R, read: F) -> Result<Vec<T>>
+/// `runs` gives the pixels to read, each `(first pixel, count)` in the flat
+/// `NAXIS1`-fastest order, from the image's axis lengths (`NAXIS1` first).
+/// For an uncompressed image only those pixels are read from the file. A
+/// tile-compressed image is decompressed from its own data unit, then the
+/// runs are taken from it, so they address the image, not its table.
+fn read_physical<T, R>(file: &FitsFile, hdu: &FitsHdu, runs: R) -> Result<Vec<T>>
 where
     T: FromPhysical,
     R: FnOnce(&[usize]) -> Result<Vec<(usize, usize)>>,
-    F: FnOnce(&[u8], &crate::hdu::Hdu) -> crate::error::Result<crate::image::ImageData>,
 {
+    use crate::hdu::HduInfo;
     let idx = validate_hdu_index(file, hdu)?;
     let parsed = file.parsed()?;
     let core_hdu = &parsed.hdus[idx];
+    let naxes = match &core_hdu.info {
+        HduInfo::Primary { naxes, .. } | HduInfo::Image { naxes, .. } => naxes,
+        HduInfo::CompressedImage { znaxes, .. } => znaxes,
+        _ => return Err(Error::status(sys::NOT_IMAGE)),
+    };
+    let runs = runs(naxes)?;
+    let pixels = pixel_count(naxes);
+    if runs.iter().any(|&(first, count)| first + count > pixels) {
+        return Err(Error::status(sys::BAD_ROW_NUM));
+    }
     let (bscale, bzero) = crate::image::extract_bscale_bzero(&core_hdu.cards);
-    let data = match &core_hdu.info {
-        crate::hdu::HduInfo::Primary { bitpix, naxes }
-        | crate::hdu::HduInfo::Image { bitpix, naxes } => {
-            let runs = runs(naxes)?;
-            let pixels = pixel_count(naxes);
-            if runs.iter().any(|&(first, count)| first + count > pixels) {
-                return Err(Error::status(sys::BAD_ROW_NUM));
-            }
-            read_runs(file, core_hdu.data_start, *bitpix, &runs)?
+    let scale = Scale::new(bscale, bzero);
+    let mut out = vec![T::default(); runs.iter().map(|&(_, count)| count).sum()];
+    match &core_hdu.info {
+        HduInfo::Primary { bitpix, .. } | HduInfo::Image { bitpix, .. } => {
+            let data = read_runs(file, core_hdu.data_start, *bitpix, &runs)?;
+            scale.apply_data(&data, 0, &mut out)?;
         }
         _ => {
             let (bytes, local) = file.hdu_data(core_hdu)?;
-            read(&bytes, &local)?
+            let data = crate::tiled::read_tiled_image(&bytes, &local)?;
+            let mut rest = &mut out[..];
+            for &(first, count) in &runs {
+                let (run, tail) = rest.split_at_mut(count);
+                scale.apply_data(&data, first, run)?;
+                rest = tail;
+            }
         }
-    };
-    let mut out = vec![T::default(); image_data_len(&data)];
-    Scale::new(bscale, bzero).apply_data(&data, 0, &mut out)?;
-    Ok(out)
-}
-
-fn image_data_len(data: &crate::image::ImageData) -> usize {
-    use crate::image::ImageData;
-    match data {
-        ImageData::U8(v) => v.len(),
-        ImageData::I16(v) => v.len(),
-        ImageData::I32(v) => v.len(),
-        ImageData::I64(v) => v.len(),
-        ImageData::F32(v) => v.len(),
-        ImageData::F64(v) => v.len(),
     }
+    Ok(out)
 }
 
 /// A stored pixel type.
@@ -609,7 +606,6 @@ macro_rules! impl_read_image {
                     file,
                     hdu,
                     |naxes| Ok(vec![(0, pixel_count(naxes))]),
-                    |d, h| crate::image::read_image_data(d, h),
                 )
             }
 
@@ -628,7 +624,6 @@ macro_rules! impl_read_image {
                     file,
                     hdu,
                     |_| Ok(vec![(range.start, count)]),
-                    |d, h| crate::image::read_image_section(d, h, range.start, count),
                 )
             }
 
@@ -655,7 +650,6 @@ macro_rules! impl_read_image {
                         }
                         Ok(vec![(start_row * naxes[0], num_rows * naxes[0])])
                     },
-                    |d, h| crate::image::read_image_rows(d, h, start_row, num_rows),
                 )
             }
 
@@ -677,12 +671,10 @@ macro_rules! impl_read_image {
                         return Err(Error::status(sys::BAD_ROW_NUM));
                     }
                 }
-                let tuples = ranges_to_tuples(ranges);
                 read_physical(
                     file,
                     hdu,
                     |naxes| region_runs(naxes, ranges),
-                    |d, h| crate::image::read_image_region(d, h, &tuples),
                 )
             }
         }
@@ -1403,5 +1395,70 @@ mod tests {
         i64::read_section_into_buffer(&f, &hdu, 1_000, &mut buf).unwrap();
         let want: Vec<i64> = (995..9_995).collect();
         assert_eq!(buf, want);
+    }
+
+    /// A 7x10 `i32` image of 0..70 with `BSCALE = 0.5`, tile-compressed in
+    /// 3x4 tiles, so the image ends in partial tiles along both axes.
+    fn compressed_7x10(compression: &crate::compress::TileCompression) -> FitsFile {
+        use crate::header::{serialize_header, Card};
+        use crate::value::Value;
+        let pixels: Vec<i32> = (0..70).collect();
+        let mut bytes =
+            serialize_header(&crate::primary::build_primary_header(8, &[]).unwrap()).unwrap();
+        let bscale = Card::new("BSCALE", Value::Float(0.5)).unwrap();
+        let compression = compression.clone().tile_dims(&[3, 4]);
+        bytes.extend(
+            crate::compress::compress_image_hdu(&[7, 10], &pixels, &compression, &[bscale])
+                .unwrap(),
+        );
+        FitsFile::from_bytes(bytes).unwrap()
+    }
+
+    fn check_compressed_windows(compression: crate::compress::TileCompression) {
+        let f = compressed_7x10(&compression);
+        let hdu = f.hdu(1).unwrap();
+        let physical: Vec<f64> = (0..70).map(|v| f64::from(v) * 0.5).collect();
+        assert_eq!(f64::read_image(&f, &hdu).unwrap(), physical);
+        for start in 0..70 {
+            for end in start..=70 {
+                assert_eq!(
+                    f64::read_section(&f, &hdu, start..end).unwrap(),
+                    physical[start..end],
+                    "section {start}..{end}"
+                );
+            }
+        }
+        for start in 0..10 {
+            for rows in 0..=10 - start {
+                assert_eq!(
+                    f64::read_rows(&f, &hdu, start, rows).unwrap(),
+                    physical[start * 7..(start + rows) * 7],
+                    "rows {start}+{rows}"
+                );
+            }
+        }
+        let region = f64::read_region(&f, &hdu, &[2..6, 3..10]).unwrap();
+        let want: Vec<f64> = (3..10)
+            .flat_map(|y| (2..6).map(move |x| f64::from(y * 7 + x) * 0.5))
+            .collect();
+        assert_eq!(region, want);
+        assert_eq!(
+            status(f64::read_section(&f, &hdu, 60..71).unwrap_err()),
+            sys::BAD_ROW_NUM
+        );
+        assert_eq!(
+            status(f64::read_rows(&f, &hdu, 9, 2).unwrap_err()),
+            sys::BAD_ROW_NUM
+        );
+    }
+
+    #[test]
+    fn sections_and_rows_of_rice_compressed_images() {
+        check_compressed_windows(crate::compress::TileCompression::rice());
+    }
+
+    #[test]
+    fn sections_and_rows_of_gzip2_compressed_images() {
+        check_compressed_windows(crate::compress::TileCompression::gzip2());
     }
 }

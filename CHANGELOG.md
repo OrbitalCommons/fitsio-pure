@@ -10,6 +10,8 @@
 - **Compat `read_key::<String>` reads any value, as cfitsio's `ffgkys` does.** (#143) A number, logical or complex value comes back exactly as written on the card: `1.5E+08` stays `1.5E+08`, and a logical is `T` or `F`. Before, these failed with "is not a string". mwalib and mwa_hyperdrive read most metafits and uvfits keys this way. Across 23 MWA metafits and uvfits files, all 3011 non-`CONTINUE` keys now match `ffgkys` byte for byte.
 - **String values keep their leading blanks,** which FITS counts as significant, as cfitsio keeps them. `HA = ' 02:00:36.46'` reads as `" 02:00:36.46"`. Trailing blanks are still dropped.
 - **A comment may follow a non-string value without a blank before the `/`,** as in `NAXIS = 2/comment`, as cfitsio accepts. Before, such a card had no value.
+- **Compat `read_section`, `read_rows` and `read_region` on tile-compressed images return the right pixels.** (#147) They indexed the compressed table's bytes rather than the image, so they silently returned wrong values, or failed with `END_OF_FILE` (107) near the end of the image. The image is now decompressed from its own data unit and the window taken from it. `BSCALE`/`BZERO` apply as for any image, and a window past the end is `BAD_ROW_NUM`, as for an uncompressed image. These reads match cfitsio for `RICE_1` and `GZIP_2` windows, including those crossing tiles and the partial last tiles.
+- **Image reads of a table HDU fail with `NOT_IMAGE` (233),** as in cfitsio.
 
 ### Added
 
