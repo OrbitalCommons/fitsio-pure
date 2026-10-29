@@ -62,7 +62,7 @@ let prob: Vec<f64> = hdu.read_col(&fits, "PROB")?;
 | **Write images** | ✅ All BITPIX | ✅ All BITPIX | ✅ All BITPIX |
 | **Binary tables** | ✅ Read + write | ✅ Read + write | ⚠️ Read only |
 | **ASCII tables** | ✅ Read + write | ✅ Read + write | ⚠️ Raw bytes |
-| **Random groups** | ⚠️ Read | ✅ Read + write | ❌ |
+| **Random groups** | ✅ Read + streaming write | ✅ Read + write | ❌ |
 | **Tile compression** | ✅ RICE_1/GZIP_1 read + write, HCOMPRESS_1/PLIO_1 read | ✅ Transparent | ⚠️ GZIP/RICE |
 | **Header keywords** | ✅ Read + write | ✅ Read + write | ⚠️ Read only |
 | **ndarray** | ✅ | ✅ | ❌ |

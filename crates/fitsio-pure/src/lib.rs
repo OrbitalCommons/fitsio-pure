@@ -28,6 +28,7 @@ pub mod endian;
 pub mod error;
 /// Extension HDU (IMAGE/TABLE/BINTABLE) header parsing.
 pub mod extension;
+pub mod groups;
 /// Gzip decompression for whole `.fits.gz` files and gzip tile data.
 pub mod gzip;
 mod hdecompress;
