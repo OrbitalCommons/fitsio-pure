@@ -446,38 +446,188 @@ pub(crate) fn strip_hierarch(name: &str) -> &str {
     }
 }
 
-/// A `HIERARCH name = value` card, laid out as cfitsio writes one: strings
-/// follow `= ` directly, and other values end at column 30 when they fit.
+/// The cards for `HIERARCH name = value`, laid out as cfitsio writes them.
 ///
-/// The card keeps the `HIERARCH` keyword, with the rest of its text in
-/// `comment`, the same shape [`parse_card`] gives a `HIERARCH` card it reads.
-/// A card that would not fit in 80 bytes is an error.
+/// A value that fits one card is written as `ffpkys` writes it: strings
+/// follow `= ` directly, other values end at column 30 when they fit, and
+/// the `=` loses its leading blank when that is what makes the value fit. A
+/// longer string is continued over `CONTINUE` cards as `ffpkls` lays it out
+/// (see [`long_string_texts`]). A comment goes after ` / `, from column 32
+/// when the value ends by column 30, cut to fit the card.
+///
+/// Each card keeps its keyword (`HIERARCH` or `CONTINUE`), with the rest of
+/// its text in `comment`, the shape [`parse_card`] gives the cards it reads.
+/// A name too long to leave room for the value is an error.
 #[cfg(feature = "compat")]
-pub(crate) fn hierarch_card(name: &str, value: &Value) -> Result<Card> {
-    let field = format_value(value);
-    let token = str::from_utf8(&field)
-        .map_err(|_| Error::InvalidHeader("non-UTF8 card data"))?
-        .trim();
-    if let Value::String(s) = value {
-        if escaped_len(s) > MAX_CARD_STRING {
-            return Err(Error::InvalidValue);
+pub(crate) fn hierarch_cards(
+    name: &str,
+    value: &Value,
+    comment: Option<&str>,
+) -> Result<Vec<Card>> {
+    let name = strip_hierarch(name);
+    let lead = Lead::Hierarch(name);
+    let room = first_card_room(&lead).ok_or(Error::InvalidValue)?;
+    let texts = match value {
+        Value::String(s) if escaped_len(s) > room => long_string_texts(&lead, s, comment)?,
+        _ => {
+            let field = format_value(value);
+            let token = str::from_utf8(&field)
+                .map_err(|_| Error::InvalidHeader("non-UTF8 card data"))?
+                .trim();
+            let mut text = String::from(token);
+            if !matches!(value, Value::String(_)) {
+                let head = alloc::format!("HIERARCH {name} = ");
+                while head.len() + text.len() < 30 {
+                    text.insert(0, ' ');
+                }
+            }
+            let text = card_text(&lead, &text, comment);
+            if text.len() > CARD_SIZE {
+                return Err(Error::InvalidValue);
+            }
+            vec![text]
         }
+    };
+    Ok(texts
+        .into_iter()
+        .map(|text| {
+            let mut keyword = [b' '; 8];
+            keyword.copy_from_slice(&text.as_bytes()[..8]);
+            Card {
+                keyword,
+                value: None,
+                comment: Some(String::from(&text[8..])),
+            }
+        })
+        .collect())
+}
+
+/// What a card's value follows: a standard keyword, written `KEYWORD = `,
+/// or a `HIERARCH` name, written `HIERARCH name = ` or `HIERARCH name= `.
+pub(crate) enum Lead<'a> {
+    Keyword(&'a [u8; 8]),
+    /// The name without its `HIERARCH ` prefix.
+    #[cfg_attr(not(feature = "compat"), allow(dead_code))]
+    Hierarch(&'a str),
+}
+
+/// The most string bytes, quotes doubled, that fit on the first card after
+/// `lead`, or `None` when not even one does.
+fn first_card_room(lead: &Lead) -> Option<usize> {
+    match lead {
+        Lead::Keyword(_) => Some(MAX_CARD_STRING),
+        // `HIERARCH name= '…'`: the name, `= `, and two quotes.
+        Lead::Hierarch(name) => CARD_SIZE
+            .checked_sub("HIERARCH ".len() + name.len() + 4)
+            .filter(|&room| room >= 2),
     }
-    let mut text = alloc::format!("HIERARCH {} = ", strip_hierarch(name));
-    if !matches!(value, Value::String(_)) {
-        while text.len() + token.len() < 30 {
+}
+
+/// A card's text: `lead`, then `value`, then any ` / comment`, as cfitsio's
+/// `ffmkky` lays it out. A comment starts at column 32 when the value ends by
+/// column 30, and is cut to fit the card. Not padded to 80 bytes.
+fn card_text(lead: &Lead, value: &str, comment: Option<&str>) -> String {
+    let mut text = match lead {
+        Lead::Keyword(keyword) => {
+            let mut text = String::from(str::from_utf8(&keyword[..]).unwrap_or(""));
+            text.push_str("= ");
+            text
+        }
+        Lead::Hierarch(name) => {
+            let head = alloc::format!("HIERARCH {name}");
+            // cfitsio drops the blank before `=` when that makes the value fit.
+            let eq = if head.len() + 3 + value.len() > CARD_SIZE {
+                "= "
+            } else {
+                " = "
+            };
+            head + eq
+        }
+    };
+    text.push_str(value);
+    with_comment(text, comment)
+}
+
+/// `text` with ` / comment` after it, from column 32 when `text` ends by
+/// column 30, cut to the card. As in cfitsio, no comment is written unless
+/// at least one of its characters fits.
+fn with_comment(mut text: String, comment: Option<&str>) -> String {
+    if let Some(comment) = comment.filter(|c| !c.is_empty() && text.len() + 3 < CARD_SIZE) {
+        while text.len() < 30 {
             text.push(' ');
         }
+        text.push_str(" / ");
+        text.push_str(comment);
     }
-    text.push_str(token);
     if text.len() > CARD_SIZE {
-        return Err(Error::InvalidValue);
+        let mut end = CARD_SIZE;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
     }
-    Ok(Card {
-        keyword: KW_HIERARCH,
-        value: None,
-        comment: Some(String::from(&text[8..])),
-    })
+    text
+}
+
+/// `'s'`, quotes doubled, with an `&` before the closing quote if `continued`.
+fn quoted(s: &str, continued: bool) -> String {
+    let mut out = String::from("'");
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push('\'');
+        }
+        out.push(ch);
+    }
+    if continued {
+        out.push('&');
+    }
+    out.push('\'');
+    out
+}
+
+/// The card texts of a string value too long for one card after `lead`,
+/// laid out as cfitsio 4.3's `ffpkls` lays them out:
+///
+/// - the first card holds as much as fits, ending in `&`;
+/// - `CONTINUE` cards then hold 67 characters and an `&` each;
+/// - without a comment, the rest goes on a last card once it fits one;
+/// - with a comment, the rest goes on a last card with the comment once it
+///   is 18 characters or fewer, so the comment can start at column 32;
+///   otherwise the last of the value ends in `&`, and an empty
+///   `CONTINUE ''` card carries the comment.
+///
+/// A doubled quote is never split between cards.
+pub(crate) fn long_string_texts(
+    lead: &Lead,
+    value: &str,
+    comment: Option<&str>,
+) -> Result<Vec<String>> {
+    let comment = comment.filter(|c| !c.is_empty());
+    let room = first_card_room(lead).ok_or(Error::InvalidValue)?;
+    let continue_text =
+        |value: &str, comment| with_comment(alloc::format!("CONTINUE  {value}"), comment);
+    let split = split_at_escaped(value, room - 1);
+    let mut texts = vec![card_text(lead, &quoted(&value[..split], true), None)];
+    let mut rest = &value[split..];
+    loop {
+        let rest_len = escaped_len(rest);
+        match comment {
+            None if rest_len <= MAX_CARD_STRING => {
+                texts.push(continue_text(&quoted(rest, false), None));
+                break;
+            }
+            Some(comment) if rest_len <= 18 => {
+                texts.push(continue_text(&quoted(rest, false), Some(comment)));
+                break;
+            }
+            _ => {
+                let split = split_at_escaped(rest, CONTINUED_STRING);
+                texts.push(continue_text(&quoted(&rest[..split], true), None));
+                rest = &rest[split..];
+            }
+        }
+    }
+    Ok(texts)
 }
 
 /// The name and value of a `HIERARCH` card, if `card` is one.
@@ -503,51 +653,22 @@ const CONTINUED_STRING: usize = MAX_CARD_STRING - 1;
 ///
 /// A string value too long for one card is split over `CONTINUE` cards in the
 /// long-string convention, laid out as cfitsio's `fits_write_key_longstr`
-/// does: 67 characters and an `&` per card until the rest fits, then the rest,
-/// with any comment on a final `CONTINUE  ''` card.
+/// (`ffpkls`) lays it out; see [`long_string_texts`].
 fn format_cards(card: &Card) -> Vec<[u8; CARD_SIZE]> {
     let long = match &card.value {
         Some(Value::String(s)) if escaped_len(s) > MAX_CARD_STRING => s,
         _ => return vec![format_card(card)],
     };
-
-    let mut chunks = Vec::new();
-    let mut rest = long.as_str();
-    while escaped_len(rest) > MAX_CARD_STRING {
-        let split = split_at_escaped(rest, CONTINUED_STRING);
-        chunks.push((&rest[..split], true));
-        rest = &rest[split..];
-    }
-    let comment = card.comment.as_deref().filter(|c| !c.is_empty());
-    chunks.push((rest, comment.is_some()));
-
-    let mut out: Vec<[u8; CARD_SIZE]> = chunks
+    let lead = Lead::Keyword(&card.keyword);
+    long_string_texts(&lead, long, card.comment.as_deref())
+        .expect("a standard keyword leaves room for a value")
         .iter()
-        .enumerate()
-        .map(|(i, (chunk, continued))| {
+        .map(|text| {
             let mut buf = [b' '; CARD_SIZE];
-            if i == 0 {
-                buf[..8].copy_from_slice(&card.keyword);
-                buf[8] = b'=';
-            } else {
-                buf[..8].copy_from_slice(&KW_CONTINUE);
-            }
-            write_quoted(&mut buf[10..], chunk, *continued);
+            buf[..text.len()].copy_from_slice(text.as_bytes());
             buf
         })
-        .collect();
-
-    if let Some(comment) = comment {
-        let mut buf = [b' '; CARD_SIZE];
-        buf[..8].copy_from_slice(&KW_CONTINUE);
-        buf[10..12].copy_from_slice(b"''");
-        buf[31] = b'/';
-        let bytes = comment.as_bytes();
-        let len = bytes.len().min(CARD_SIZE - 33);
-        buf[33..33 + len].copy_from_slice(&bytes[..len]);
-        out.push(buf);
-    }
-    out
+        .collect()
 }
 
 /// The length of `s` as written in a FITS string, where `'` is doubled.
@@ -567,27 +688,6 @@ fn split_at_escaped(s: &str, max: usize) -> usize {
         written += width;
     }
     s.len()
-}
-
-/// Write `'s'` into `field`, doubling quotes, with an `&` before the closing
-/// quote if `continued`.
-fn write_quoted(field: &mut [u8], s: &str, continued: bool) {
-    let mut pos = 0;
-    field[pos] = b'\'';
-    pos += 1;
-    for b in s.bytes() {
-        if b == b'\'' {
-            field[pos] = b'\'';
-            pos += 1;
-        }
-        field[pos] = b;
-        pos += 1;
-    }
-    if continued {
-        field[pos] = b'&';
-        pos += 1;
-    }
-    field[pos] = b'\'';
 }
 
 /// Insert a ` / comment` string into a 70-byte value field.
