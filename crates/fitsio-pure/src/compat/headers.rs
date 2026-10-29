@@ -328,6 +328,77 @@ fn valid_keyword(name: &str) -> bool {
     }
 }
 
+/// Append `keyword` (`COMMENT` or `HISTORY`) cards holding `text`, as
+/// cfitsio's `ffpcom` and `ffphis` write them: one card per 72 bytes, with
+/// any byte that isn't printable ASCII written as a blank, as `ffprec` does.
+/// Text stops at a NUL, and empty text writes no card.
+pub(crate) fn write_commentary(
+    file: &mut FitsFile,
+    hdu: &FitsHdu,
+    keyword: &str,
+    text: &str,
+) -> Result<()> {
+    file.check_writable()?;
+    let core_hdu = file
+        .parsed()?
+        .get(hdu.number)
+        .ok_or(Error::status(sys::END_OF_FILE))?;
+    let (header_start, data_start) = (core_hdu.header_start, core_hdu.data_start);
+    let mut cards = core_hdu.cards.clone();
+    let text = text.as_bytes();
+    let text = &text[..text.iter().position(|&b| b == 0).unwrap_or(text.len())];
+    for piece in text.chunks(72) {
+        let piece: String = piece
+            .iter()
+            .map(|&b| {
+                if (b' '..=b'~').contains(&b) {
+                    b as char
+                } else {
+                    ' '
+                }
+            })
+            .collect();
+        let card = crate::header::Card {
+            keyword: make_keyword(keyword),
+            value: None,
+            comment: Some(piece),
+        };
+        insert_before_end(&mut cards, card);
+    }
+    cards.retain(|c| !c.is_end());
+    let header = crate::header::serialize_header(&cards)?;
+    file.replace_bytes(header_start..data_start, &header)
+}
+
+/// The `COMMENT` cards cfitsio's `ffplsw` writes after `LONGSTRN`.
+const LONGSTRN_COMMENTS: [&str; 4] = [
+    "  This FITS file may contain long string keyword values that are",
+    "  continued over multiple keywords.  The HEASARC convention uses the &",
+    "  character at the end of each substring which is then continued",
+    "  on the next keyword which has the name CONTINUE.",
+];
+
+/// Write `LONGSTRN = 'OGIP 1.0'` and the `COMMENT` cards that explain the
+/// long-string convention, as cfitsio's `ffplsw` does, unless `LONGSTRN` is
+/// there already.
+pub(crate) fn write_longwarn(file: &mut FitsFile, hdu: &FitsHdu) -> Result<()> {
+    file.check_writable()?;
+    if find_card(file, hdu, "LONGSTRN").is_ok() {
+        return Ok(());
+    }
+    write_key_to_file(
+        file,
+        hdu,
+        "LONGSTRN",
+        crate::value::Value::String("OGIP 1.0".to_string()),
+        Some("The HEASARC Long String Convention may be used."),
+    )?;
+    for comment in LONGSTRN_COMMENTS {
+        write_commentary(file, hdu, "COMMENT", comment)?;
+    }
+    Ok(())
+}
+
 fn insert_before_end(cards: &mut Vec<crate::header::Card>, card: crate::header::Card) {
     match cards.iter().position(|c| c.is_end()) {
         Some(idx) => cards.insert(idx, card),
@@ -842,5 +913,53 @@ mod hierarch_tests {
         let freq: HeaderValue<String> = hdu.read_key(&f, "FREQCENT").unwrap();
         assert_eq!(freq.comment.as_deref(), Some("[MHz] centre frequency"));
         assert_eq!(i64::read_key(&f, &hdu, "FREE").unwrap(), 42);
+    }
+
+    /// The cards after the empty primary header's `NAXIS`, trimmed.
+    fn cards_after_naxis(f: FitsFile) -> Vec<String> {
+        let bytes = f.into_bytes().unwrap();
+        bytes[..2880]
+            .chunks(80)
+            .map(|c| String::from_utf8_lossy(c).trim_end().to_string())
+            .skip(3)
+            .take_while(|c| c != "END")
+            .collect()
+    }
+
+    #[test]
+    fn commentary_is_split_into_72_byte_cards_as_cfitsio_splits_it() {
+        let mut f = FitsFile::create_in_memory().unwrap();
+        let hdu = f.primary_hdu().unwrap();
+        let long = "a".repeat(72) + "bc";
+        hdu.write_comment(&mut f, &long).unwrap();
+        hdu.write_history(&mut f, "tab\there é").unwrap();
+        hdu.write_comment(&mut f, "").unwrap();
+        assert_eq!(
+            cards_after_naxis(f),
+            [
+                format!("COMMENT {}", "a".repeat(72)),
+                "COMMENT bc".to_string(),
+                // Each byte that isn't printable ASCII becomes a blank.
+                "HISTORY tab here".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn longstrn_is_written_once_with_its_comments() {
+        let mut f = FitsFile::create_in_memory().unwrap();
+        let hdu = f.primary_hdu().unwrap();
+        hdu.write_key_longwarn(&mut f).unwrap();
+        hdu.write_key_longwarn(&mut f).unwrap();
+        let cards = cards_after_naxis(f);
+        assert_eq!(cards.len(), 5);
+        assert_eq!(
+            cards[0],
+            "LONGSTRN= 'OGIP 1.0'           / The HEASARC Long String Convention may be used."
+        );
+        assert_eq!(
+            cards[4],
+            "COMMENT   on the next keyword which has the name CONTINUE."
+        );
     }
 }
