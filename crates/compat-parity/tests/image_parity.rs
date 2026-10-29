@@ -81,7 +81,8 @@ fn roundtrip_cfitsio_to_pure<T>(
     _pure_ty: PureImageType,
     c_ty: CImageType,
 ) where
-    T: PureReadImage + Clone + PartialEq + std::fmt::Debug,
+    T: Clone + PartialEq + std::fmt::Debug,
+    Vec<T>: PureReadImage,
     T: fitsio::images::WriteImage,
 {
     let dir = tempfile::tempdir().unwrap();
@@ -99,7 +100,7 @@ fn roundtrip_cfitsio_to_pure<T>(
 
     let f = PureFits::open(&path).expect("fitsio-pure failed to open cfitsio-written file");
     let hdu = f.hdu("SCI").expect("fitsio-pure could not find SCI HDU");
-    let read: Vec<T> = <T as PureReadImage>::read_image(&f, &hdu).unwrap();
+    let read: Vec<T> = <Vec<T> as PureReadImage>::read_image(&f, &hdu).unwrap();
     assert_eq!(
         read,
         data.to_vec(),

@@ -3,36 +3,7 @@ use ndarray::{Array, ArrayBase, ArrayD, Data, Dimension};
 use super::errors::Result;
 use super::fitsfile::FitsFile;
 use super::hdu::{FitsHdu, HduInfo};
-use super::images::{ReadImage, ReadsImage, WriteImage};
-
-/// `hdu.read_image(&mut f)` into an `ArrayD<T>` shaped like the image (or the
-/// section, rows or region read), as `fitsio`'s `array` feature gives it.
-impl<T: Clone + ReadImage> ReadsImage for ArrayD<T> {
-    fn image(file: &FitsFile, hdu: &FitsHdu) -> Result<Self> {
-        single(<ArrayD<T> as ReadImage>::read_image(file, hdu)?)
-    }
-
-    fn section(file: &FitsFile, hdu: &FitsHdu, range: std::ops::Range<usize>) -> Result<Self> {
-        single(<ArrayD<T> as ReadImage>::read_section(file, hdu, range)?)
-    }
-
-    fn rows(file: &FitsFile, hdu: &FitsHdu, start_row: usize, num_rows: usize) -> Result<Self> {
-        single(<ArrayD<T> as ReadImage>::read_rows(
-            file, hdu, start_row, num_rows,
-        )?)
-    }
-
-    fn region(file: &FitsFile, hdu: &FitsHdu, ranges: &[std::ops::Range<usize>]) -> Result<Self> {
-        single(<ArrayD<T> as ReadImage>::read_region(file, hdu, ranges)?)
-    }
-}
-
-/// The one array an `ArrayD` `ReadImage` call returns.
-fn single<T>(mut arrays: Vec<ArrayD<T>>) -> Result<ArrayD<T>> {
-    arrays
-        .pop()
-        .ok_or_else(|| super::errors::Error::Message("image read returned no array".into()))
-}
+use super::images::{owned_ranges, ReadImage, ReadPixels, WriteImage};
 
 /// Write an n-dimensional array directly to an image HDU (requires the `array`
 /// feature).
@@ -61,30 +32,22 @@ where
     }
 }
 
+/// `hdu.read_image(&mut f)` into an `ArrayD<T>` shaped like the image (or the
+/// section, rows or region read), as `fitsio`'s `array` feature gives it.
 impl<T> ReadImage for ArrayD<T>
 where
-    T: Clone + ReadImage,
+    T: Clone + ReadPixels,
 {
-    fn read_image(file: &FitsFile, hdu: &FitsHdu) -> Result<Vec<Self>> {
+    fn read_image(file: &FitsFile, hdu: &FitsHdu) -> Result<Self> {
         let data: Vec<T> = T::read_image(file, hdu)?;
         // The image shape is row-major, (.., NAXIS2, NAXIS1), which is how
         // ndarray lays out the flat NAXIS1-fastest buffer.
-        let shape = image_shape(file, hdu)?;
-        let arr = Array::from_shape_vec(shape, data)
-            .map_err(|e| super::errors::Error::Message(e.to_string()))?;
-        Ok(vec![arr])
+        shaped(image_shape(file, hdu)?, data)
     }
 
-    fn read_section(
-        file: &FitsFile,
-        hdu: &FitsHdu,
-        range: std::ops::Range<usize>,
-    ) -> Result<Vec<Self>> {
+    fn read_section(file: &FitsFile, hdu: &FitsHdu, range: std::ops::Range<usize>) -> Result<Self> {
         let data: Vec<T> = T::read_section(file, hdu, range)?;
-        let shape = vec![data.len()];
-        let arr = Array::from_shape_vec(shape, data)
-            .map_err(|e| super::errors::Error::Message(e.to_string()))?;
-        Ok(vec![arr])
+        shaped(vec![data.len()], data)
     }
 
     fn read_rows(
@@ -92,7 +55,7 @@ where
         hdu: &FitsHdu,
         start_row: usize,
         num_rows: usize,
-    ) -> Result<Vec<Self>> {
+    ) -> Result<Self> {
         let data: Vec<T> = T::read_rows(file, hdu, start_row, num_rows)?;
         let full_shape = image_shape(file, hdu)?;
         // A "row" in FITS is one slice along NAXIS1, the fastest axis, which
@@ -106,26 +69,27 @@ where
         } else {
             vec![num_rows, row_length]
         };
-        let arr = Array::from_shape_vec(shape, data)
-            .map_err(|e| super::errors::Error::Message(e.to_string()))?;
-        Ok(vec![arr])
+        shaped(shape, data)
     }
 
     fn read_region(
         file: &FitsFile,
         hdu: &FitsHdu,
-        ranges: &[std::ops::Range<usize>],
-    ) -> Result<Vec<Self>> {
-        let data: Vec<T> = T::read_region(file, hdu, ranges)?;
+        ranges: &[&std::ops::Range<usize>],
+    ) -> Result<Self> {
+        let ranges = owned_ranges(ranges);
+        let data: Vec<T> = T::read_region(file, hdu, &ranges)?;
         // `ranges` are in FITS axis order (NAXIS1 first) and the returned
         // buffer is NAXIS1-fastest, so reverse to row-major shape to match
         // `read_image`.
         let mut shape: Vec<usize> = ranges.iter().map(|r| r.end - r.start).collect();
         shape.reverse();
-        let arr = Array::from_shape_vec(shape, data)
-            .map_err(|e| super::errors::Error::Message(e.to_string()))?;
-        Ok(vec![arr])
+        shaped(shape, data)
     }
+}
+
+fn shaped<T>(shape: Vec<usize>, data: Vec<T>) -> Result<ArrayD<T>> {
+    Array::from_shape_vec(shape, data).map_err(|e| super::errors::Error::Message(e.to_string()))
 }
 
 fn image_shape(file: &FitsFile, hdu: &FitsHdu) -> Result<Vec<usize>> {
@@ -224,9 +188,7 @@ mod tests {
         let pixels: Vec<f32> = (0..12).map(|i| i as f32).collect();
         f32::write_image(&mut f, &hdu, &pixels).unwrap();
 
-        let result: Vec<ArrayD<f32>> = ArrayD::<f32>::read_image(&f, &hdu).unwrap();
-        assert_eq!(result.len(), 1);
-        let arr = &result[0];
+        let arr = ArrayD::<f32>::read_image(&f, &hdu).unwrap();
         // dimensions [4, 3] => NAXIS2=4, NAXIS1=3; the shape is the same.
         assert_eq!(arr.shape(), &[4, 3]);
         assert_eq!(arr[[0, 0]], 0.0);
@@ -247,9 +209,7 @@ mod tests {
         let pixels: Vec<f64> = (0..24).map(|i| i as f64).collect();
         f64::write_image(&mut f, &hdu, &pixels).unwrap();
 
-        let result: Vec<ArrayD<f64>> = ArrayD::<f64>::read_image(&f, &hdu).unwrap();
-        assert_eq!(result.len(), 1);
-        let arr = &result[0];
+        let arr = ArrayD::<f64>::read_image(&f, &hdu).unwrap();
         // dimensions [4, 3, 2] => NAXIS3=4, NAXIS2=3, NAXIS1=2; the shape is
         // the same.
         assert_eq!(arr.shape(), &[4, 3, 2]);
@@ -271,9 +231,7 @@ mod tests {
         let pixels: Vec<f32> = (0..12).map(|i| i as f32).collect();
         f32::write_image(&mut f, &hdu, &pixels).unwrap();
 
-        let result: Vec<ArrayD<f32>> = ArrayD::<f32>::read_section(&f, &hdu, 4..8).unwrap();
-        assert_eq!(result.len(), 1);
-        let arr = &result[0];
+        let arr = ArrayD::<f32>::read_section(&f, &hdu, 4..8).unwrap();
         assert_eq!(arr.shape(), &[4]);
         assert_eq!(arr[0], 4.0);
         assert_eq!(arr[3], 7.0);
@@ -295,9 +253,7 @@ mod tests {
         f32::write_image(&mut f, &hdu, &pixels).unwrap();
 
         // Reading 2 rows starting at row 1 gives 2*5=10 elements
-        let result: Vec<ArrayD<f32>> = ArrayD::<f32>::read_rows(&f, &hdu, 1, 2).unwrap();
-        assert_eq!(result.len(), 1);
-        let arr = &result[0];
+        let arr = ArrayD::<f32>::read_rows(&f, &hdu, 1, 2).unwrap();
         assert_eq!(arr.shape(), &[2, 5]);
         assert_eq!(arr[[0, 0]], 5.0); // row 1, col 0
         assert_eq!(arr[[1, 4]], 14.0); // row 2, col 4
@@ -317,9 +273,7 @@ mod tests {
         let pixels: Vec<f32> = (0..20).map(|i| i as f32).collect();
         f32::write_image(&mut f, &hdu, &pixels).unwrap();
 
-        let result: Vec<ArrayD<f32>> = ArrayD::<f32>::read_region(&f, &hdu, &[1..3, 0..2]).unwrap();
-        assert_eq!(result.len(), 1);
-        let arr = &result[0];
+        let arr = ArrayD::<f32>::read_region(&f, &hdu, &[&(1..3), &(0..2)]).unwrap();
         assert_eq!(arr.shape(), &[2, 2]);
     }
 
@@ -337,9 +291,7 @@ mod tests {
         let pixels: Vec<i32> = vec![10, 20, 30, 40, 50, 60];
         i32::write_image(&mut f, &hdu, &pixels).unwrap();
 
-        let result: Vec<ArrayD<i32>> = ArrayD::<i32>::read_image(&f, &hdu).unwrap();
-        assert_eq!(result.len(), 1);
-        let arr = &result[0];
+        let arr = ArrayD::<i32>::read_image(&f, &hdu).unwrap();
         assert_eq!(arr.shape(), &[6]);
         assert_eq!(arr[0], 10);
         assert_eq!(arr[5], 60);
@@ -360,9 +312,7 @@ mod tests {
         i16::write_image(&mut f, &hdu, &pixels).unwrap();
 
         // Read i16 data as f32 array
-        let result: Vec<ArrayD<f32>> = ArrayD::<f32>::read_image(&f, &hdu).unwrap();
-        assert_eq!(result.len(), 1);
-        let arr = &result[0];
+        let arr = ArrayD::<f32>::read_image(&f, &hdu).unwrap();
         // dimensions [3, 2] => NAXIS2=3, NAXIS1=2; the shape is the same.
         assert_eq!(arr.shape(), &[3, 2]);
         assert_eq!(arr[[0, 0]], 1.0);
@@ -394,8 +344,7 @@ mod tests {
         }
         f32::write_image(&mut f, &hdu, &pixels).unwrap();
 
-        let result: Vec<ArrayD<f32>> = ArrayD::<f32>::read_image(&f, &hdu).unwrap();
-        let arr = &result[0];
+        let arr = ArrayD::<f32>::read_image(&f, &hdu).unwrap();
         assert_eq!(arr.shape(), &[4, 3], "shape must be (rows, cols)");
         for row in 0..4 {
             for col in 0..3 {

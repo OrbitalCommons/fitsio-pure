@@ -375,8 +375,11 @@ fn validate_hdu_index(file: &FitsFile, hdu: &FitsHdu) -> Result<usize> {
     Ok(hdu.number)
 }
 
-/// Trait for types that can be read from a table column.
-pub trait ReadsCol: Sized {
+/// Types a table column can be read as, whole or a range of rows at a time,
+/// as `fitsio`'s `ReadsCol` reads them: the numeric types, `String` and
+/// `bool`. Generic code bounds on this to call `read_col`, `read_col_range`
+/// and `read_cell_value`.
+pub trait ReadsCol: ReadsColRange {
     fn read_col(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<Vec<Self>>;
 }
 

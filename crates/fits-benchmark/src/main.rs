@@ -25,7 +25,7 @@ trait FitsBackend {
 mod pure_backend {
     use super::*;
     use fitsio_pure::compat::fitsfile::FitsFile;
-    use fitsio_pure::compat::images::{ImageDescription, ImageType, ReadImage, WriteImage};
+    use fitsio_pure::compat::images::{ImageDescription, ImageType, ReadPixels, WriteImage};
 
     pub struct PureBackend;
 

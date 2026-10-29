@@ -12,7 +12,7 @@ use fitsio::FitsFile as CFits;
 use fitsio_pure::compat::fitsfile::FitsFile as PureFits;
 use fitsio_pure::compat::hdu::HduInfo as PureHduInfo;
 use fitsio_pure::compat::images::{
-    ImageDescription as PureImageDesc, ImageType as PureImageType, ReadImage, WriteImage,
+    ImageDescription as PureImageDesc, ImageType as PureImageType, ReadPixels, WriteImage,
 };
 
 const SHAPES: [&[usize]; 3] = [&[5, 7], &[7, 5], &[2, 3, 4]];
