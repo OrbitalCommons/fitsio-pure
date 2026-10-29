@@ -193,28 +193,108 @@ impl<T: ReadImage> ReadsImage for Vec<T> {
     }
 }
 
-/// Trait for types that support zero-allocation image reads into a caller buffer.
+/// Image reads into a caller-owned buffer, as cfitsio's `ffgpv` reads them.
+///
+/// Values are physical, with `BSCALE`/`BZERO` applied, exactly as
+/// [`ReadImage::read_image`] returns them. An uncompressed image is read from
+/// the file a block at a time straight into the buffer, without allocating;
+/// a tile-compressed one is decompressed from its own data unit.
 pub trait ReadImageIntoBuffer: Sized {
+    /// Fill `buf` with the image's first `buf.len()` pixels, in the flat,
+    /// `NAXIS1`-fastest order. As with `ffgpv`, the buffer may be shorter than
+    /// the image; a longer one is an error (`BAD_ROW_NUM`).
     fn read_image_into_buffer(file: &FitsFile, hdu: &FitsHdu, buf: &mut [Self]) -> Result<()>;
-}
 
-impl ReadImageIntoBuffer for f32 {
-    fn read_image_into_buffer(file: &FitsFile, hdu: &FitsHdu, buf: &mut [Self]) -> Result<()> {
-        let idx = validate_hdu_index(file, hdu)?;
-        let parsed = file.parsed()?;
-        let core_hdu = &parsed.hdus[idx];
-        crate::image::read_image_data_into_f32(file.data()?, core_hdu, buf)?;
+    /// Fill `buf` with `buf.len()` pixels from pixel `first` (zero-based) on,
+    /// as `ffgpv` with `firstelem = first + 1`. A `first` past the last pixel
+    /// is `BAD_ELEM_NUM`, and a read running past the end `BAD_ROW_NUM`.
+    fn read_section_into_buffer(
+        file: &FitsFile,
+        hdu: &FitsHdu,
+        first: usize,
+        buf: &mut [Self],
+    ) -> Result<()>
+    where
+        Self: ReadImage + Copy,
+    {
+        let pixels = Self::read_section(file, hdu, first..first + buf.len())?;
+        buf.copy_from_slice(&pixels);
         Ok(())
     }
 }
 
-impl ReadImageIntoBuffer for f64 {
-    fn read_image_into_buffer(file: &FitsFile, hdu: &FitsHdu, buf: &mut [Self]) -> Result<()> {
-        let idx = validate_hdu_index(file, hdu)?;
-        let parsed = file.parsed()?;
-        let core_hdu = &parsed.hdus[idx];
-        crate::image::read_image_data_into_f64(file.data()?, core_hdu, buf)?;
-        Ok(())
+macro_rules! impl_read_image_into_buffer {
+    ($($t:ty),*) => {$(
+        impl ReadImageIntoBuffer for $t {
+            fn read_image_into_buffer(
+                file: &FitsFile,
+                hdu: &FitsHdu,
+                buf: &mut [Self],
+            ) -> Result<()> {
+                read_into(file, hdu, 0, buf)
+            }
+
+            fn read_section_into_buffer(
+                file: &FitsFile,
+                hdu: &FitsHdu,
+                first: usize,
+                buf: &mut [Self],
+            ) -> Result<()> {
+                read_into(file, hdu, first, buf)
+            }
+        }
+    )*};
+}
+
+impl_read_image_into_buffer!(u8, i8, i16, u16, i32, u32, i64, u64, f32, f64);
+
+/// Fill `buf` with the physical values of `buf.len()` pixels from pixel
+/// `first` on, as `ffgpv` does.
+fn read_into<T: FromPhysical>(
+    file: &FitsFile,
+    hdu: &FitsHdu,
+    first: usize,
+    buf: &mut [T],
+) -> Result<()> {
+    if buf.is_empty() {
+        return Ok(());
+    }
+    let idx = validate_hdu_index(file, hdu)?;
+    let core = &file.parsed()?.hdus[idx];
+    let naxes = match &core.info {
+        crate::hdu::HduInfo::Primary { naxes, .. } | crate::hdu::HduInfo::Image { naxes, .. } => {
+            naxes
+        }
+        crate::hdu::HduInfo::CompressedImage { znaxes, .. } => znaxes,
+        _ => return Err(Error::status(sys::NOT_IMAGE)),
+    };
+    let pixels = pixel_count(naxes);
+    if first >= pixels {
+        return Err(Error::status(sys::BAD_ELEM_NUM));
+    }
+    if buf.len() > pixels - first {
+        return Err(Error::status(sys::BAD_ROW_NUM));
+    }
+    let (bscale, bzero) = crate::image::extract_bscale_bzero(&core.cards);
+    let scale = Scale::new(bscale, bzero);
+    match &core.info {
+        crate::hdu::HduInfo::Primary { bitpix, .. } | crate::hdu::HduInfo::Image { bitpix, .. } => {
+            let bytes_per_pixel = crate::image::bytes_per_pixel(*bitpix)?;
+            let mut raw = [0u8; 16 * 1024];
+            let block = raw.len() / bytes_per_pixel;
+            for (i, out) in buf.chunks_mut(block).enumerate() {
+                let raw = &mut raw[..out.len() * bytes_per_pixel];
+                let pixel = first + i * block;
+                file.read_at(core.data_start + pixel * bytes_per_pixel, raw)?;
+                scale.apply_raw(raw, *bitpix, out)?;
+            }
+            Ok(())
+        }
+        _ => {
+            let (bytes, local) = file.hdu_data(core)?;
+            let data = crate::image::read_image_data(&bytes, &local)?;
+            scale.apply_data(&data, first, buf)
+        }
     }
 }
 
@@ -271,16 +351,6 @@ fn trim_absent_axes(naxis: usize, ranges: &[std::ops::Range<usize>]) -> &[std::o
     }
 }
 
-/// Pixel values with `BSCALE`/`BZERO` applied, as cfitsio returns them.
-///
-/// Integer data under unit scale and an integer offset stays exact in `i128`,
-/// which covers the `u64` convention (`BZERO = 2^63`); everything else is
-/// scaled in `f64`, as cfitsio does.
-enum Physical {
-    Exact(Vec<i128>),
-    Scaled(Vec<f64>),
-}
-
 /// The image's axis lengths, `NAXIS1` first, or `None` for a table.
 fn image_naxes(hdu: &FitsHdu) -> Option<Vec<usize>> {
     match &hdu.info {
@@ -291,17 +361,17 @@ fn image_naxes(hdu: &FitsHdu) -> Option<Vec<usize>> {
     }
 }
 
-/// Read stored pixels and apply the HDU's `BSCALE`/`BZERO`.
+/// Read pixels and apply the HDU's `BSCALE`/`BZERO`.
 ///
 /// For an uncompressed image, `runs` gives the pixels to read from the
 /// image's axis lengths (`NAXIS1` first), and only those are read from the
-/// file. Any other HDU is read whole with `read`.
-fn read_physical<R, F>(file: &FitsFile, hdu: &FitsHdu, runs: R, read: F) -> Result<Physical>
+/// file. Any other HDU is read whole with `read`, from its data unit alone.
+fn read_physical<T, R, F>(file: &FitsFile, hdu: &FitsHdu, runs: R, read: F) -> Result<Vec<T>>
 where
+    T: FromPhysical,
     R: FnOnce(&[usize]) -> Result<Vec<(usize, usize)>>,
     F: FnOnce(&[u8], &crate::hdu::Hdu) -> crate::error::Result<crate::image::ImageData>,
 {
-    use crate::image::ImageData;
     let idx = validate_hdu_index(file, hdu)?;
     let parsed = file.parsed()?;
     let core_hdu = &parsed.hdus[idx];
@@ -316,30 +386,138 @@ where
             }
             read_runs(file, core_hdu.data_start, *bitpix, &runs)?
         }
-        _ => read(file.data()?, core_hdu)?,
-    };
-    let stored: Vec<i128> = match data {
-        ImageData::U8(v) => v.into_iter().map(i128::from).collect(),
-        ImageData::I16(v) => v.into_iter().map(i128::from).collect(),
-        ImageData::I32(v) => v.into_iter().map(i128::from).collect(),
-        ImageData::I64(v) => v.into_iter().map(i128::from).collect(),
-        ImageData::F32(v) => {
-            let scaled = v.into_iter().map(|x| f64::from(x) * bscale + bzero);
-            return Ok(Physical::Scaled(scaled.collect()));
-        }
-        ImageData::F64(v) => {
-            let scaled = v.into_iter().map(|x| x * bscale + bzero);
-            return Ok(Physical::Scaled(scaled.collect()));
+        _ => {
+            let (bytes, local) = file.hdu_data(core_hdu)?;
+            read(&bytes, &local)?
         }
     };
-    if bscale == 1.0 && bzero.fract() == 0.0 && bzero.abs() < 1e20 {
-        let offset = bzero as i128;
-        Ok(Physical::Exact(
-            stored.into_iter().map(|x| x + offset).collect(),
-        ))
-    } else {
-        let scaled = stored.into_iter().map(|x| x as f64 * bscale + bzero);
-        Ok(Physical::Scaled(scaled.collect()))
+    let mut out = vec![T::default(); image_data_len(&data)];
+    Scale::new(bscale, bzero).apply_data(&data, 0, &mut out)?;
+    Ok(out)
+}
+
+fn image_data_len(data: &crate::image::ImageData) -> usize {
+    use crate::image::ImageData;
+    match data {
+        ImageData::U8(v) => v.len(),
+        ImageData::I16(v) => v.len(),
+        ImageData::I32(v) => v.len(),
+        ImageData::I64(v) => v.len(),
+        ImageData::F32(v) => v.len(),
+        ImageData::F64(v) => v.len(),
+    }
+}
+
+/// A stored pixel type.
+trait Stored: Copy {
+    /// The value as an integer, or `None` for a float.
+    fn exact(self) -> Option<i128>;
+    fn float(self) -> f64;
+}
+
+macro_rules! impl_stored {
+    (int: $($i:ty),*; float: $($f:ty),*) => {
+        $(impl Stored for $i {
+            fn exact(self) -> Option<i128> {
+                Some(i128::from(self))
+            }
+
+            fn float(self) -> f64 {
+                self as f64
+            }
+        })*
+        $(impl Stored for $f {
+            fn exact(self) -> Option<i128> {
+                None
+            }
+
+            fn float(self) -> f64 {
+                f64::from(self)
+            }
+        })*
+    };
+}
+
+impl_stored!(int: u8, i16, i32, i64; float: f32, f64);
+
+/// An image's `BSCALE`/`BZERO`, applied to stored pixels as cfitsio applies
+/// them.
+#[derive(Clone, Copy)]
+struct Scale {
+    bscale: f64,
+    bzero: f64,
+    /// `BZERO` when integers stay exact: unit scale and an integer offset,
+    /// which covers the `u64` convention (`BZERO = 2^63`). Anything else is
+    /// scaled in `f64`.
+    exact_offset: Option<i128>,
+}
+
+impl Scale {
+    fn new(bscale: f64, bzero: f64) -> Self {
+        let exact = bscale == 1.0 && bzero.fract() == 0.0 && bzero.abs() < 1e20;
+        Scale {
+            bscale,
+            bzero,
+            exact_offset: exact.then_some(bzero as i128),
+        }
+    }
+
+    /// Write the physical value of each stored pixel to `out`, stopping at
+    /// whichever runs out first. A value that doesn't fit `T` is cfitsio's
+    /// `NUM_OVERFLOW`; integer types truncate toward zero, as cfitsio does.
+    fn apply<S: Stored, T: FromPhysical>(
+        self,
+        stored: impl IntoIterator<Item = S>,
+        out: &mut [T],
+    ) -> Result<()> {
+        for (out, s) in out.iter_mut().zip(stored) {
+            let value = match (s.exact(), self.exact_offset) {
+                (Some(x), Some(offset)) => T::from_exact(x + offset),
+                _ => T::from_scaled(s.float() * self.bscale + self.bzero),
+            };
+            *out = value.ok_or_else(|| Error::status(sys::NUM_OVERFLOW))?;
+        }
+        Ok(())
+    }
+
+    /// [`Scale::apply`] to big-endian stored pixels of type `bitpix`.
+    fn apply_raw<T: FromPhysical>(self, raw: &[u8], bitpix: i64, out: &mut [T]) -> Result<()> {
+        macro_rules! decode {
+            ($t:ty) => {
+                self.apply(
+                    raw.chunks_exact(core::mem::size_of::<$t>())
+                        .map(|b| <$t>::from_be_bytes(b.try_into().expect("chunk is one pixel"))),
+                    out,
+                )
+            };
+        }
+        match bitpix {
+            8 => decode!(u8),
+            16 => decode!(i16),
+            32 => decode!(i32),
+            64 => decode!(i64),
+            -32 => decode!(f32),
+            -64 => decode!(f64),
+            other => Err(Error::Message(format!("unsupported BITPIX: {other}"))),
+        }
+    }
+
+    /// [`Scale::apply`] to decoded pixels from index `first` on.
+    fn apply_data<T: FromPhysical>(
+        self,
+        data: &crate::image::ImageData,
+        first: usize,
+        out: &mut [T],
+    ) -> Result<()> {
+        use crate::image::ImageData;
+        match data {
+            ImageData::U8(v) => self.apply(v[first..].iter().copied(), out),
+            ImageData::I16(v) => self.apply(v[first..].iter().copied(), out),
+            ImageData::I32(v) => self.apply(v[first..].iter().copied(), out),
+            ImageData::I64(v) => self.apply(v[first..].iter().copied(), out),
+            ImageData::F32(v) => self.apply(v[first..].iter().copied(), out),
+            ImageData::F64(v) => self.apply(v[first..].iter().copied(), out),
+        }
     }
 }
 
@@ -383,7 +561,7 @@ fn pixel_count(naxes: &[usize]) -> usize {
 
 /// Conversion from a physical pixel value to the requested element type.
 /// `None` means the value does not fit, where cfitsio reports `NUM_OVERFLOW`.
-trait FromPhysical: Sized {
+trait FromPhysical: Copy + Default {
     fn from_exact(v: i128) -> Option<Self>;
     fn from_scaled(v: f64) -> Option<Self>;
 }
@@ -420,20 +598,6 @@ macro_rules! impl_from_physical_float {
 
 impl_from_physical_float!(f32, f64);
 
-fn narrow<T: FromPhysical>(physical: Physical) -> Result<Vec<T>> {
-    let overflow = || Error::status(sys::NUM_OVERFLOW);
-    match physical {
-        Physical::Exact(v) => v
-            .into_iter()
-            .map(|x| T::from_exact(x).ok_or_else(overflow))
-            .collect(),
-        Physical::Scaled(v) => v
-            .into_iter()
-            .map(|x| T::from_scaled(x).ok_or_else(overflow))
-            .collect(),
-    }
-}
-
 /// Implement `ReadImage` for a type: every read returns physical values
 /// (`BSCALE`/`BZERO` applied) and fails where a value does not fit, matching
 /// cfitsio rather than wrapping or returning stored values.
@@ -441,12 +605,12 @@ macro_rules! impl_read_image {
     ($($t:ty),*) => {$(
         impl ReadImage for $t {
             fn read_image(file: &FitsFile, hdu: &FitsHdu) -> Result<Vec<Self>> {
-                narrow(read_physical(
+                read_physical(
                     file,
                     hdu,
                     |naxes| Ok(vec![(0, pixel_count(naxes))]),
                     |d, h| crate::image::read_image_data(d, h),
-                )?)
+                )
             }
 
             fn read_section(
@@ -460,12 +624,12 @@ macro_rules! impl_read_image {
                     }
                 }
                 let count = range.end.saturating_sub(range.start);
-                narrow(read_physical(
+                read_physical(
                     file,
                     hdu,
                     |_| Ok(vec![(range.start, count)]),
                     |d, h| crate::image::read_image_section(d, h, range.start, count),
-                )?)
+                )
             }
 
             fn read_rows(
@@ -480,7 +644,7 @@ macro_rules! impl_read_image {
                         return Err(Error::status(sys::BAD_ROW_NUM));
                     }
                 }
-                narrow(read_physical(
+                read_physical(
                     file,
                     hdu,
                     |naxes| {
@@ -492,7 +656,7 @@ macro_rules! impl_read_image {
                         Ok(vec![(start_row * naxes[0], num_rows * naxes[0])])
                     },
                     |d, h| crate::image::read_image_rows(d, h, start_row, num_rows),
-                )?)
+                )
             }
 
             fn read_region(
@@ -514,12 +678,12 @@ macro_rules! impl_read_image {
                     }
                 }
                 let tuples = ranges_to_tuples(ranges);
-                narrow(read_physical(
+                read_physical(
                     file,
                     hdu,
                     |naxes| region_runs(naxes, ranges),
                     |d, h| crate::image::read_image_region(d, h, &tuples),
-                )?)
+                )
             }
         }
     )*};
@@ -1071,8 +1235,14 @@ mod tests {
         let pixels: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
         f32::write_image(&mut f, &hdu, &pixels).unwrap();
 
-        let mut buf = vec![0.0f32; 3]; // wrong size
-        assert!(f32::read_image_into_buffer(&f, &hdu, &mut buf).is_err());
+        // As with ffgpv, a shorter buffer reads the leading pixels.
+        let mut buf = vec![0.0f32; 3];
+        f32::read_image_into_buffer(&f, &hdu, &mut buf).unwrap();
+        assert_eq!(buf, vec![1.0, 2.0, 3.0]);
+
+        let mut buf = vec![0.0f32; 5];
+        let err = f32::read_image_into_buffer(&f, &hdu, &mut buf).unwrap_err();
+        assert_eq!(status(err), sys::BAD_ROW_NUM);
     }
 
     #[test]
@@ -1092,5 +1262,146 @@ mod tests {
         let mut buf = vec![0.0f32; 3];
         f32::read_image_into_buffer(&f, &hdu, &mut buf).unwrap();
         assert_eq!(buf, vec![100.0, 200.0, 300.0]);
+    }
+
+    fn status(err: Error) -> u32 {
+        match err {
+            Error::Fits(e) => e.status as u32,
+            other => panic!("expected a cfitsio status, got {other:?}"),
+        }
+    }
+
+    /// Save a 4x3 `BITPIX = 16` image of 0..11 with `BSCALE = 0.5` and
+    /// `BZERO = 3` to `path`, tile-compressed if `compress`, and open it
+    /// read-only from disk.
+    fn scaled_image(dir: &std::path::Path, compress: bool) -> (FitsFile, FitsHdu) {
+        let path = dir.join("scaled.fits");
+        let spec = if compress { "[compress]" } else { "" };
+        let mut f = FitsFile::create(format!("{}{spec}", path.display()))
+            .open()
+            .unwrap();
+        let desc = ImageDescription {
+            data_type: ImageType::Short,
+            dimensions: &[3, 4],
+        };
+        let hdu = f.create_image("SCI", &desc).unwrap();
+        let stored: Vec<i16> = (0..12).collect();
+        i16::write_image(&mut f, &hdu, &stored).unwrap();
+        hdu.write_key(&mut f, "BSCALE", 0.5f64).unwrap();
+        hdu.write_key(&mut f, "BZERO", 3i64).unwrap();
+        drop(f);
+        let f = FitsFile::open(&path).unwrap();
+        let info = &f.parsed().unwrap().hdus[1].info;
+        assert_eq!(
+            matches!(info, crate::hdu::HduInfo::CompressedImage { .. }),
+            compress
+        );
+        let hdu = f.hdu(1).unwrap();
+        (f, hdu)
+    }
+
+    /// Into-buffer reads of every pixel type match `read_image`, whole and
+    /// in part, on a scaled image.
+    fn check_scaled_into_buffer<T>(f: &FitsFile, hdu: &FitsHdu)
+    where
+        T: ReadImage + ReadImageIntoBuffer + Copy + Default + PartialEq + std::fmt::Debug,
+    {
+        let want = T::read_image(f, hdu).unwrap();
+        assert_eq!(want.len(), 12);
+        let mut buf = vec![T::default(); 12];
+        T::read_image_into_buffer(f, hdu, &mut buf).unwrap();
+        assert_eq!(buf, want);
+
+        let mut part = vec![T::default(); 5];
+        T::read_section_into_buffer(f, hdu, 6, &mut part).unwrap();
+        assert_eq!(part, want[6..11]);
+    }
+
+    fn check_scaled_image(compress: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let (f, hdu) = scaled_image(dir.path(), compress);
+        let physical: Vec<f64> = (0..12).map(|v| f64::from(v) * 0.5 + 3.0).collect();
+
+        let mut buf = vec![0.0f64; 12];
+        f64::read_image_into_buffer(&f, &hdu, &mut buf).unwrap();
+        assert_eq!(buf, physical);
+        let mut buf = vec![0.0f32; 12];
+        f32::read_image_into_buffer(&f, &hdu, &mut buf).unwrap();
+        assert_eq!(buf, physical.iter().map(|&v| v as f32).collect::<Vec<_>>());
+        // Integer reads truncate the physical value, as cfitsio's do.
+        let mut buf = vec![0i32; 4];
+        i32::read_image_into_buffer(&f, &hdu, &mut buf).unwrap();
+        assert_eq!(buf, vec![3, 3, 4, 4]);
+
+        check_scaled_into_buffer::<u8>(&f, &hdu);
+        check_scaled_into_buffer::<i8>(&f, &hdu);
+        check_scaled_into_buffer::<i16>(&f, &hdu);
+        check_scaled_into_buffer::<u16>(&f, &hdu);
+        check_scaled_into_buffer::<i32>(&f, &hdu);
+        check_scaled_into_buffer::<u32>(&f, &hdu);
+        check_scaled_into_buffer::<i64>(&f, &hdu);
+        check_scaled_into_buffer::<u64>(&f, &hdu);
+        check_scaled_into_buffer::<f32>(&f, &hdu);
+        check_scaled_into_buffer::<f64>(&f, &hdu);
+    }
+
+    #[test]
+    fn read_image_into_buffer_applies_bscale_and_bzero() {
+        check_scaled_image(false);
+    }
+
+    #[test]
+    fn read_image_into_buffer_applies_bscale_and_bzero_when_compressed() {
+        check_scaled_image(true);
+    }
+
+    #[test]
+    fn read_section_into_buffer_checks_bounds_as_ffgpv_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let (f, hdu) = scaled_image(dir.path(), false);
+        let mut buf = [0.0f32; 1];
+        f32::read_section_into_buffer(&f, &hdu, 11, &mut buf).unwrap();
+        assert_eq!(buf, [8.5]);
+        let err = f32::read_section_into_buffer(&f, &hdu, 12, &mut buf).unwrap_err();
+        assert_eq!(status(err), sys::BAD_ELEM_NUM);
+        let mut buf = [0.0f32; 2];
+        let err = f32::read_section_into_buffer(&f, &hdu, 11, &mut buf).unwrap_err();
+        assert_eq!(status(err), sys::BAD_ROW_NUM);
+        f32::read_section_into_buffer(&f, &hdu, 12, &mut []).unwrap();
+    }
+
+    #[test]
+    fn read_image_into_buffer_reads_only_the_hdu() {
+        for compress in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (f, hdu) = scaled_image(dir.path(), compress);
+            let mut buf = vec![0.0f32; 12];
+            f32::read_image_into_buffer(&f, &hdu, &mut buf).unwrap();
+            assert!(!f.is_loaded(), "compress = {compress}");
+        }
+    }
+
+    #[test]
+    fn read_image_into_buffer_spans_read_blocks() {
+        // More pixels than one 16 KiB read block holds.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.fits");
+        let mut f = FitsFile::create(&path).open().unwrap();
+        let desc = ImageDescription {
+            data_type: ImageType::Long,
+            dimensions: &[10_000],
+        };
+        let hdu = f.create_image("SCI", &desc).unwrap();
+        let pixels: Vec<i32> = (0..10_000).collect();
+        i32::write_image(&mut f, &hdu, &pixels).unwrap();
+        hdu.write_key(&mut f, "BZERO", -5i64).unwrap();
+        drop(f);
+
+        let f = FitsFile::open(&path).unwrap();
+        let hdu = f.hdu(1).unwrap();
+        let mut buf = vec![0i64; 9_000];
+        i64::read_section_into_buffer(&f, &hdu, 1_000, &mut buf).unwrap();
+        let want: Vec<i64> = (995..9_995).collect();
+        assert_eq!(buf, want);
     }
 }
