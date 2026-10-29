@@ -48,6 +48,15 @@ Comment, history and `LONGSTRN` cards for text of 0, 10, 72, 73 and 300 bytes, b
     - groups written by cfitsio and by `GroupsWriter`, including short and unwritten ones, give byte-identical data units and the same header up to the parameters;
     - all 8 UVFITS fixtures in the Marlu, Birli and hyperdrive test data, including two with duplicate `DATE` pairs, round-trip through `group_params` and `GroupsWriter` with equal parameters, visibilities and antenna tables in astropy's `GroupsHDU`;
     - Marlu's own tests pass (139 + 8) with its UVFITS writer running on `GroupsWriter`.
+- **Reading random groups in compat:** `FitsHdu::read_group_params` and `read_group_data`, with the `images::ReadGroups` trait, for every numeric type. (#152)
+  - **`read_group_params`** reads parameters as cfitsio's `ffggpe` does: stored values, with neither `PSCALn`/`PZEROn` nor `BSCALE`/`BZERO` applied.
+  - **`read_group_data`** reads the data array as `ffgpve` does, with `BSCALE`/`BZERO` applied.
+  - **Ranges:** a read starts at any group and element and runs on through later groups, so all parameters can be read in one call, as hyperdrive does. Only the values asked for are read from the file. A first element past the end is `BAD_ELEM_NUM`, and a read past the last group `BAD_ROW_NUM`.
+  - **Checked against cfitsio:** all 8 UVFITS fixtures in the Marlu, Birli and hyperdrive test data read bit-identical, for every parameter and visibility and for reads that span groups. They agree with astropy's `GroupsHDU` too.
+
+### Fixed
+
+- **Unscaled float reads keep `-0.0`,** as cfitsio's do. Image and group-data reads computed `v * 1.0 + 0.0`, which turns `-0.0` into `0.0`. They now copy unscaled values. Two cotter UVFITS fixtures hold about 5000 `-0.0` visibilities each.
 
 ## 0.22.1
 

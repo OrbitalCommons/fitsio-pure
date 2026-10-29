@@ -93,6 +93,34 @@ impl FitsHdu {
         FitsHdu::at(file, self.number)
     }
 
+    /// Random groups: fill `out` with parameters from 0-based parameter
+    /// `first` of 0-based `group` on, as cfitsio's `ffggpe`
+    /// (`fits_read_grppar_flt`) reads them: unscaled, running on into later
+    /// groups' parameters. See [`ReadGroups`](super::images::ReadGroups).
+    pub fn read_group_params<T: super::images::ReadGroups>(
+        &self,
+        file: &FitsFile,
+        group: usize,
+        first: usize,
+        out: &mut [T],
+    ) -> Result<()> {
+        T::read_group_params(file, self, group, first, out)
+    }
+
+    /// Random groups: fill `out` with data-array values from 0-based element
+    /// `first` of 0-based `group` on, as cfitsio's `ffgpve`
+    /// (`fits_read_img_flt` on a groups HDU) reads them: with
+    /// `BSCALE`/`BZERO` applied, running on into later groups' data.
+    pub fn read_group_data<T: super::images::ReadGroups>(
+        &self,
+        file: &FitsFile,
+        group: usize,
+        first: usize,
+        out: &mut [T],
+    ) -> Result<()> {
+        T::read_group_data(file, self, group, first, out)
+    }
+
     /// Read `out.len()` bits of bit (`X`) or byte (`B`) column `name` into
     /// `out`, from bit `first_bit` of row `first_row` on (both 0-based), as
     /// cfitsio's `ffgcx` (`fits_read_col_bit`) reads them.
