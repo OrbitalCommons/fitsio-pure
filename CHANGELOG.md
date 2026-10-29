@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **The published crate's tests pass.** `tests/parallel.rs` and `tests/physical_f32.rs` read HCOMPRESS/PLIO fixtures from `crates/compat-parity`, which isn't packaged, so `cargo test` on the `.crate` failed with `NotFound`. They now skip those checks when the fixtures are absent, as the corpus tests already do. The packaged crate's tests now pass with default features, with `compat`, and with all features.
+
 ## 0.23.0
 
 This release brings compat's API in line with `fitsio` 0.21. It also adds what the MWA chain (mwalib → Marlu → Birli → mwa_hyperdrive) needed to drop cfitsio: bit columns, random groups (UVFITS) read and write, in-place and seek-based table I/O, and `COMMENT`/`HISTORY`/`HIERARCH` writers that match cfitsio. It is a minor release because compat's table and image-read types changed shape; the migration notes below list each change.

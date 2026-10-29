@@ -136,8 +136,13 @@ fn f32_physical_reads_equal_the_f64_ones_cast() {
         assert_matches("compressed f64", &compressed(&f64s, &opts));
     }
 
+    // The HCOMPRESS and PLIO fixtures are in the repository, not the
+    // published crate.
     let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../compat-parity/tests/fixtures/hcompress");
+    if !fixtures.is_dir() {
+        return;
+    }
     for entry in std::fs::read_dir(fixtures).unwrap() {
         let path = entry.unwrap().path();
         if path.extension().is_some_and(|e| e == "fits") {
