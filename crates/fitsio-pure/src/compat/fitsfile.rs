@@ -346,18 +346,33 @@ impl FitsFile {
         FitsHdu::at(self, idx)
     }
 
-    /// Create a new binary table extension HDU.
-    pub fn create_table(
+    /// Create an empty binary table extension called `extname` with
+    /// `table_description`'s columns, as `fitsio` does:
+    ///
+    /// ```
+    /// use fitsio_pure::compat::fitsfile::FitsFile;
+    /// use fitsio_pure::compat::tables::{ColumnDataType, ColumnDescription};
+    ///
+    /// let mut f = FitsFile::create_in_memory()?;
+    /// let col = ColumnDescription::new("A").with_type(ColumnDataType::Int).create()?;
+    /// let hdu = f.create_table("EXTNAME".to_string(), &[col])?;
+    /// hdu.write_col(&mut f, "A", &[1i32, 2, 3])?;
+    /// # Ok::<(), fitsio_pure::compat::errors::Error>(())
+    /// ```
+    ///
+    /// The unsigned types and `SignedByte` get a `TZEROn` offset, as cfitsio
+    /// gives them. Writing a column grows the table to fit.
+    pub fn create_table<T: Into<String>>(
         &mut self,
-        extname: &str,
-        columns: &[crate::bintable::BinaryColumnDescriptor],
+        extname: T,
+        table_description: &[super::tables::ConcreteColumnDescription],
     ) -> Result<FitsHdu> {
         self.check_writable()?;
-        let mut cards = crate::bintable::build_binary_table_cards(columns, 0, 0)?;
+        let mut cards = super::tables::table_cards(table_description)?;
 
         let extname_card = crate::header::Card {
             keyword: make_keyword("EXTNAME"),
-            value: Some(crate::value::Value::String(extname.to_string())),
+            value: Some(crate::value::Value::String(extname.into())),
             comment: None,
         };
         cards.push(extname_card);

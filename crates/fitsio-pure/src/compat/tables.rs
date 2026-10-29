@@ -4,76 +4,354 @@ use super::hdu::FitsHdu;
 use super::sys;
 use crate::bintable::{BinaryColumnData, BinaryColumnType};
 
-/// Describes one column in a table extension.
-#[derive(Debug, Clone, PartialEq)]
+/// A column to create, built as in `fitsio`:
+///
+/// ```
+/// use fitsio_pure::compat::tables::{ColumnDataType, ColumnDescription};
+///
+/// let col = ColumnDescription::new("FLUX")
+///     .with_type(ColumnDataType::Float)
+///     .that_repeats(4)
+///     .create()?;
+/// assert_eq!(col.data_type.repeat, 4);
+/// # Ok::<(), fitsio_pure::compat::errors::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnDescription {
+    /// The column's name, its `TTYPEn`.
     pub name: String,
+    /// Its data type; `None` until [`ColumnDescription::with_type`] is called.
+    pub data_type: Option<ColumnDataDescription>,
+}
+
+/// A column with its data type known: what [`ColumnDescription::create`]
+/// returns and [`FitsFile::create_table`] takes, and what
+/// `HduInfo::TableInfo` lists for each column of a table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConcreteColumnDescription {
+    /// The column's name, its `TTYPEn`.
+    pub name: String,
+    /// Its data type.
     pub data_type: ColumnDataDescription,
 }
 
-/// Describes the data type and repeat count for a column.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ColumnDataDescription {
-    pub data_type: ColumnDataType,
-    pub repeat: usize,
-    pub width: usize,
-}
-
-/// The supported column data types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ColumnDataType {
-    Int,
-    Long,
-    Float,
-    Double,
-    String,
-    Short,
-    Byte,
-    Logical,
-}
-
-/// A concrete column descriptor with computed byte width.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ConcreteColumnDescription {
-    pub name: String,
-    pub data_type: ColumnDataType,
-    pub repeat: usize,
-    pub width: usize,
-}
-
 impl ColumnDescription {
-    /// Convert to a concrete descriptor.
-    pub fn to_concrete(&self) -> ConcreteColumnDescription {
-        ConcreteColumnDescription {
-            name: self.name.clone(),
-            data_type: self.data_type.data_type,
-            repeat: self.data_type.repeat,
-            width: self.data_type.width,
+    /// A column called `name`, with no type yet.
+    pub fn new<T: Into<String>>(name: T) -> Self {
+        ColumnDescription {
+            name: name.into(),
+            data_type: None,
         }
     }
+
+    /// Give the column a type, as a scalar.
+    pub fn with_type(&mut self, typ: ColumnDataType) -> &mut ColumnDescription {
+        self.data_type = Some(ColumnDataDescription::scalar(typ));
+        self
+    }
+
+    /// Make each cell hold `repeat` values. Does nothing before
+    /// [`with_type`](Self::with_type).
+    pub fn that_repeats(&mut self, repeat: usize) -> &mut ColumnDescription {
+        if let Some(desc) = &mut self.data_type {
+            desc.repeat = repeat;
+        }
+        self
+    }
+
+    /// Set the width of each string in a `Text` column of several, as
+    /// `TFORMn = 'rAw'` does. Does nothing before
+    /// [`with_type`](Self::with_type).
+    pub fn with_width(&mut self, width: usize) -> &mut ColumnDescription {
+        if let Some(desc) = &mut self.data_type {
+            desc.width = width;
+        }
+        self
+    }
+
+    /// The finished column, or an error if it has no type.
+    pub fn create(&self) -> Result<ConcreteColumnDescription> {
+        match &self.data_type {
+            Some(data_type) => Ok(ConcreteColumnDescription {
+                name: self.name.clone(),
+                data_type: data_type.clone(),
+            }),
+            None => Err(Error::Message(
+                "No data type given. Ensure the `with_type` method has been called.".to_string(),
+            )),
+        }
+    }
+}
+
+/// A column's data type and shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnDataDescription {
+    /// Values per cell: the `r` in `TFORMn = 'rT'`. For a string column, its
+    /// length; for a bit column, its number of bits.
+    pub repeat: usize,
+    /// For a `Text` column, the width of each string: the `w` in `rAw`.
+    pub width: usize,
+    /// The type of each value.
+    pub typ: ColumnDataType,
 }
 
 impl ColumnDataDescription {
-    /// Create a new column data description with the given type and repeat=1, width=1.
-    pub fn new(data_type: ColumnDataType) -> Self {
-        ColumnDataDescription {
-            data_type,
-            repeat: 1,
-            width: 1,
+    /// A description from its parts.
+    pub fn new(typ: ColumnDataType, repeat: usize, width: usize) -> Self {
+        ColumnDataDescription { repeat, width, typ }
+    }
+
+    /// One value per cell.
+    pub fn scalar(typ: ColumnDataType) -> Self {
+        ColumnDataDescription::new(typ, 1, 1)
+    }
+
+    /// `repeat` values per cell.
+    pub fn vector(typ: ColumnDataType, repeat: usize) -> Self {
+        ColumnDataDescription::new(typ, repeat, 1)
+    }
+}
+
+/// The `TFORMn` value, as `fitsio` renders it: `"4E"`, or `"60A12"` for a
+/// string column with a width.
+impl From<ColumnDataDescription> for String {
+    fn from(orig: ColumnDataDescription) -> String {
+        let letter = String::from(orig.typ);
+        match orig.typ {
+            ColumnDataType::Text if orig.width > 1 => {
+                format!("{}{letter}{}", orig.repeat, orig.width)
+            }
+            _ => format!("{}{letter}", orig.repeat),
+        }
+    }
+}
+
+/// Parse a `TFORMn`-like value such as `"1J"`, `"E"` or `"60A12"`, as
+/// `fitsio` does. The unsigned and signed-byte letters `U`, `V`, `W` and `S`
+/// are accepted, as cfitsio accepts them.
+impl std::str::FromStr for ColumnDataDescription {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        let bad = || Error::Message(format!("unsupported column format {s:?}"));
+        let letter_at = s.find(|c: char| !c.is_ascii_digit()).ok_or_else(bad)?;
+        let number = |digits: &str| match digits {
+            "" => Ok(1),
+            digits => digits.parse::<usize>().map_err(|_| bad()),
+        };
+        let repeat = number(&s[..letter_at])?;
+        let letter = s[letter_at..].chars().next().ok_or_else(bad)?;
+        let rest = &s[letter_at + letter.len_utf8()..];
+        let width_end = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        let width = number(&rest[..width_end])?;
+        let typ = match letter {
+            'L' => ColumnDataType::Logical,
+            'X' => ColumnDataType::Bit,
+            'B' => ColumnDataType::Byte,
+            'S' => ColumnDataType::SignedByte,
+            'I' => ColumnDataType::Short,
+            'U' => ColumnDataType::UnsignedShort,
+            'J' => ColumnDataType::Int,
+            'V' => ColumnDataType::UnsignedLong,
+            'K' => ColumnDataType::LongLong,
+            'W' => ColumnDataType::UnsignedLongLong,
+            'E' => ColumnDataType::Float,
+            'D' => ColumnDataType::Double,
+            'A' => ColumnDataType::String,
+            _ => return Err(bad()),
+        };
+        Ok(ColumnDataDescription { repeat, width, typ })
+    }
+}
+
+/// The types a column can hold, as in `fitsio`.
+///
+/// `Int` and `Long` are both 32-bit (`J`), and `Text` and `String` both
+/// strings (`A`). The unsigned types and `SignedByte` are stored as cfitsio
+/// stores them: as the signed (or unsigned, for bytes) type of the same
+/// size, with a `TZEROn` offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnDataType {
+    Logical,
+    Bit,
+    Byte,
+    SignedByte,
+    Short,
+    UnsignedShort,
+    Int,
+    Long,
+    UnsignedLong,
+    Float,
+    Text,
+    Double,
+    LongLong,
+    UnsignedLongLong,
+    String,
+}
+
+/// The type's `TFORMn` letter, as `fitsio` renders it: `"U"` for
+/// `UnsignedShort`, `"J"` for `Int` and `Long`, and so on.
+impl From<ColumnDataType> for String {
+    fn from(orig: ColumnDataType) -> String {
+        use ColumnDataType::*;
+        match orig {
+            Logical => "L",
+            Bit => "X",
+            Byte => "B",
+            SignedByte => "S",
+            Short => "I",
+            UnsignedShort => "U",
+            Int | Long => "J",
+            UnsignedLong => "V",
+            Float => "E",
+            Text | String => "A",
+            Double => "D",
+            LongLong => "K",
+            UnsignedLongLong => "W",
+        }
+        .to_string()
+    }
+}
+
+impl ColumnDataType {
+    /// How the column is stored: its binary-table type, and the `TZEROn`
+    /// offset that makes the unsigned and signed-byte types, as cfitsio
+    /// writes them.
+    fn storage(self) -> (BinaryColumnType, Option<crate::value::Value>) {
+        use crate::value::Value;
+        use ColumnDataType::*;
+        match self {
+            Logical => (BinaryColumnType::Logical, None),
+            Bit => (BinaryColumnType::Bit, None),
+            Byte => (BinaryColumnType::Byte, None),
+            SignedByte => (BinaryColumnType::Byte, Some(Value::Integer(-128))),
+            Short => (BinaryColumnType::Short, None),
+            UnsignedShort => (BinaryColumnType::Short, Some(Value::Integer(32_768))),
+            Int | Long => (BinaryColumnType::Int, None),
+            UnsignedLong => (BinaryColumnType::Int, Some(Value::Integer(2_147_483_648))),
+            Float => (BinaryColumnType::Float, None),
+            Double => (BinaryColumnType::Double, None),
+            LongLong => (BinaryColumnType::Long, None),
+            UnsignedLongLong => (
+                BinaryColumnType::Long,
+                Some(Value::Float(9_223_372_036_854_775_808.0)),
+            ),
+            Text | String => (BinaryColumnType::Ascii, None),
+        }
+    }
+}
+
+impl ConcreteColumnDescription {
+    /// The description `fitsio` gives a column of an existing table, from
+    /// cfitsio's `ffgbcl`: the stored type, whatever `TZEROn` is, the `TFORMn`
+    /// repeat, and a width of 1.
+    ///
+    /// `fitsio` panics on complex and variable-length columns. Here a complex
+    /// column is described as `Float` or `Double` pairs, and a variable-length
+    /// one by its element type.
+    pub(crate) fn of_column(column: &crate::bintable::BinaryColumnDescriptor) -> Self {
+        let (typ, repeat) = match column.col_type {
+            BinaryColumnType::Logical => (ColumnDataType::Logical, column.repeat),
+            BinaryColumnType::Bit => (ColumnDataType::Bit, column.repeat),
+            BinaryColumnType::Byte => (ColumnDataType::Byte, column.repeat),
+            BinaryColumnType::Short => (ColumnDataType::Short, column.repeat),
+            BinaryColumnType::Int => (ColumnDataType::Int, column.repeat),
+            BinaryColumnType::Long => (ColumnDataType::LongLong, column.repeat),
+            BinaryColumnType::Float => (ColumnDataType::Float, column.repeat),
+            BinaryColumnType::Double => (ColumnDataType::Double, column.repeat),
+            BinaryColumnType::ComplexFloat => (ColumnDataType::Float, 2 * column.repeat),
+            BinaryColumnType::ComplexDouble => (ColumnDataType::Double, 2 * column.repeat),
+            BinaryColumnType::Ascii => (ColumnDataType::String, column.repeat),
+            BinaryColumnType::VarArrayP(element) | BinaryColumnType::VarArrayQ(element) => {
+                let typ = element
+                    .to_string()
+                    .parse::<ColumnDataDescription>()
+                    .map_or(ColumnDataType::Byte, |d| d.typ);
+                (typ, column.repeat)
+            }
+        };
+        ConcreteColumnDescription {
+            name: column.name.clone().unwrap_or_default(),
+            data_type: ColumnDataDescription::vector(typ, repeat),
         }
     }
 
-    /// Set the repeat count.
-    pub fn with_repeat(mut self, repeat: usize) -> Self {
-        self.repeat = repeat;
-        self
+    /// The description of an ASCII-table column, by the type cfitsio reads it
+    /// as: `Aw` a string of `w` characters, `Iw` an `Int` (a `Short` for
+    /// `w <= 4`), `Fw.d` and `Ew.d` a `Float`, `Dw.d` a `Double`.
+    pub(crate) fn of_ascii_column(column: &crate::table::AsciiColumnDescriptor) -> Self {
+        use crate::table::AsciiColumnFormat;
+        let (typ, repeat) = match column.format {
+            AsciiColumnFormat::Character(width) => (ColumnDataType::String, width),
+            AsciiColumnFormat::Integer(width) if width <= 4 => (ColumnDataType::Short, 1),
+            AsciiColumnFormat::Integer(_) => (ColumnDataType::Int, 1),
+            AsciiColumnFormat::FloatF(..) | AsciiColumnFormat::FloatE(..) => {
+                (ColumnDataType::Float, 1)
+            }
+            AsciiColumnFormat::DoubleE(..) => (ColumnDataType::Double, 1),
+        };
+        ConcreteColumnDescription {
+            name: column.name.clone().unwrap_or_default(),
+            data_type: ColumnDataDescription::vector(typ, repeat),
+        }
     }
 
-    /// Set the width (used for string columns).
-    pub fn with_width(mut self, width: usize) -> Self {
-        self.width = width;
-        self
+    /// The column as stored, with its `TZEROn` and, for a `Text` column with a
+    /// width, its `rAw` `TFORMn`, as `fitsio` renders them.
+    fn storage(
+        &self,
+    ) -> (
+        crate::bintable::BinaryColumnDescriptor,
+        Option<crate::value::Value>,
+        Option<String>,
+    ) {
+        let (col_type, tzero) = self.data_type.typ.storage();
+        let repeat = self.data_type.repeat;
+        let byte_width = match col_type {
+            BinaryColumnType::Bit => repeat.div_ceil(8),
+            _ => repeat * crate::bintable::binary_type_byte_size(&col_type),
+        };
+        let tform = (self.data_type.typ == ColumnDataType::Text && self.data_type.width > 1)
+            .then(|| String::from(self.data_type.clone()));
+        let column = crate::bintable::BinaryColumnDescriptor {
+            name: Some(self.name.clone()),
+            repeat,
+            col_type,
+            byte_width,
+            tdim: None,
+        };
+        (column, tzero, tform)
     }
+}
+
+/// The binary-table header cards for `columns`, without `EXTNAME`.
+pub(crate) fn table_cards(
+    columns: &[ConcreteColumnDescription],
+) -> Result<Vec<crate::header::Card>> {
+    let stored: Vec<_> = columns.iter().map(|c| c.storage()).collect();
+    let descriptors: Vec<_> = stored.iter().map(|(d, _, _)| d.clone()).collect();
+    let mut cards = crate::bintable::build_binary_table_cards(&descriptors, 0, 0)?;
+    for (i, (_, tzero, tform)) in stored.into_iter().enumerate() {
+        let n = i + 1;
+        if let Some(tform) = tform {
+            let keyword = format!("TFORM{n}");
+            if let Some(card) = cards.iter_mut().find(|c| c.keyword_str() == keyword) {
+                card.value = Some(crate::value::Value::String(tform));
+            }
+        }
+        if let Some(tzero) = tzero {
+            // As cfitsio does, right after the column's `TFORMn`.
+            let after = format!("TFORM{n}");
+            let at = cards
+                .iter()
+                .position(|c| c.keyword_str() == after)
+                .map_or(cards.len(), |i| i + 1);
+            cards.insert(at, crate::header::Card::new(&format!("TZERO{n}"), tzero)?);
+        }
+    }
+    Ok(cards)
 }
 
 /// A typed column read from a table.
@@ -683,26 +961,158 @@ mod tests {
     use super::*;
     use crate::compat::fitsfile::FitsFile;
 
-    #[test]
-    fn column_description_to_concrete() {
-        let desc = ColumnDescription {
-            name: "X".to_string(),
-            data_type: ColumnDataDescription::new(ColumnDataType::Int),
-        };
-        let concrete = desc.to_concrete();
-        assert_eq!(concrete.name, "X");
-        assert_eq!(concrete.data_type, ColumnDataType::Int);
-        assert_eq!(concrete.repeat, 1);
+    /// A scalar column of `typ`, or a vector of `repeat` values.
+    fn concrete(name: &str, typ: ColumnDataType, repeat: usize) -> ConcreteColumnDescription {
+        ColumnDescription::new(name)
+            .with_type(typ)
+            .that_repeats(repeat)
+            .create()
+            .unwrap()
     }
 
     #[test]
-    fn column_data_description_builder() {
-        let desc = ColumnDataDescription::new(ColumnDataType::String)
-            .with_repeat(20)
-            .with_width(20);
-        assert_eq!(desc.data_type, ColumnDataType::String);
-        assert_eq!(desc.repeat, 20);
-        assert_eq!(desc.width, 20);
+    fn column_descriptions_build_as_in_fitsio() {
+        let col = ColumnDescription::new("X")
+            .with_type(ColumnDataType::Text)
+            .that_repeats(60)
+            .with_width(12)
+            .create()
+            .unwrap();
+        assert_eq!(col.name, "X");
+        assert_eq!(
+            col.data_type,
+            ColumnDataDescription::new(ColumnDataType::Text, 60, 12)
+        );
+        assert_eq!(String::from(col.data_type), "60A12");
+        // As in `fitsio`, only `Text` renders its width.
+        let string = ColumnDataDescription::new(ColumnDataType::String, 60, 12);
+        assert_eq!(String::from(string), "60A");
+        // Repeat and width are ignored until there is a type.
+        let mut untyped = ColumnDescription::new("Y");
+        untyped.that_repeats(3).with_width(2);
+        assert_eq!(untyped.data_type, None);
+        assert!(untyped.create().is_err());
+    }
+
+    #[test]
+    fn column_data_descriptions_parse_and_render_as_in_fitsio() {
+        for (text, typ, repeat, width) in [
+            ("1J", ColumnDataType::Int, 1, 1),
+            ("E", ColumnDataType::Float, 1, 1),
+            ("16X", ColumnDataType::Bit, 16, 1),
+            ("3U", ColumnDataType::UnsignedShort, 3, 1),
+            ("60A12", ColumnDataType::String, 60, 12),
+            ("2W", ColumnDataType::UnsignedLongLong, 2, 1),
+        ] {
+            let parsed: ColumnDataDescription = text.parse().unwrap();
+            assert_eq!(
+                parsed,
+                ColumnDataDescription::new(typ, repeat, width),
+                "{text}"
+            );
+        }
+        assert!("2Q".parse::<ColumnDataDescription>().is_err());
+        assert!("".parse::<ColumnDataDescription>().is_err());
+        assert_eq!(String::from(ColumnDataType::Long), "J");
+        assert_eq!(String::from(ColumnDataType::Text), "A");
+        assert_eq!(
+            String::from(ColumnDataDescription::vector(ColumnDataType::Double, 4)),
+            "4D"
+        );
+    }
+
+    #[test]
+    fn create_table_writes_every_column_type_as_cfitsio_does() {
+        use ColumnDataType::*;
+        let mut f = FitsFile::create_in_memory().unwrap();
+        let types = [
+            Logical,
+            Bit,
+            Byte,
+            SignedByte,
+            Short,
+            UnsignedShort,
+            Int,
+            Long,
+            UnsignedLong,
+            Float,
+            Text,
+            Double,
+            LongLong,
+            UnsignedLongLong,
+            String,
+        ];
+        let columns: Vec<_> = types
+            .iter()
+            .enumerate()
+            .map(|(i, &typ)| concrete(&format!("C{i}"), typ, 2))
+            .collect();
+        let hdu = f.create_table("ALL".to_string(), &columns).unwrap();
+        let cards = &f.parsed().unwrap().hdus[1].cards;
+        let value = |key: &str| {
+            cards
+                .iter()
+                .find(|c| c.keyword_str() == key)
+                .and_then(|c| c.value.clone())
+        };
+        use crate::value::Value;
+        for (n, tform, tzero) in [
+            (1, "2L", None),
+            (2, "2X", None),
+            (3, "2B", None),
+            (4, "2B", Some(Value::Integer(-128))),
+            (6, "2I", Some(Value::Integer(32768))),
+            (9, "2J", Some(Value::Integer(2_147_483_648))),
+            (14, "2K", Some(Value::Float(9_223_372_036_854_775_808.0))),
+            (15, "2A", None),
+        ] {
+            assert_eq!(
+                value(&format!("TFORM{n}")),
+                Some(Value::String(tform.to_string()))
+            );
+            assert_eq!(value(&format!("TZERO{n}")), tzero, "TZERO{n}");
+        }
+        match hdu.info(&f).unwrap() {
+            crate::compat::hdu::HduInfo::TableInfo {
+                column_descriptions,
+                num_rows,
+            } => {
+                assert_eq!(num_rows, 0);
+                // Read back, a column is described by how it is stored, as
+                // cfitsio's ffgbcl describes it.
+                let stored: Vec<_> = column_descriptions
+                    .iter()
+                    .map(|c| c.data_type.typ)
+                    .collect();
+                assert_eq!(
+                    stored,
+                    [
+                        Logical, Bit, Byte, Byte, Short, Short, Int, Int, Int, Float, String,
+                        Double, LongLong, LongLong, String
+                    ]
+                );
+                assert!(column_descriptions.iter().all(|c| c.data_type.repeat == 2));
+            }
+            other => panic!("expected TableInfo, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unsigned_columns_round_trip_through_create_table() {
+        let mut f = FitsFile::create_in_memory().unwrap();
+        let columns = [
+            concrete("U16", ColumnDataType::UnsignedShort, 1),
+            concrete("U32", ColumnDataType::UnsignedLong, 1),
+            concrete("I8", ColumnDataType::SignedByte, 1),
+        ];
+        let hdu = f.create_table("U", &columns).unwrap();
+        hdu.write_col(&mut f, "U16", &[0u16, 65535]).unwrap();
+        hdu.write_col(&mut f, "U32", &[0u32, 4_000_000_000])
+            .unwrap();
+        hdu.write_col(&mut f, "I8", &[-128i8, 127]).unwrap();
+        assert_eq!(hdu.read_col::<u16>(&f, "U16").unwrap(), [0, 65535]);
+        assert_eq!(hdu.read_col::<u32>(&f, "U32").unwrap(), [0, 4_000_000_000]);
+        assert_eq!(hdu.read_col::<i8>(&f, "I8").unwrap(), [-128, 127]);
     }
 
     #[test]
@@ -983,8 +1393,8 @@ mod tests {
             .create_table(
                 "T",
                 &[
-                    column("A", BinaryColumnType::Int, 4),
-                    column("B", BinaryColumnType::Double, 8),
+                    concrete("A", ColumnDataType::Int, 1),
+                    concrete("B", ColumnDataType::Double, 1),
                 ],
             )
             .unwrap();
@@ -998,8 +1408,11 @@ mod tests {
         assert_eq!(
             hdu.info(&f).unwrap(),
             crate::compat::hdu::HduInfo::TableInfo {
-                column_count: 2,
-                row_count: 5
+                column_descriptions: vec![
+                    concrete("A", ColumnDataType::Int, 1),
+                    concrete("B", ColumnDataType::Double, 1)
+                ],
+                num_rows: 5
             }
         );
     }
@@ -1016,8 +1429,7 @@ mod tests {
     #[test]
     fn write_col_rejects_a_partial_row() {
         let mut f = FitsFile::create_in_memory().unwrap();
-        let mut wide = column("V", BinaryColumnType::Int, 12);
-        wide.repeat = 3;
+        let wide = concrete("V", ColumnDataType::Int, 3);
         let hdu = f.create_table("T", &[wide]).unwrap();
         assert!(hdu.write_col(&mut f, "V", &[1i32, 2, 3, 4]).is_err());
         hdu.write_col(&mut f, "V", &[1i32, 2, 3, 4, 5, 6]).unwrap();

@@ -2,7 +2,7 @@ use super::errors::{Error, Result};
 use super::fitsfile::FitsFile;
 use super::headers::{ReadsKey, WritesKey};
 use super::images::{ReadsImage, WriteImage};
-use super::tables::{ReadsCol, ReadsColRange, WritesCol};
+use super::tables::{ConcreteColumnDescription, ReadsCol, ReadsColRange, WritesCol};
 use std::ops::Range;
 
 /// Handle to one HDU within a FITS file.
@@ -30,8 +30,10 @@ pub enum HduInfo {
         image_type: super::images::ImageType,
     },
     TableInfo {
-        column_count: usize,
-        row_count: usize,
+        /// Each column's name and type, as `fitsio` describes them.
+        column_descriptions: Vec<ConcreteColumnDescription>,
+        /// The number of rows, `NAXIS2`.
+        num_rows: usize,
     },
     AnyInfo,
 }
@@ -211,16 +213,28 @@ fn hdu_info(file: &FitsFile, number: usize) -> Result<HduInfo> {
         }
         crate::hdu::HduInfo::AsciiTable {
             naxis2, tfields, ..
-        } => Ok(HduInfo::TableInfo {
-            column_count: *tfields,
-            row_count: *naxis2,
-        }),
+        } => {
+            let columns = crate::table::parse_ascii_table_columns(&hdu.cards, *tfields)?;
+            Ok(HduInfo::TableInfo {
+                column_descriptions: columns
+                    .iter()
+                    .map(ConcreteColumnDescription::of_ascii_column)
+                    .collect(),
+                num_rows: *naxis2,
+            })
+        }
         crate::hdu::HduInfo::BinaryTable {
             naxis2, tfields, ..
-        } => Ok(HduInfo::TableInfo {
-            column_count: *tfields,
-            row_count: *naxis2,
-        }),
+        } => {
+            let columns = crate::bintable::parse_binary_table_columns(&hdu.cards, *tfields)?;
+            Ok(HduInfo::TableInfo {
+                column_descriptions: columns
+                    .iter()
+                    .map(ConcreteColumnDescription::of_column)
+                    .collect(),
+                num_rows: *naxis2,
+            })
+        }
         crate::hdu::HduInfo::RandomGroups { bitpix, naxes, .. } => {
             let image_type = super::images::ImageType::equivalent(*bitpix, bscale, bzero)?;
             Ok(HduInfo::ImageInfo {
