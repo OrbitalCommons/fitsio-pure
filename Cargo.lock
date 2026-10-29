@@ -111,7 +111,7 @@ dependencies = [
 
 [[package]]
 name = "fitsio-pure"
-version = "0.22.0"
+version = "0.22.1"
 dependencies = [
  "bytemuck",
  "libm",
