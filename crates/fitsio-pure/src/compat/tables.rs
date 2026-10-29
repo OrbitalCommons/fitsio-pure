@@ -107,20 +107,119 @@ pub trait WritesCol: Sized {
     fn write_col(file: &mut FitsFile, hdu: &FitsHdu, name: &str, data: &[Self]) -> Result<()>;
 }
 
+/// The index of the column called `name`.
+///
+/// A column with exactly that name, as `fitsio` looks it up, comes first.
+/// Failing that, `name` picks a column as cfitsio's `ffgcno` with
+/// `CASEINSEN` picks it, which is how code calling cfitsio directly looks
+/// columns up: ignoring case and trailing blanks, with wildcards (see
+/// [`template_match`]). One exact match wins, then one wildcard match; more
+/// than one is `COL_NOT_UNIQUE` (237). With no match, a `name` that is a
+/// column number, such as `"3"`, picks that column; anything else is
+/// `COL_NOT_FOUND` (219).
 fn find_column_index(cards: &[crate::header::Card], name: &str, tfields: usize) -> Result<usize> {
-    for i in 1..=tfields {
-        let ttype_key = format!("TTYPE{}", i);
-        for card in cards {
-            if card.keyword_str() == ttype_key {
-                if let Some(crate::value::Value::String(ref s)) = card.value {
-                    if s.trim() == name {
-                        return Ok(i - 1);
+    let ttypes: Vec<&str> = (1..=tfields)
+        .map(|i| {
+            let ttype_key = format!("TTYPE{i}");
+            cards
+                .iter()
+                .find_map(|card| match &card.value {
+                    Some(crate::value::Value::String(s)) if card.keyword_str() == ttype_key => {
+                        Some(s.as_str())
                     }
+                    _ => None,
+                })
+                .unwrap_or("")
+        })
+        .collect();
+    if let Some(i) = ttypes.iter().position(|ttype| ttype.trim_end() == name) {
+        return Ok(i);
+    }
+    let mut exact = None;
+    let mut wildcard = None;
+    let mut wildcards = 0;
+    for (i, ttype) in ttypes.iter().enumerate() {
+        match template_match(name, ttype) {
+            Some(true) if exact.is_some() => return Err(Error::status(sys::COL_NOT_UNIQUE)),
+            Some(true) => exact = Some(i),
+            Some(false) => {
+                wildcard.get_or_insert(i);
+                wildcards += 1;
+            }
+            None => {}
+        }
+    }
+    match (exact, wildcard) {
+        (Some(i), _) => Ok(i),
+        (None, Some(_)) if wildcards > 1 => Err(Error::status(sys::COL_NOT_UNIQUE)),
+        (None, Some(i)) => Ok(i),
+        (None, None) => match name.trim().parse::<usize>() {
+            Ok(n) if (1..=tfields).contains(&n) => Ok(n - 1),
+            _ => Err(Error::status(sys::COL_NOT_FOUND)),
+        },
+    }
+}
+
+/// Whether the column name `name` matches `template`, as cfitsio's `ffcmps`
+/// decides it ignoring case: `Some(true)` for an exact match, `Some(false)`
+/// for a match through wildcards, `None` for none.
+///
+/// Trailing blanks don't count. `?` matches any one character, `*` any run
+/// of them, and `#` a run of digits. A wildcard character is first taken
+/// literally, so `AB*DE` is an exact match for a column named `AB*DE`.
+fn template_match(template: &str, name: &str) -> Option<bool> {
+    let upper = |s: &str| s.trim_end_matches(' ').to_ascii_uppercase().into_bytes();
+    let (t, s) = (upper(template), upper(name));
+    if t == s {
+        return Some(true);
+    }
+    // A port of the scan in `ffcmps`, backtracking to the last `*` when a
+    // path through it fails.
+    let (mut ti, mut si) = (0, 0);
+    let mut star: Option<(usize, usize)> = None;
+    loop {
+        let (tc, sc) = (t.get(ti).copied(), s.get(si).copied());
+        match (tc, sc) {
+            (None, None) => return Some(false),
+            (None, Some(_)) => {
+                let (tsave, ssave) = star?;
+                ti = tsave;
+                si = ssave + 1;
+                star = Some((tsave, ssave + 1));
+                continue;
+            }
+            (Some(b'*'), None) if ti + 1 == t.len() => return Some(false),
+            (Some(_), None) => return None,
+            (Some(tc), Some(sc)) if tc == sc || tc == b'?' => {
+                ti += 1;
+                si += 1;
+            }
+            (Some(b'#'), Some(sc)) if sc.is_ascii_digit() => {
+                ti += 1;
+                si += 1;
+                while s.get(si).is_some_and(u8::is_ascii_digit) {
+                    si += 1;
                 }
+            }
+            (Some(b'*'), Some(_)) => {
+                star = Some((ti, si));
+                ti += 1;
+                if ti == t.len() || t[ti] == b' ' {
+                    return Some(false);
+                }
+                let next = t[ti];
+                let found = s[si..].iter().position(|&c| c == next)?;
+                si += found + 1;
+                ti += 1;
+            }
+            (Some(_), Some(_)) => {
+                let (tsave, ssave) = star?;
+                ti = tsave;
+                si = ssave + 1;
+                star = Some((tsave, ssave + 1));
             }
         }
     }
-    Err(Error::Message(format!("Cannot find column {name:?}")))
 }
 
 fn get_tfields(hdu: &crate::hdu::Hdu) -> Result<usize> {
@@ -676,7 +775,65 @@ mod tests {
         f.set_data(data);
 
         let hdu = f.hdu(1usize).unwrap();
-        assert!(i32::read_col(&f, &hdu, "MISSING").is_err());
+        match i32::read_col(&f, &hdu, "MISSING") {
+            Err(Error::Fits(e)) => assert_eq!(e.status, sys::COL_NOT_FOUND as i32),
+            other => panic!("expected COL_NOT_FOUND, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn columns_are_found_as_ffgcno_finds_them() {
+        let names = ["Corrections", "TILE1", "TILE22", "flag", "FLAG"];
+        let ttypes: Vec<crate::header::Card> = names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let value = crate::value::Value::String(name.to_string());
+                crate::header::Card::new(&format!("TTYPE{}", i + 1), value).unwrap()
+            })
+            .collect();
+        let find = |name| find_column_index(&ttypes, name, names.len());
+        let status = |name| match find(name) {
+            Err(Error::Fits(e)) => e.status as u32,
+            other => panic!("{name:?}: expected a status, got {other:?}"),
+        };
+        assert_eq!(find("corrections").unwrap(), 0);
+        assert_eq!(find("CORRECTIONS  ").unwrap(), 0);
+        assert_eq!(find("Corr*ns").unwrap(), 0);
+        assert_eq!(find("tile?").unwrap(), 1);
+        assert_eq!(find("T*22").unwrap(), 2);
+        assert_eq!(status("tile#"), sys::COL_NOT_UNIQUE);
+        // An exact name wins, then only one case-insensitive match may.
+        assert_eq!(find("flag").unwrap(), 3);
+        assert_eq!(find("FLAG").unwrap(), 4);
+        assert_eq!(status("Flag"), sys::COL_NOT_UNIQUE);
+        assert_eq!(find("2").unwrap(), 1);
+        assert_eq!(status("6"), sys::COL_NOT_FOUND);
+        assert_eq!(status("missing"), sys::COL_NOT_FOUND);
+    }
+
+    #[test]
+    fn templates_match_as_ffcmps_matches_them() {
+        for (template, name, want) in [
+            ("ab", "AB", Some(true)),
+            ("AB*DE", "AB*DE", Some(true)),
+            ("AB*DE", "ABCDE", Some(false)),
+            ("a*b*c", "aXbYbZc", Some(false)),
+            ("a*c", "abcbd", None),
+            ("*", "anything", Some(false)),
+            ("x*", "x", Some(false)),
+            ("x?", "x", None),
+            ("col#", "COL123", Some(false)),
+            ("col#x", "COL12x", Some(false)),
+            ("col#", "COLx", None),
+            ("", "", Some(true)),
+        ] {
+            assert_eq!(
+                template_match(template, name),
+                want,
+                "{template:?} {name:?}"
+            );
+        }
     }
 
     fn make_test_table(f: &mut FitsFile) -> FitsHdu {
