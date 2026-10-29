@@ -342,7 +342,7 @@ fn extract_table_info(
 }
 
 /// Compute byte offsets for each column within a row.
-fn column_offsets(columns: &[BinaryColumnDescriptor]) -> Vec<usize> {
+pub(crate) fn column_offsets(columns: &[BinaryColumnDescriptor]) -> Vec<usize> {
     let mut offsets = Vec::with_capacity(columns.len());
     let mut offset = 0usize;
     for col in columns {

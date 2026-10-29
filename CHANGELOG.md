@@ -35,6 +35,11 @@ These are also breaking. With them, mwalib's and mwa_hyperdrive's call sites com
 
 Comment, history and `LONGSTRN` cards for text of 0, 10, 72, 73 and 300 bytes, blanks, a tab and non-ASCII are byte-identical to cfitsio's.
 
+- **Bit (`X`) columns in compat** (#150):
+  - **`FitsHdu::read_col_bit` and `write_col_bit`** read and write bits as cfitsio's `ffgcx` and `ffpclx` do, from any row and bit, most significant bit first. A run longer than a row carries on through the row's padding bits into the next row, as cfitsio's does. Writing past the last row extends the table. Byte (`B`) columns work the same way.
+  - **Numeric reads and writes of a bit column use its packed bytes,** `ceil(repeat / 8)` a row, as cfitsio's `ffgcv*`/`ffpcl*` do. `read_col::<u8>` gives what `ffgcvb` gives, and hyperdrive's `1X` `Flag` column reads and writes as `i32`s. These failed with "not numeric type" before.
+  - Checked against cfitsio: all 10 cotter- and birli-written mwaf files in the Birli and hyperdrive test data read bit-identical, both as bits and as bytes. A birli mwaf rewritten through compat reads identically in cfitsio and astropy.
+
 ## 0.22.1
 
 ### Fixed

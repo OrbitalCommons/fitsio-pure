@@ -645,3 +645,136 @@ fn create_table_matches_fitsio() {
         assert_eq!(p_cols, c_cols, "{}", path.display());
     }
 }
+
+/// The raw data unit of HDU 1 of `path`: `NAXIS1 * NAXIS2` bytes.
+fn table_bytes(path: &Path) -> Vec<u8> {
+    let mut c = CFits::open(path).unwrap();
+    let hdu = c.hdu(1).unwrap();
+    let naxis1: i64 = hdu.read_key(&mut c, "NAXIS1").unwrap();
+    let naxis2: i64 = hdu.read_key(&mut c, "NAXIS2").unwrap();
+    let p = PureFits::open(path).unwrap();
+    let data = p.data().unwrap();
+    let start = p.parsed().unwrap().hdus[1].data_start;
+    data[start..start + (naxis1 * naxis2) as usize].to_vec()
+}
+
+/// Bit columns written and read as cfitsio's `ffpclk` (numbers to `1X`),
+/// `ffpclx` (bits, at a row and bit offset, past the end of a row and of
+/// the table), `ffgcx` (bits) and `ffgcvb` (packed bytes) handle them.
+#[test]
+fn bit_columns_match_cfitsio() {
+    let pattern: Vec<bool> = (0..40).map(|i| i % 3 == 0).collect();
+    let dir = tempfile::tempdir().unwrap();
+    let make = |path: &Path| {
+        let mut f = CFits::create(path).open().unwrap();
+        let cols = [
+            CColDesc::new("F1")
+                .with_type(CColType::Bit)
+                .create()
+                .unwrap(),
+            CColDesc::new("F12")
+                .with_type(CColType::Bit)
+                .that_repeats(12)
+                .create()
+                .unwrap(),
+        ];
+        f.create_table("T", &cols).unwrap();
+    };
+    let c_path = dir.path().join("c.fits");
+    let p_path = dir.path().join("p.fits");
+    make(&c_path);
+    make(&p_path);
+    {
+        let mut c = CFits::edit(&c_path).unwrap();
+        let hdu = c.hdu(1).unwrap();
+        hdu.write_col(&mut c, "F1", &[1i32, 0, 3, 255]).unwrap();
+        let mut bits: Vec<std::os::raw::c_char> = pattern.iter().map(|&b| b as _).collect();
+        let mut status = 0;
+        unsafe {
+            fitsio::sys::ffpclx(c.as_raw(), 2, 2, 1, 12, bits.as_mut_ptr(), &mut status);
+            fitsio::sys::ffpclx(c.as_raw(), 2, 6, 5, 20, bits.as_mut_ptr(), &mut status);
+        }
+        assert_eq!(status, 0);
+    }
+    {
+        let mut p = PureFits::edit(&p_path).unwrap();
+        let hdu = p.hdu(1).unwrap();
+        hdu.write_col(&mut p, "F1", &[1i32, 0, 3, 255]).unwrap();
+        hdu.write_col_bit(&mut p, "F12", 1, 0, &pattern[..12])
+            .unwrap();
+        hdu.write_col_bit(&mut p, "F12", 5, 4, &pattern[..20])
+            .unwrap();
+    }
+    assert_eq!(table_bytes(&p_path), table_bytes(&c_path));
+
+    // Reads, from both files, as cfitsio reads them.
+    let mut c = CFits::open(&c_path).unwrap();
+    let c_hdu = c.hdu(1).unwrap();
+    // `fitsio`'s `read_col` reads one element per row, so read the 7 rows'
+    // 14 packed bytes with `ffgcvb`, as hyperdrive does.
+    let mut c_bytes = vec![0u8; 14];
+    let mut status = 0;
+    unsafe {
+        fitsio::sys::ffgcvb(
+            c.as_raw(),
+            2,
+            1,
+            1,
+            14,
+            0,
+            c_bytes.as_mut_ptr(),
+            &mut 0,
+            &mut status,
+        );
+    }
+    assert_eq!(status, 0);
+    let c_numbers: Vec<i32> = c_hdu.read_col(&mut c, "F1").unwrap();
+    for (first_row, first_bit, n) in [(0, 0, 1), (5, 4, 20), (1, 0, 24), (0, 13, 3), (6, 0, 16)] {
+        let mut c_bits: Vec<std::os::raw::c_char> = vec![0; n];
+        let mut status = 0;
+        unsafe {
+            fitsio::sys::ffgcx(
+                c.as_raw(),
+                2,
+                first_row as i64 + 1,
+                first_bit as i64 + 1,
+                n as i64,
+                c_bits.as_mut_ptr(),
+                &mut status,
+            );
+        }
+        assert_eq!(status, 0);
+        let want: Vec<bool> = c_bits.iter().map(|&b| b != 0).collect();
+        for path in [&c_path, &p_path] {
+            let p = PureFits::open(path).unwrap();
+            let p_hdu = p.hdu(1).unwrap();
+            let mut got = vec![false; n];
+            p_hdu
+                .read_col_bit(&p, "F12", first_row, first_bit, &mut got)
+                .unwrap();
+            assert_eq!(
+                got,
+                want,
+                "{} row {first_row} bit {first_bit} n {n}",
+                path.display()
+            );
+            let bytes: Vec<u8> = p_hdu.read_col(&p, "F12").unwrap();
+            assert_eq!(bytes, c_bytes);
+            let numbers: Vec<i32> = p_hdu.read_col(&p, "F1").unwrap();
+            assert_eq!(numbers, c_numbers);
+        }
+    }
+
+    // A first bit past the row's two bytes is BAD_ELEM_NUM in both.
+    let p = PureFits::open(&p_path).unwrap();
+    let mut one = [false];
+    let err = p
+        .hdu(1)
+        .unwrap()
+        .read_col_bit(&p, "F12", 0, 16, &mut one)
+        .unwrap_err();
+    match err {
+        fitsio_pure::compat::errors::Error::Fits(e) => assert_eq!(e.status, 308),
+        other => panic!("{other:?}"),
+    }
+}

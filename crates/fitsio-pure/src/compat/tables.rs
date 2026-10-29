@@ -646,6 +646,10 @@ fn scale_column<T: ColumnScalar>(
         BinaryColumnData::Short(v) => scale_ints(v.into_iter().map(i128::from), tscal, tzero),
         BinaryColumnData::Int(v) => scale_ints(v.into_iter().map(i128::from), tscal, tzero),
         BinaryColumnData::Long(v) => scale_ints(v.into_iter().map(i128::from), tscal, tzero),
+        // As cfitsio reads them as numbers, a bit column's packed bytes.
+        BinaryColumnData::Bit(rows) => {
+            scale_ints(rows.into_iter().flatten().map(i128::from), tscal, tzero)
+        }
         BinaryColumnData::Float(v) => v
             .into_iter()
             .map(|x| T::from_f64(physical(f64::from(x), tscal, tzero)))
@@ -670,11 +674,12 @@ fn narrow<T: Copy, S: TryFrom<i128>>(
 
 fn unscale_column<T: ColumnScalar>(
     data: &[T],
-    col_type: &BinaryColumnType,
+    column: &crate::bintable::BinaryColumnDescriptor,
     tscal: f64,
     tzero: f64,
     name: &str,
 ) -> Result<BinaryColumnData> {
+    let col_type = &column.col_type;
     let offset = integer_offset(tscal, tzero);
     let raw_int = |v: T| match (v.to_int(), offset) {
         (Some(i), Some(zero)) => Some(i - zero),
@@ -688,6 +693,17 @@ fn unscale_column<T: ColumnScalar>(
         BinaryColumnType::Short => narrow(data, raw_int).map(BinaryColumnData::Short),
         BinaryColumnType::Int => narrow(data, raw_int).map(BinaryColumnData::Int),
         BinaryColumnType::Long => narrow(data, raw_int).map(BinaryColumnData::Long),
+        // As cfitsio writes numbers to a bit column: as its packed bytes,
+        // `ceil(repeat / 8)` per row.
+        BinaryColumnType::Bit => {
+            let bytes_per_row = column.repeat.div_ceil(8);
+            if bytes_per_row == 0 || !data.len().is_multiple_of(bytes_per_row) {
+                return Err(crate::error::Error::InvalidValue.into());
+            }
+            narrow::<T, u8>(data, raw_int).map(|bytes| {
+                BinaryColumnData::Bit(bytes.chunks(bytes_per_row).map(<[u8]>::to_vec).collect())
+            })
+        }
         BinaryColumnType::Float => Some(BinaryColumnData::Float(
             data.iter()
                 .map(|&v| stored(v.to_f64(), tscal, tzero) as f32)
@@ -739,7 +755,7 @@ fn write_scaled<T: ColumnScalar>(
         let columns =
             crate::bintable::parse_binary_table_columns(&core_hdu.cards, get_tfields(core_hdu)?)?;
         let (tscal, tzero) = crate::bintable::extract_column_scaling(&core_hdu.cards, col_idx + 1);
-        unscale_column(data, &columns[col_idx].col_type, tscal, tzero, name)?
+        unscale_column(data, &columns[col_idx], tscal, tzero, name)?
     };
     write_col_inner(file, hdu, name, &col_data)
 }
@@ -956,6 +972,132 @@ fn grow_table(file: &mut FitsFile, idx: usize, rows: usize) -> Result<()> {
         out.resize(start + crate::block::padded_byte_len(out.len() - start), 0);
     }
     file.set_data(out);
+    Ok(())
+}
+
+/// Where a bit (`X`) or byte (`B`) column's bytes are, for bit reads and
+/// writes.
+struct BitColumn {
+    /// HDU index.
+    idx: usize,
+    /// The byte where row 0 of the column starts.
+    start: usize,
+    /// The table's row length, `NAXIS1`.
+    naxis1: usize,
+    naxis2: usize,
+    /// The column's bytes per row: `ceil(repeat / 8)` for `X`, `repeat` for `B`.
+    bytes_per_row: usize,
+}
+
+impl BitColumn {
+    fn find(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<BitColumn> {
+        let (idx, col_idx) = resolve_column(file, hdu, name)?;
+        let core_hdu = &file.parsed()?.hdus[idx];
+        let (naxis1, naxis2) = match core_hdu.info {
+            crate::hdu::HduInfo::BinaryTable { naxis1, naxis2, .. } => (naxis1, naxis2),
+            _ => return Err(Error::status(sys::NOT_BTABLE)),
+        };
+        let columns =
+            crate::bintable::parse_binary_table_columns(&core_hdu.cards, get_tfields(core_hdu)?)?;
+        let column = &columns[col_idx];
+        let bytes_per_row = match column.col_type {
+            BinaryColumnType::Bit => column.repeat.div_ceil(8),
+            BinaryColumnType::Byte => column.repeat,
+            _ => return Err(Error::status(sys::NOT_LOGICAL_COL)),
+        };
+        let offset = crate::bintable::column_offsets(&columns)[col_idx];
+        Ok(BitColumn {
+            idx,
+            start: core_hdu.data_start + offset,
+            naxis1,
+            naxis2,
+            bytes_per_row,
+        })
+    }
+
+    /// The column bit `first_bit` of row `first_row` starts at, counting
+    /// through each row's whole bytes, padding bits included, as cfitsio
+    /// does. A first bit past the row's bytes is `BAD_ELEM_NUM`.
+    fn first_bit(&self, first_row: usize, first_bit: usize) -> Result<usize> {
+        if first_bit >= self.bytes_per_row * 8 {
+            return Err(Error::status(sys::BAD_ELEM_NUM));
+        }
+        Ok(first_row * self.bytes_per_row * 8 + first_bit)
+    }
+
+    /// The file byte holding column bit `bit`, and its mask, most
+    /// significant bit first.
+    fn locate(&self, bit: usize) -> (usize, u8) {
+        let byte = bit / 8;
+        let (row, in_row) = (byte / self.bytes_per_row, byte % self.bytes_per_row);
+        (self.start + row * self.naxis1 + in_row, 0x80 >> (bit % 8))
+    }
+}
+
+/// Read `out.len()` bits from bit column `name`, from bit `first_bit` of row
+/// `first_row` on (both 0-based), as cfitsio's `ffgcx` reads them: most
+/// significant bit first, running on through the rest of the row's bytes,
+/// then into the next row. A byte (`B`) column reads the same way.
+pub(crate) fn read_bits(
+    file: &FitsFile,
+    hdu: &FitsHdu,
+    name: &str,
+    first_row: usize,
+    first_bit: usize,
+    out: &mut [bool],
+) -> Result<()> {
+    if out.is_empty() {
+        return Ok(());
+    }
+    let column = BitColumn::find(file, hdu, name)?;
+    let start = column.first_bit(first_row, first_bit)?;
+    let end = start + out.len();
+    if end.div_ceil(8).div_ceil(column.bytes_per_row) > column.naxis2 {
+        return Err(Error::status(sys::BAD_ROW_NUM));
+    }
+    let data = file.data()?;
+    for (bit, out) in (start..end).zip(out) {
+        let (byte, mask) = column.locate(bit);
+        *out = data[byte] & mask != 0;
+    }
+    Ok(())
+}
+
+/// Write `bits` to bit column `name` from bit `first_bit` of row `first_row`
+/// on (both 0-based), as cfitsio's `ffpclx` writes them, laid out as
+/// [`read_bits`] reads them. Other bits are left as they are, and writing
+/// past the last row extends the table.
+pub(crate) fn write_bits(
+    file: &mut FitsFile,
+    hdu: &FitsHdu,
+    name: &str,
+    first_row: usize,
+    first_bit: usize,
+    bits: &[bool],
+) -> Result<()> {
+    file.check_writable()?;
+    if bits.is_empty() {
+        return Ok(());
+    }
+    let column = BitColumn::find(file, hdu, name)?;
+    let start = column.first_bit(first_row, first_bit)?;
+    let end = start + bits.len();
+    let rows = end.div_ceil(8).div_ceil(column.bytes_per_row);
+    let column = if rows > column.naxis2 {
+        grow_table(file, column.idx, rows)?;
+        BitColumn::find(file, hdu, name)?
+    } else {
+        column
+    };
+    let data = file.data_mut()?;
+    for (bit, &set) in (start..end).zip(bits) {
+        let (byte, mask) = column.locate(bit);
+        if set {
+            data[byte] |= mask;
+        } else {
+            data[byte] &= !mask;
+        }
+    }
     Ok(())
 }
 
@@ -1656,5 +1798,80 @@ mod tests {
         let raw =
             crate::bintable::read_binary_column(f.data().unwrap(), &parsed.hdus[1], 0).unwrap();
         assert_eq!(raw, BinaryColumnData::Short(vec![32767, 7232, -32767]));
+    }
+
+    fn status(err: Error) -> u32 {
+        match err {
+            Error::Fits(e) => e.status as u32,
+            other => panic!("expected a cfitsio status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn numbers_read_and_write_a_bit_column_as_its_bytes() {
+        // mwa_hyperdrive's solutions `Flag` column is `1X`, written as `i32`s.
+        let mut f = FitsFile::create_in_memory().unwrap();
+        let hdu = f
+            .create_table("TILES", &[concrete("Flag", ColumnDataType::Bit, 1)])
+            .unwrap();
+        hdu.write_col(&mut f, "Flag", &[0i32, 1, 1, 0]).unwrap();
+        assert_eq!(hdu.read_col::<i32>(&f, "Flag").unwrap(), [0, 1, 1, 0]);
+        assert_eq!(hdu.read_col::<u8>(&f, "Flag").unwrap(), [0, 1, 1, 0]);
+        // As in cfitsio, the number is the byte: 1 sets the last bit, not the
+        // first, and a number a byte can't hold doesn't fit.
+        let mut first = [true];
+        hdu.read_col_bit(&f, "Flag", 1, 0, &mut first).unwrap();
+        assert_eq!(first, [false]);
+        let err = hdu.write_col(&mut f, "Flag", &[256i32]).unwrap_err();
+        assert_eq!(status(err), sys::NUM_OVERFLOW);
+        // A 12-bit column is two bytes a row.
+        let wide = f
+            .create_table("W", &[concrete("B", ColumnDataType::Bit, 12)])
+            .unwrap();
+        assert!(wide.write_col(&mut f, "B", &[1u8, 2, 3]).is_err());
+        wide.write_col(&mut f, "B", &[0xA5u8, 0x0F]).unwrap();
+        let mut bits = [false; 12];
+        wide.read_col_bit(&f, "B", 0, 0, &mut bits).unwrap();
+        let want = [1, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 0].map(|b| b == 1);
+        assert_eq!(bits, want);
+    }
+
+    #[test]
+    fn bits_are_written_and_read_as_ffpclx_and_ffgcx_do() {
+        let mut f = FitsFile::create_in_memory().unwrap();
+        let hdu = f
+            .create_table("FLAGS", &[concrete("FLAGS", ColumnDataType::Bit, 12)])
+            .unwrap();
+        let pattern: Vec<bool> = (0..20).map(|i| i % 3 == 0).collect();
+        // From bit 4 of row 5: 12 bits fill row 5's two bytes, padding bits
+        // included, and the last 8 start row 6. The table grows to 7 rows.
+        hdu.write_col_bit(&mut f, "FLAGS", 5, 4, &pattern).unwrap();
+        let info = hdu.info(&f).unwrap();
+        assert!(matches!(
+            info,
+            crate::compat::hdu::HduInfo::TableInfo { num_rows: 7, .. }
+        ));
+        assert_eq!(
+            hdu.read_col::<u8>(&f, "FLAGS").unwrap()[10..],
+            [0x09, 0x24, 0x92, 0x00]
+        );
+        let mut back = vec![false; 20];
+        hdu.read_col_bit(&f, "FLAGS", 5, 4, &mut back).unwrap();
+        assert_eq!(back, pattern);
+        // Bits not written keep their values.
+        hdu.write_col_bit(&mut f, "FLAGS", 5, 5, &[true]).unwrap();
+        assert_eq!(hdu.read_col::<u8>(&f, "FLAGS").unwrap()[10], 0x0D);
+
+        let mut one = [false];
+        let err = hdu.read_col_bit(&f, "FLAGS", 0, 16, &mut one).unwrap_err();
+        assert_eq!(status(err), sys::BAD_ELEM_NUM);
+        let mut many = vec![false; 17];
+        let err = hdu.read_col_bit(&f, "FLAGS", 6, 0, &mut many).unwrap_err();
+        assert_eq!(status(err), sys::BAD_ROW_NUM);
+        let ids = f
+            .create_table("IDS", &[concrete("ID", ColumnDataType::Int, 1)])
+            .unwrap();
+        let err = ids.write_col_bit(&mut f, "ID", 0, 0, &[true]).unwrap_err();
+        assert_eq!(status(err), sys::NOT_LOGICAL_COL);
     }
 }
