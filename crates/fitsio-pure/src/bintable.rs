@@ -444,6 +444,19 @@ pub fn write_binary_column(
     col_index: usize,
     data: &BinaryColumnData,
 ) -> Result<()> {
+    write_binary_column_rows(fits_data, hdu, col_index, 0, data)
+}
+
+/// Write column data into an existing binary table HDU in place, from row
+/// `first_row` (0-based) on, as [`write_binary_column`] does from row 0.
+/// Rows past the end of the table are an error.
+pub fn write_binary_column_rows(
+    fits_data: &mut [u8],
+    hdu: &Hdu,
+    col_index: usize,
+    first_row: usize,
+    data: &BinaryColumnData,
+) -> Result<()> {
     let (naxis1, naxis2, columns) = extract_table_info(fits_data, hdu)?;
 
     if col_index >= columns.len() {
@@ -456,13 +469,13 @@ pub fn write_binary_column(
     let data_start = hdu.data_start;
 
     let rows = column_data_rows(col, data)?;
-    if rows > naxis2 {
+    if first_row + rows > naxis2 {
         return Err(Error::InvalidValue);
     }
 
     for row in 0..rows {
         let cell_bytes = serialize_binary_column_value(&col.col_type, col.repeat, data, row)?;
-        let base = data_start + row * naxis1 + col_offset;
+        let base = data_start + (first_row + row) * naxis1 + col_offset;
         fits_data[base..base + cell_bytes.len()].copy_from_slice(&cell_bytes);
     }
     Ok(())

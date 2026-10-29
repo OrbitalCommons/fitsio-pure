@@ -778,3 +778,105 @@ fn bit_columns_match_cfitsio() {
         other => panic!("{other:?}"),
     }
 }
+
+/// Rows appended one call at a time, as birli appends mwaf flags, give a
+/// file byte-identical to cfitsio's: `ffpclx` for a bit column, and
+/// `write_col_range` (`ffpcl`) for numeric columns.
+#[test]
+fn row_by_row_appends_match_cfitsio() {
+    const ROWS: usize = 10_000;
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("base.fits");
+    {
+        let mut f = CFits::create(&base).open().unwrap();
+        let flags = CColDesc::new("FLAGS")
+            .with_type(CColType::Bit)
+            .that_repeats(128)
+            .create()
+            .unwrap();
+        f.create_table("FLAGS", &[flags]).unwrap();
+        let cols = [
+            CColDesc::new("ID")
+                .with_type(CColType::Int)
+                .create()
+                .unwrap(),
+            CColDesc::new("XYZ")
+                .with_type(CColType::Double)
+                .that_repeats(3)
+                .create()
+                .unwrap(),
+        ];
+        f.create_table("ROWS", &cols).unwrap();
+    }
+    let row_bits = |row: usize| -> Vec<bool> { (0..128).map(|b| (row * 7 + b) % 5 == 0).collect() };
+    let c_path = dir.path().join("c.fits");
+    let p_path = dir.path().join("p.fits");
+    std::fs::copy(&base, &c_path).unwrap();
+    std::fs::copy(&base, &p_path).unwrap();
+    {
+        let mut c = CFits::edit(&c_path).unwrap();
+        let rows_hdu = c.hdu("ROWS").unwrap();
+        for row in 0..500 {
+            rows_hdu
+                .write_col_range(&mut c, "ID", &[row as i32], &(row..row + 1))
+                .unwrap();
+            let xyz = [row as f64, 0.5, -(row as f64)];
+            let mut status = 0;
+            unsafe {
+                fitsio::sys::ffpcld(
+                    c.as_raw(),
+                    2,
+                    row as i64 + 1,
+                    1,
+                    3,
+                    xyz.as_ptr() as *mut _,
+                    &mut status,
+                );
+            }
+            assert_eq!(status, 0);
+        }
+        let _flags = c.hdu("FLAGS").unwrap();
+        for row in 0..ROWS {
+            let mut bits: Vec<std::os::raw::c_char> =
+                row_bits(row).iter().map(|&b| b as _).collect();
+            let mut status = 0;
+            unsafe {
+                fitsio::sys::ffpclx(
+                    c.as_raw(),
+                    1,
+                    row as i64 + 1,
+                    1,
+                    128,
+                    bits.as_mut_ptr(),
+                    &mut status,
+                );
+            }
+            assert_eq!(status, 0);
+        }
+    }
+    let started = std::time::Instant::now();
+    {
+        let mut p = PureFits::edit(&p_path).unwrap();
+        let rows_hdu = p.hdu("ROWS").unwrap();
+        for row in 0..500 {
+            rows_hdu
+                .write_col_range(&mut p, "ID", &[row as i32], &(row..row + 1))
+                .unwrap();
+            let xyz = [row as f64, 0.5, -(row as f64)];
+            rows_hdu
+                .write_col_range(&mut p, "XYZ", &xyz, &(row..row + 3))
+                .unwrap();
+        }
+        let flags = p.hdu("FLAGS").unwrap();
+        for row in 0..ROWS {
+            flags
+                .write_col_bit(&mut p, "FLAGS", row, 0, &row_bits(row))
+                .unwrap();
+        }
+    }
+    eprintln!("compat appends took {:?}", started.elapsed());
+    let c_bytes = std::fs::read(&c_path).unwrap();
+    let p_bytes = std::fs::read(&p_path).unwrap();
+    assert_eq!(p_bytes.len(), c_bytes.len());
+    assert!(p_bytes == c_bytes, "files differ");
+}
