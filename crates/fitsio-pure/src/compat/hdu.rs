@@ -80,6 +80,21 @@ impl FitsHdu {
         T::read_col_range(file, self, name, start_row, num_rows)
     }
 
+    /// Write the first `rows.len()` values of `col_data` to column `name`
+    /// from row `rows.start` on, as `fitsio`'s `write_col_range` does,
+    /// growing the table if they run past its last row. See
+    /// [`WritesCol::write_col_range`].
+    pub fn write_col_range<T: WritesCol, N: Into<String>>(
+        &self,
+        file: &mut FitsFile,
+        name: N,
+        col_data: &[T],
+        rows: &Range<usize>,
+    ) -> Result<FitsHdu> {
+        T::write_col_range(file, self, &name.into(), col_data, rows)?;
+        FitsHdu::at(file, self.number)
+    }
+
     /// Write data to a column in a binary table HDU, growing the table to fit.
     /// As in `fitsio`, the name may be any `Into<String>`, and the result is
     /// a fresh handle to the HDU, whose info reflects the write.

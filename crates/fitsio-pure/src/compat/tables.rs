@@ -383,9 +383,38 @@ pub trait ReadsCol: ReadsColRange {
     fn read_col(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<Vec<Self>>;
 }
 
-/// Trait for types that can be written to a table column.
+/// Types a table column can be written from, as `fitsio`'s `WritesCol`
+/// writes them: the numeric types and `String`.
+///
+/// Writes go into the file's bytes in place. Writing past the last row
+/// extends the table, inserting whole blocks only when it outgrows its
+/// padding, and rewriting only its `NAXIS2` (and `THEAP`) cards, so the
+/// rows written so far are never copied again.
 pub trait WritesCol: Sized {
-    fn write_col(file: &mut FitsFile, hdu: &FitsHdu, name: &str, data: &[Self]) -> Result<()>;
+    /// Write the first `rows.len()` values of `data` from row `rows.start`
+    /// on, as `fitsio` and cfitsio's `ffpcl` count them: one value per row
+    /// for a scalar or string column, `repeat` for a vector column, which
+    /// must be written whole rows at a time. Fewer values than `rows.len()`
+    /// is an error.
+    fn write_col_range(
+        file: &mut FitsFile,
+        hdu: &FitsHdu,
+        name: &str,
+        data: &[Self],
+        rows: &std::ops::Range<usize>,
+    ) -> Result<()>;
+
+    /// Write `data` from the first row on.
+    fn write_col(file: &mut FitsFile, hdu: &FitsHdu, name: &str, data: &[Self]) -> Result<()> {
+        Self::write_col_range(file, hdu, name, data, &(0..data.len()))
+    }
+}
+
+/// The values of a `write_col_range` call: the first `rows.len()` of
+/// `data`, or an error if there are fewer.
+fn range_values<'a, T>(data: &'a [T], rows: &std::ops::Range<usize>) -> Result<&'a [T]> {
+    data.get(..rows.len())
+        .ok_or_else(|| Error::Message(format!("{} values given for rows {rows:?}", data.len())))
 }
 
 /// The index of the column called `name`.
@@ -747,6 +776,7 @@ fn write_scaled<T: ColumnScalar>(
     hdu: &FitsHdu,
     name: &str,
     data: &[T],
+    first_row: usize,
 ) -> Result<()> {
     let col_data = {
         let (idx, col_idx) = resolve_column(file, hdu, name)?;
@@ -757,7 +787,7 @@ fn write_scaled<T: ColumnScalar>(
         let (tscal, tzero) = crate::bintable::extract_column_scaling(&core_hdu.cards, col_idx + 1);
         unscale_column(data, &columns[col_idx], tscal, tzero, name)?
     };
-    write_col_inner(file, hdu, name, &col_data)
+    write_col_inner(file, hdu, name, &col_data, first_row)
 }
 
 macro_rules! impl_numeric_col {
@@ -781,13 +811,14 @@ macro_rules! impl_numeric_col {
         }
 
         impl WritesCol for $t {
-            fn write_col(
+            fn write_col_range(
                 file: &mut FitsFile,
                 hdu: &FitsHdu,
                 name: &str,
                 data: &[Self],
+                rows: &std::ops::Range<usize>,
             ) -> Result<()> {
-                write_scaled(file, hdu, name, data)
+                write_scaled(file, hdu, name, range_values(data, rows)?, rows.start)
             }
         }
     )+};
@@ -889,17 +920,26 @@ impl_reads_col_range!(bool, |col_data: crate::bintable::BinaryColumnData| {
 // ---- WritesCol implementations ----
 
 impl WritesCol for String {
-    fn write_col(file: &mut FitsFile, hdu: &FitsHdu, name: &str, data: &[Self]) -> Result<()> {
-        let col_data = crate::bintable::BinaryColumnData::Ascii(data.to_vec());
-        write_col_inner(file, hdu, name, &col_data)
+    fn write_col_range(
+        file: &mut FitsFile,
+        hdu: &FitsHdu,
+        name: &str,
+        data: &[Self],
+        rows: &std::ops::Range<usize>,
+    ) -> Result<()> {
+        let col_data = BinaryColumnData::Ascii(range_values(data, rows)?.to_vec());
+        write_col_inner(file, hdu, name, &col_data, rows.start)
     }
 }
 
+/// Write `col_data` to column `name` in place, from row `first_row` on,
+/// growing the table first if it runs past the last row, as cfitsio does.
 fn write_col_inner(
     file: &mut FitsFile,
     hdu: &FitsHdu,
     name: &str,
-    col_data: &crate::bintable::BinaryColumnData,
+    col_data: &BinaryColumnData,
+    first_row: usize,
 ) -> Result<()> {
     file.check_writable()?;
     let (idx, col_idx, rows, naxis2) = {
@@ -916,63 +956,83 @@ fn write_col_inner(
         };
         (idx, col_idx, rows, naxis2)
     };
-
-    // As in cfitsio, writing past the last row extends the table.
-    if rows > naxis2 {
-        grow_table(file, idx, rows)?;
+    if first_row + rows > naxis2 {
+        grow_table(file, idx, first_row + rows)?;
     }
-
-    // Clone the HDU so nothing borrows `file` when we write back below.
+    // Clone the HDU so nothing borrows `file` while its bytes are written.
     let core_hdu = file.parsed()?.hdus[idx].clone();
-
-    let mut data = file.data()?.to_vec();
-    crate::bintable::write_binary_column(&mut data, &core_hdu, col_idx, col_data)?;
-    file.set_data(data);
+    let data = file.data_mut()?;
+    crate::bintable::write_binary_column_rows(data, &core_hdu, col_idx, first_row, col_data)?;
     Ok(())
 }
 
-/// Extends binary table HDU `idx` to `rows` rows. The new rows are zeroed and
-/// inserted after the last row, so a heap after the rows moves down with
-/// `THEAP`, and `NAXIS2` records the new count.
+/// Extend binary table HDU `idx` to `rows` rows in place, as cfitsio does:
+/// the new rows are zeroed and follow the last row, a heap after the rows
+/// moves down, and only the `NAXIS2` and `THEAP` cards are rewritten. Whole
+/// blocks are inserted, at the end of the HDU, only when the data outgrows
+/// its padding, so growing the last HDU of a file a row at a time never
+/// moves anything before it.
 fn grow_table(file: &mut FitsFile, idx: usize, rows: usize) -> Result<()> {
-    let mut fits_data = crate::hdu::parse_fits(file.data()?)?;
-    let hdu = &mut fits_data.hdus[idx];
+    let hdu = file.parsed()?.hdus[idx].clone();
     let (naxis1, naxis2) = match hdu.info {
         crate::hdu::HduInfo::BinaryTable { naxis1, naxis2, .. } => (naxis1, naxis2),
         _ => return Err(Error::Message("HDU is not a binary table".to_string())),
     };
     let added = (rows - naxis2) * naxis1;
-    for card in &mut hdu.cards {
-        match (card.keyword_str(), &card.value) {
-            ("NAXIS2", _) => card.value = Some(crate::value::Value::Integer(rows as i64)),
-            ("THEAP", Some(crate::value::Value::Integer(theap))) => {
-                card.value = Some(crate::value::Value::Integer(theap + added as i64))
-            }
-            _ => {}
-        }
-    }
+    let table_end = hdu.data_start + naxis1 * naxis2;
+    let heap_len = hdu.data_len - naxis1 * naxis2;
+    let old_end = hdu.data_start + crate::block::padded_byte_len(hdu.data_len);
+    let new_end = hdu.data_start + crate::block::padded_byte_len(hdu.data_len + added);
 
-    let mut out = Vec::with_capacity(file.data()?.len() + added + crate::BLOCK_SIZE);
-    for (i, hdu) in fits_data.hdus.iter().enumerate() {
-        let cards: Vec<_> = hdu.cards.iter().filter(|c| !c.is_end()).cloned().collect();
-        out.extend_from_slice(&crate::header::serialize_header(&cards)?);
-        let raw = file
-            .data()?
-            .get(hdu.data_start..hdu.data_start + hdu.data_len)
-            .ok_or_else(|| Error::Message("HDU data runs past the end of the file".to_string()))?;
-        let start = out.len();
-        if i == idx {
-            let (table, heap) = raw.split_at(naxis1 * naxis2);
-            out.extend_from_slice(table);
-            out.resize(out.len() + added, 0);
-            out.extend_from_slice(heap);
-        } else {
-            out.extend_from_slice(raw);
-        }
-        out.resize(start + crate::block::padded_byte_len(out.len() - start), 0);
+    set_card_value(
+        file,
+        &hdu,
+        "NAXIS2",
+        crate::value::Value::Integer(rows as i64),
+    )?;
+    if let Some(crate::value::Value::Integer(theap)) = hdu
+        .cards
+        .iter()
+        .find(|c| c.keyword_str() == "THEAP")
+        .and_then(|c| c.value.clone())
+    {
+        let theap = crate::value::Value::Integer(theap + added as i64);
+        set_card_value(file, &hdu, "THEAP", theap)?;
     }
-    file.set_data(out);
+    if new_end > old_end {
+        file.replace_bytes(old_end..old_end, &vec![0; new_end - old_end])?;
+    }
+    let data = file.data_mut()?;
+    data.copy_within(table_end..table_end + heap_len, table_end + added);
+    data[table_end..table_end + added].fill(0);
     Ok(())
+}
+
+/// Rewrite the value of `keyword`'s card in `hdu`'s header in place,
+/// keeping its comment and leaving every other card's bytes as they are.
+fn set_card_value(
+    file: &mut FitsFile,
+    hdu: &crate::hdu::Hdu,
+    keyword: &str,
+    value: crate::value::Value,
+) -> Result<()> {
+    let mut header = vec![0u8; hdu.data_start - hdu.header_start];
+    file.read_at(hdu.header_start, &mut header)?;
+    let at = header
+        .chunks_exact(crate::CARD_SIZE)
+        .position(|card| card[..8].trim_ascii_end() == keyword.as_bytes())
+        .ok_or_else(|| Error::Message(format!("no {keyword} card to update")))?;
+    let mut card = crate::header::Card::new(keyword, value)?;
+    card.comment = hdu
+        .cards
+        .iter()
+        .find(|c| c.keyword_str() == keyword)
+        .and_then(|c| c.comment.clone());
+    let start = hdu.header_start + at * crate::CARD_SIZE;
+    file.replace_bytes(
+        start..start + crate::CARD_SIZE,
+        &crate::header::format_card(&card),
+    )
 }
 
 /// Where a bit (`X`) or byte (`B`) column's bytes are, for bit reads and
@@ -1873,5 +1933,61 @@ mod tests {
             .unwrap();
         let err = ids.write_col_bit(&mut f, "ID", 0, 0, &[true]).unwrap_err();
         assert_eq!(status(err), sys::NOT_LOGICAL_COL);
+    }
+
+    #[test]
+    fn write_col_range_writes_from_a_row_and_grows_in_place() {
+        let mut f = FitsFile::create_in_memory().unwrap();
+        let hdu = f
+            .create_table(
+                "T",
+                &[
+                    concrete("ID", ColumnDataType::Int, 1),
+                    concrete("XY", ColumnDataType::Double, 2),
+                    concrete("NAME", ColumnDataType::String, 4),
+                ],
+            )
+            .unwrap();
+        let header = |f: &FitsFile| {
+            let hdu = &f.parsed().unwrap().hdus[1];
+            let mut bytes = vec![0; hdu.data_start - hdu.header_start];
+            f.read_at(hdu.header_start, &mut bytes).unwrap();
+            bytes
+        };
+        let before = header(&f);
+        for row in 0..300 {
+            hdu.write_col_range(&mut f, "ID", &[row as i32, -1], &(row..row + 1))
+                .unwrap();
+        }
+        let ids: Vec<i32> = hdu.read_col(&f, "ID").unwrap();
+        assert_eq!(ids, (0..300).collect::<Vec<_>>());
+        // Only the NAXIS2 card changed.
+        let after = header(&f);
+        let changed: Vec<String> = before
+            .chunks(80)
+            .zip(after.chunks(80))
+            .filter(|(a, b)| a != b)
+            .map(|(_, b)| String::from_utf8_lossy(b).trim_end().to_string())
+            .collect();
+        assert_eq!(changed, ["NAXIS2  =                  300"]);
+        // The data unit grew by whole blocks: 300 rows of 24 bytes.
+        let core = f.parsed().unwrap().hdus[1].clone();
+        assert_eq!(core.data_len, 300 * 24);
+        assert_eq!(f.data().unwrap().len(), core.data_start + 3 * 2880);
+
+        hdu.write_col_range(&mut f, "XY", &[1.0f64, 2.0, 3.0, 4.0], &(10..14))
+            .unwrap();
+        let xy: Vec<f64> = hdu.read_col_range(&f, "XY", 10, 3).unwrap();
+        assert_eq!(xy, [1.0, 2.0, 3.0, 4.0, 0.0, 0.0]);
+        let names = ["a".to_string(), "b".to_string()];
+        hdu.write_col_range(&mut f, "NAME", &names, &(299..301))
+            .unwrap();
+        let tail: Vec<String> = hdu.read_col_range(&f, "NAME", 298, 3).unwrap();
+        assert_eq!(tail, ["", "a", "b"]);
+        // Too few values, or part of a vector row, is an error.
+        assert!(hdu.write_col_range(&mut f, "ID", &[1i32], &(0..2)).is_err());
+        assert!(hdu
+            .write_col_range(&mut f, "XY", &[1.0f64], &(0..1))
+            .is_err());
     }
 }

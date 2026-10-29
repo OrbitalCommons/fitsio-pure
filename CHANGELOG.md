@@ -53,9 +53,14 @@ Comment, history and `LONGSTRN` cards for text of 0, 10, 72, 73 and 300 bytes, b
   - **`read_group_data`** reads the data array as `ffgpve` does, with `BSCALE`/`BZERO` applied.
   - **Ranges:** a read starts at any group and element and runs on through later groups, so all parameters can be read in one call, as hyperdrive does. Only the values asked for are read from the file. A first element past the end is `BAD_ELEM_NUM`, and a read past the last group `BAD_ROW_NUM`.
   - **Checked against cfitsio:** all 8 UVFITS fixtures in the Marlu, Birli and hyperdrive test data read bit-identical, for every parameter and visibility and for reads that span groups. They agree with astropy's `GroupsHDU` too.
+- **`FitsHdu::write_col_range(file, name, data, &rows)`,** as in `fitsio`: it writes `rows.len()` values from row `rows.start` on, growing the table if they run past its end. `WritesCol` gains `write_col_range`, and `write_col` becomes its provided method. (#151)
 
 ### Fixed
 
+- **Compat table writes no longer copy the whole file.** (#151) Each `write_col`, `write_col_range` and `write_col_bit` copied and reparsed the whole file, and growing a table reserialized every header in it.
+  - **Now:** writes go into the file's bytes in place. Growing a table inserts whole 2880-byte blocks at the end of its HDU, only when the rows outgrow the padding. It moves a heap down and rewrites just the `NAXIS2` and `THEAP` cards, so every other card keeps its exact bytes.
+  - **Speed:** appending a row at a time is linear in the rows written. 10,000 one-row appends of 1 KiB took 23 s before and take 0.5 s now; birli appends its mwaf flags this way. 10,000 appends to a `128X` column plus 500 to a two-column table give a file byte-identical to cfitsio's `ffpclx`/`ffpcl` appends.
+  - **Unchanged:** `edit()` still reads the file into memory once and saves it atomically. A disk-backed edit that doesn't load the whole file is #166.
 - **Unscaled float reads keep `-0.0`,** as cfitsio's do. Image and group-data reads computed `v * 1.0 + 0.0`, which turns `-0.0` into `0.0`. They now copy unscaled values. Two cotter UVFITS fixtures hold about 5000 `-0.0` visibilities each.
 
 ## 0.22.1
