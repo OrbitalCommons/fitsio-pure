@@ -713,7 +713,11 @@ fn insert_comment(field: &mut [u8; 70], comment: &str) {
         }
         .max(20)
     } else {
-        20
+        // A number longer than its 20 columns runs on past column 30.
+        field
+            .iter()
+            .rposition(|&b| b != b' ')
+            .map_or(20, |last| (last + 1).max(20))
     };
 
     let sep_start = content_end + 1;
@@ -1379,6 +1383,21 @@ mod write_tests {
         let buf = format_card(&card);
         let s = core::str::from_utf8(&buf).unwrap();
         assert!(s.contains("/ number of axes"));
+    }
+
+    #[test]
+    fn a_comment_follows_a_float_longer_than_its_field() {
+        let card = Card {
+            keyword: make_keyword("TINY"),
+            value: Some(Value::Float(-1.2345678901234567e-100)),
+            comment: Some(String::from("c")),
+        };
+        let text = String::from(
+            core::str::from_utf8(&format_card(&card))
+                .unwrap()
+                .trim_end(),
+        );
+        assert_eq!(text, "TINY    = -1.2345678901234567E-100 / c");
     }
 
     #[test]

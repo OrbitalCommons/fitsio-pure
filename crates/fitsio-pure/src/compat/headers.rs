@@ -510,7 +510,11 @@ int_to_card_value!(i8, i16, i32, i64, u8, u16, u32, u64);
 
 impl ToCardValue for f64 {
     fn to_card_value(&self, _name: &str) -> Result<crate::value::Value> {
-        Ok(crate::value::Value::Float(*self))
+        // As `fitsio` writes it, through cfitsio's `ffpkyd` at 15 digits, so
+        // the card is byte-identical to fitsio's.
+        Ok(crate::value::Value::Float(crate::value::cfitsio_rounded(
+            *self,
+        )))
     }
 }
 
@@ -821,7 +825,7 @@ mod tests {
         let hdu = f.primary_hdu().unwrap();
         hdu.write_key(&mut f, "SCALE", 0.1f32).unwrap();
         // The widened f64 would be written 1.000000014901161E-1.
-        assert_eq!(card_text(f, "SCALE"), "SCALE   = 1.000000000000000E-1");
+        assert_eq!(card_text(f, "SCALE"), "SCALE   =                  0.1");
     }
 
     #[test]
@@ -860,8 +864,7 @@ mod hierarch_tests {
     }
 
     // Expected cards are what fitsio 0.21 / cfitsio 4.3.1 write for the same
-    // keys, except that floats keep fitsio-pure's usual formatting (cfitsio
-    // writes `1.234`).
+    // keys.
     #[test]
     fn long_keywords_are_written_as_hierarch_like_cfitsio() {
         let mut f = FitsFile::create_in_memory().unwrap();
@@ -874,7 +877,7 @@ mod hierarch_tests {
             header_cards(f),
             [
                 "HIERARCH ESO DET CHIP1 ID = 'CCD-42  '",
-                "HIERARCH ESO TEL TEMP = 1.234000000000000E0",
+                "HIERARCH ESO TEL TEMP =  1.234",
                 "HIERARCH ESO DET NDIT =     42",
                 "HIERARCH LONGNAME9 =         7",
             ]
@@ -972,10 +975,7 @@ mod hierarch_tests {
             .unwrap();
         let temp: HeaderValue<f64> = hdu.read_key(&f, "ESO TEL TEMP").unwrap();
         assert_eq!((temp.value, temp.comment.as_deref()), (1.5, Some("degC")));
-        assert_eq!(
-            header_cards(f),
-            ["HIERARCH ESO TEL TEMP = 1.500000000000000E0 / degC"]
-        );
+        assert_eq!(header_cards(f), ["HIERARCH ESO TEL TEMP =    1.5 / degC"]);
     }
 
     #[test]
