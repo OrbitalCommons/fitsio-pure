@@ -224,8 +224,7 @@ pub fn format_value(value: &Value) -> [u8; 70] {
             right_justify(&s, &mut buf[..20]);
         }
         Value::Float(f) => {
-            let s = format_float(*f);
-            right_justify(&s, &mut buf[..20]);
+            place_number(format_float(*f).as_bytes(), &mut buf);
         }
         Value::String(s) => {
             write_string(s, &mut buf);
@@ -235,8 +234,8 @@ pub fn format_value(value: &Value) -> [u8; 70] {
             right_justify(s.as_bytes(), &mut buf[..30]);
         }
         Value::ComplexFloat(re, im) => {
-            let re_s = format_float_with_max(*re, 20);
-            let im_s = format_float_with_max(*im, 20);
+            let re_s = format_float(*re);
+            let im_s = format_float(*im);
             let s = alloc::format!("({}, {})", re_s, im_s);
             right_justify(s.as_bytes(), &mut buf[..50]);
         }
@@ -262,28 +261,102 @@ fn format_integer(n: i64) -> alloc::vec::Vec<u8> {
     format!("{}", n).into_bytes()
 }
 
-fn format_float_raw(f: f64) -> alloc::string::String {
-    format_float_with_max(f, 20)
-}
-
-fn format_float_with_max(f: f64, max_len: usize) -> alloc::string::String {
+/// `f` as cfitsio writes a floating-point card value (`ffd2e`/`ffr2e` with
+/// `decim = -digits`): C's `%.{digits}G`, then a `.` added where there is
+/// neither a `.` nor an exponent (`1.`, `0.`), and an exponent form without a
+/// `.` rewritten as `%.1E` (`1.0E-20`). `digits` is 15 for `f64` cards, as
+/// cfitsio and `fitsio` write them, and 7 for `f32`. Infinities and NaN,
+/// which cfitsio refuses, are written as Rust formats them.
+fn format_g(f: f64, digits: usize) -> alloc::string::String {
     use alloc::format;
-    if f == 0.0 {
-        return alloc::string::String::from("0.0");
+    use alloc::string::String;
+    if !f.is_finite() {
+        return format!("{f}");
     }
-    // Start with high precision and reduce until the result fits.
-    let mut precision = 15usize;
-    loop {
-        let s = format!("{:.prec$E}", f, prec = precision);
-        if s.len() <= max_len || precision == 0 {
-            return s;
+    let mut out = if f == 0.0 {
+        String::from(if f.is_sign_negative() { "-0" } else { "0" })
+    } else {
+        // %G: the exponent %E would print decides between %E and %f.
+        let e = format!("{:.*e}", digits - 1, f);
+        let exponent: i32 = e[e.find('e').expect("has an exponent") + 1..]
+            .parse()
+            .expect("an integer exponent");
+        if exponent < -4 || exponent >= digits as i32 {
+            let mantissa = strip_zeros(&e[..e.find('e').expect("has an exponent")]);
+            c_exponent(mantissa, exponent)
+        } else {
+            let fixed = format!("{:.*}", (digits as i32 - 1 - exponent) as usize, f);
+            String::from(strip_zeros(&fixed))
         }
-        precision -= 1;
+    };
+    if !out.contains('.') {
+        if out.contains('E') {
+            let e = format!("{:.1e}", f);
+            let (mantissa, exponent) = e.split_once('e').expect("has an exponent");
+            out = c_exponent(mantissa, exponent.parse().expect("an integer exponent"));
+        } else {
+            out.push('.');
+        }
+    }
+    out
+}
+
+/// `f` as a card value without losing precision: laid out as cfitsio lays
+/// out `%.15G` (see [`format_g`]), with 15 significant digits when they read
+/// back as `f`, and otherwise the 16 or 17 that do. So a value 15 digits
+/// hold is written byte for byte as cfitsio writes it, and any other keeps
+/// the digits cfitsio would round off.
+fn format_float(f: f64) -> alloc::string::String {
+    let mut text = format_g(f, 15);
+    for digits in [16, 17] {
+        if text.parse::<f64>().ok() == Some(f) {
+            break;
+        }
+        text = format_g(f, digits);
+    }
+    text
+}
+
+/// `v` rounded to the 15 significant digits cfitsio's `ffpkyd` (and so
+/// `fitsio`'s `write_key::<f64>`) writes. A [`Value::Float`] of the result
+/// is written exactly as cfitsio writes `v`, at the cost of the precision
+/// cfitsio drops; plain `v` is written without losing any.
+///
+/// The one exception is a value within a rounding of `f64::MAX`, whose 15
+/// digits (`1.79769313486232E+308`) are past `f64::MAX`: it is returned as
+/// it is, rather than as infinity.
+pub fn cfitsio_rounded(v: f64) -> f64 {
+    format_g(v, 15)
+        .parse()
+        .ok()
+        .filter(|r: &f64| r.is_finite() || !v.is_finite())
+        .unwrap_or(v)
+}
+
+/// `text` without trailing zeros after its decimal point, nor a bare `.`.
+fn strip_zeros(text: &str) -> &str {
+    if text.contains('.') {
+        text.trim_end_matches('0').trim_end_matches('.')
+    } else {
+        text
     }
 }
 
-fn format_float(f: f64) -> alloc::vec::Vec<u8> {
-    format_float_raw(f).into_bytes()
+/// `mantissa` with C's exponent form: `E`, a sign, and at least two digits.
+fn c_exponent(mantissa: &str, exponent: i32) -> alloc::string::String {
+    let sign = if exponent < 0 { '-' } else { '+' };
+    alloc::format!("{mantissa}E{sign}{:02}", exponent.unsigned_abs())
+}
+
+/// Put a number's text in the value field as cfitsio does: right-justified
+/// to column 30 when it fits, otherwise from column 11.
+fn place_number(text: &[u8], buf: &mut [u8; 70]) {
+    if text.len() <= 20 {
+        right_justify(text, &mut buf[..20]);
+    } else {
+        let len = text.len().min(buf.len());
+        buf[..len].copy_from_slice(&text[..len]);
+    }
 }
 
 fn write_string(s: &str, buf: &mut [u8; 70]) {
@@ -699,6 +772,78 @@ mod tests {
         let field = make_field("       9999999999999");
         let (val, _) = parse_value(&field).unwrap();
         assert_eq!(val, Value::Integer(9999999999999));
+    }
+
+    /// The value field of `f`, trimmed.
+    fn float_text(f: f64) -> alloc::string::String {
+        let field = format_value(&Value::Float(f));
+        alloc::string::String::from(str::from_utf8(&field).unwrap().trim())
+    }
+
+    #[test]
+    fn floats_are_laid_out_as_cfitsio_writes_them() {
+        // cfitsio 4.3.1's ffukyd(…, -15) text for each value.
+        for (value, cfitsio) in [
+            (1.0, "1."),
+            (0.0, "0."),
+            (-0.0, "-0."),
+            (229760000.0, "229760000."),
+            (2458089.5, "2458089.5"),
+            (1e-20, "1.0E-20"),
+            (1.5e-7, "1.5E-07"),
+            (0.1, "0.1"),
+            (1e15, "1.0E+15"),
+            (1e16, "1.0E+16"),
+            (-1.25e-5, "-1.25E-05"),
+            (6.02214076e23, "6.02214076E+23"),
+            (1e100, "1.0E+100"),
+            (1e-5, "1.0E-05"),
+            (0.0001, "0.0001"),
+            (100.0, "100."),
+            (1234567.0, "1234567."),
+        ] {
+            assert_eq!(float_text(value), cfitsio, "{value:e}");
+            assert_eq!(format_g(value, 15), cfitsio, "{value:e}");
+        }
+        // cfitsio rounds these to 15 digits; native keeps what reads back.
+        for (value, cfitsio, native) in [
+            (
+                -2559454.0788030702,
+                "-2559454.07880307",
+                "-2559454.0788030704",
+            ),
+            (70.04089501307288, "70.0408950130729", "70.04089501307288"),
+            (2.0 / 3.0, "0.666666666666667", "0.6666666666666666"),
+            (
+                123456789012345678.0,
+                "1.23456789012346E+17",
+                "1.2345678901234568E+17",
+            ),
+            (
+                0.00012345678901234567,
+                "0.000123456789012346",
+                "0.00012345678901234567",
+            ),
+        ] {
+            assert_eq!(float_text(value), native, "{value:e}");
+            assert_eq!(float_text(cfitsio_rounded(value)), cfitsio, "{value:e}");
+            assert_eq!(float_text(value).parse::<f64>().unwrap(), value);
+        }
+    }
+
+    #[test]
+    fn cfitsio_rounding_never_overflows() {
+        assert_eq!(cfitsio_rounded(f64::MAX), f64::MAX);
+        assert_eq!(cfitsio_rounded(-f64::MAX), -f64::MAX);
+        assert!(cfitsio_rounded(f64::NAN).is_nan());
+    }
+
+    #[test]
+    fn a_float_longer_than_its_field_starts_at_column_11() {
+        let field = format_value(&Value::Float(-1.2345678901234567e-100));
+        let text = str::from_utf8(&field).unwrap().trim_end();
+        assert_eq!(text, "-1.2345678901234567E-100");
+        assert_eq!(text.parse::<f64>().unwrap(), -1.2345678901234567e-100);
     }
 
     #[test]

@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Output changes
+
+Written headers change bytes. Values and comments read back the same, except where noted.
+
+- **Floating-point card values are laid out as cfitsio writes them.** (#178) This is C's `%G` form, as cfitsio's `ffpkyd` writes it, in place of `1.000000000000000E0`-style E notation:
+
+  | value | before | now |
+  |---|---|---|
+  | `1.0` | `1.000000000000000E0` | `1.` |
+  | `0.0` | `0.0` | `0.` |
+  | `229760000.0` | `2.297600000000000E8` | `229760000.` |
+  | `2458089.5` | `2.458089500000000E6` | `2458089.5` |
+  | `1e-20` | `1.000000000000000E-20` | `1.0E-20` |
+
+  - **Compat `write_key::<f64>`** rounds to cfitsio's 15 significant digits, as `fitsio` does, so its cards are byte-identical to `fitsio`'s: over 2013 values, every card matched. The 16th digit now differs from what compat wrote before (`-2559454.0788030702` is written `-2559454.07880307`), as in a `fitsio`/cfitsio file.
+  - **The native API (`Value::Float`, `header::Card`) loses no precision.** It uses 15 digits when they read back as the value, which matches cfitsio byte for byte, and otherwise the 16 or 17 that do (`-2559454.0788030704`). Before, it always wrote 16, which didn't always read back exactly.
+  - **To write cfitsio's text through the native API,** for example random-groups `PZEROn` cards, write `Value::Float(value::cfitsio_rounded(v))`.
+  - A value longer than the 20-column field (`-1.2345678901234567E-100`) now starts at column 11 instead of being cut off. A comment after it follows it, rather than overwriting it.
+  - Headers that compat rewrites, such as on any `write_key`, now keep a cfitsio-written float card's text as cfitsio wrote it.
+
 ## 0.24.0
 
 A minor release with two changes to compat, found while adding an opt-in fitsio-pure backend across the MWA chain. Both make compat behave as `fitsio` 0.21 does. One changes behaviour silently, so read the first section.

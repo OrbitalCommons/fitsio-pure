@@ -930,3 +930,75 @@ fn string_keys_are_laid_out_as_cfitsio_lays_them_out() {
         failures[..failures.len().min(6)].join("\n")
     );
 }
+
+/// `write_key::<f64>` writes each value's card byte for byte as `fitsio`
+/// (cfitsio's `ffpkyd` at 15 digits) writes it, and the native
+/// `Value::Float` reads back exactly.
+#[test]
+fn f64_cards_match_fitsio() {
+    let mut values = vec![
+        1.0,
+        0.0,
+        -0.0,
+        229760000.0,
+        2458089.5,
+        -2559454.0788030702,
+        70.04089501307288,
+        1e-20,
+        -3.5e-12,
+        1e15,
+        1e16,
+        6.02214076e23,
+        f64::MIN_POSITIVE,
+    ];
+    // Pseudo-random values across magnitudes.
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    for _ in 0..2000 {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let mantissa = (state >> 11) as f64 / (1u64 << 53) as f64;
+        let exponent = ((state >> 3) % 80) as i32 - 40;
+        let sign = if state & 1 == 1 { -1.0 } else { 1.0 };
+        values.push(sign * mantissa * 10f64.powi(exponent));
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let c_path = dir.path().join("c.fits");
+    let p_path = dir.path().join("p.fits");
+    for chunk in values.chunks(200) {
+        let _ = std::fs::remove_file(&c_path);
+        let _ = std::fs::remove_file(&p_path);
+        {
+            let mut c = CFits::create(&c_path).open().unwrap();
+            let hdu = c.primary_hdu().unwrap();
+            for (i, &v) in chunk.iter().enumerate() {
+                hdu.write_key(&mut c, &format!("V{i}"), v).unwrap();
+            }
+        }
+        {
+            let mut p = PureFits::create(&p_path).open().unwrap();
+            let hdu = p.primary_hdu().unwrap();
+            for (i, &v) in chunk.iter().enumerate() {
+                hdu.write_key(&mut p, &format!("V{i}"), v).unwrap();
+            }
+        }
+        let cards = |path: &std::path::Path| -> Vec<String> {
+            primary_header_cards(path)
+                .into_iter()
+                .filter(|c| c.starts_with('V'))
+                .collect()
+        };
+        assert_eq!(cards(&p_path), cards(&c_path));
+    }
+    for v in values {
+        let card =
+            fitsio_pure::header::Card::new("V", fitsio_pure::value::Value::Float(v)).unwrap();
+        let text = fitsio_pure::header::format_card(&card);
+        let parsed = fitsio_pure::header::parse_card(&text).unwrap();
+        assert_eq!(
+            parsed.value,
+            Some(fitsio_pure::value::Value::Float(v)),
+            "{v:e}"
+        );
+    }
+}
