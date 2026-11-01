@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Silent behaviour change: `read_key::<String>` no longer merges `CONTINUE` cards
+
+**What changed:** compat `read_key::<String>` (and `HeaderValue<String>`) now reads a string key as `fitsio` does, through cfitsio's `ffgkys`: from the key's own card only. (#174)
+
+**Who is affected:** code still compiles, but if it reads a long string value, one continued over `CONTINUE` cards, it now gets only the first card's part, ending in `&`. Until 0.23.0, compat merged the `CONTINUE` cards, and the docs wrongly said that matched `ffgkys`.
+
+| Key | 0.23 `read_key::<String>` | 0.24 `read_key::<String>` |
+|---|---|---|
+| `STR200` (200 characters over 3 `CONTINUE` cards) | all 200 characters | `"200:abc…xyz&"`, the first card's 67 characters and its `&` |
+| `CHANNELS` in an MWA metafits | `"109,110,…,132"` | `"109,110,…,125&"` |
+| any value that fits one card | unchanged | unchanged |
+
+**Fix (one call):** read the whole value with the new **`FitsHdu::read_key_longstr`**, the equivalent of cfitsio's `ffgkls` (`fits_read_key_longstr`).
+- `hdu.read_key::<String>(&f, "KEY")` → `hdu.read_key_longstr::<String>(&f, "KEY")`
+- `hdu.read_key::<HeaderValue<String>>(…)` → `hdu.read_key_longstr::<HeaderValue<String>>(…)`, whose comment is the last one among the cards.
+- A key that isn't continued reads the same either way, so switching every possibly-long key is safe.
+- `HIERARCH` long strings work the same way.
+
+Over every key of 23 MWA metafits and UVFITS files (3011 keys), `read_key::<String>` now matches `ffgkys` byte for byte, `CONTINUE` keys included. Across 690 write/read cases, `read_key_longstr` matches `ffgkls` and `read_key` matches `ffgkys`.
+
 ### Changed
 
 - **Compat `read_col_range` takes `rows: &Range<usize>`, as in `fitsio`.** (#173) Before, it took `start_row, num_rows`, so code written for `fitsio` failed to compile with E0061. This applies to `FitsHdu::read_col_range(file, name, &range)` and `ReadsColRange::read_col_range(file, hdu, name, &range)`. Migrate `read_col_range(f, name, start, n)` to `read_col_range(f, name, &(start..start + n))`. As before, every value of each row is read, `repeat` of them for a vector column. On mwalib's metafits `TILEDATA` (`16I` `Delays`, scalar `Antenna` and `North`), the values equal `fitsio`'s for every range tried.

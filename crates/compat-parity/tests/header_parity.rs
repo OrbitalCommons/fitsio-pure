@@ -181,10 +181,7 @@ mod long_strings {
 
         let f = PureFits::open(&path).unwrap();
         let hdu = f.primary_hdu().unwrap();
-        assert_eq!(
-            <String as PureReadsKey>::read_key(&f, &hdu, KEY).unwrap(),
-            value()
-        );
+        assert_eq!(hdu.read_key_longstr::<String>(&f, KEY).unwrap(), value());
         let cards =
             fitsio_pure::header::parse_header_blocks(&std::fs::read(&path).unwrap()).unwrap();
         let card = cards.iter().find(|c| c.keyword_str() == KEY).unwrap();
@@ -901,10 +898,24 @@ fn string_keys_are_laid_out_as_cfitsio_lays_them_out() {
                     };
                     let p = PureFits::open(&c_path).unwrap();
                     let read: fitsio_pure::compat::headers::HeaderValue<String> =
-                        p.primary_hdu().unwrap().read_key(&p, name).unwrap();
+                        p.primary_hdu().unwrap().read_key_longstr(&p, name).unwrap();
                     if (read.value.clone(), read.comment.clone()) != want {
                         failures.push(format!(
-                            "read {name}|{n}|{comment:?}|{quotes}: {:?} != {want:?}",
+                            "read_key_longstr {name}|{n}|{comment:?}|{quotes}: {:?} != {want:?}",
+                            (read.value, read.comment)
+                        ));
+                    }
+                    // And `read_key` as `fitsio`'s, which is cfitsio's ffgkys.
+                    let mut c = CFits::open(&c_path).unwrap();
+                    let c_hdu = c.primary_hdu().unwrap();
+                    let want: fitsio::headers::HeaderValue<String> =
+                        c_hdu.read_key(&mut c, name).unwrap();
+                    let read: fitsio_pure::compat::headers::HeaderValue<String> =
+                        p.primary_hdu().unwrap().read_key(&p, name).unwrap();
+                    let want = (want.value, want.comment.filter(|c| !c.is_empty()));
+                    if (read.value.clone(), read.comment.clone()) != want {
+                        failures.push(format!(
+                            "read_key {name}|{n}|{comment:?}|{quotes}: {:?} != {want:?}",
                             (read.value, read.comment)
                         ));
                     }

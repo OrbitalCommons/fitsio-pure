@@ -74,11 +74,24 @@ fn keys_read_as_cfitsio_wrote_them() {
             Some("HIERARCH long string"),
         ),
     ] {
-        let read = string(key);
+        let read: HeaderValue<String> = hdu.read_key_longstr(&f, key).unwrap();
         assert_eq!(read.value, text(n), "{key}");
         assert_eq!(read.comment.as_deref(), comment, "{key}");
+        // `read_key`, as cfitsio's ffgkys, reads the key's own card: the
+        // first part of a continued value, ending in `&`.
+        let first = string(key);
+        if let Some(part) = first.value.strip_suffix('&') {
+            assert!(text(n).starts_with(part), "{key}");
+            assert!(first.comment.is_none(), "{key}");
+        } else {
+            assert_eq!(first.value, text(n), "{key}");
+        }
     }
-    let quotes = string("QUOTES").value;
+    assert_eq!(
+        string("STR200").value,
+        "200:abcdefghijklmnopqrstuvwxyz0123456789 abcdefghijklmnopqrstuvwxyz&"
+    );
+    let quotes: String = hdu.read_key_longstr(&f, "QUOTES").unwrap();
     assert!(quotes.starts_with("it's a value with 'quotes'") && quotes.ends_with("card's text"));
 
     assert_eq!(hdu.read_key::<i64>(&f, "STARTTIME").unwrap(), 1458492896);

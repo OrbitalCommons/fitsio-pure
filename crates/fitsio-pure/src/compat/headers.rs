@@ -162,22 +162,48 @@ impl FromCardValue for bool {
     }
 }
 
-/// The value and comment of `name` as text, as cfitsio's `ffgkys` returns
-/// it: a string unquoted, keeping leading blanks, which FITS counts as
-/// significant, with any `CONTINUE` cards merged; and any other
-/// value as it is written on the card, so `1.5E+08` stays `1.5E+08` and a
+/// The value and comment of `name` as text, as cfitsio's `ffgkys` (and so
+/// `fitsio`'s `read_key::<String>`) returns them, from its own card alone:
+/// a string unquoted, keeping leading blanks, which FITS counts as
+/// significant. A string continued over `CONTINUE` cards is the first card's
+/// part, ending in its `&`; [`read_long_string_key`] reads all of it. Any
+/// other value is as written on the card, so `1.5E+08` stays `1.5E+08` and a
 /// logical is `T` or `F`.
 fn read_string_key(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<(String, Option<String>)> {
-    let (value, comment) = find_card(file, hdu, name)?;
-    match value {
-        crate::value::Value::String(s) => Ok((s.trim_end().to_string(), comment)),
-        _ => Ok((written_value(file, hdu, name.trim())?, comment)),
+    // For the errors: a missing key, or one with no value.
+    find_card(file, hdu, name)?;
+    let field = value_field(file, hdu, name.trim())?;
+    match crate::value::parse_value(&field) {
+        Some((crate::value::Value::String(s), comment)) => {
+            Ok((s.trim_end().to_string(), comment.map(String::from)))
+        }
+        Some((_, comment)) => {
+            let text = value_token(&field).ok_or(Error::status(sys::KEY_NO_EXIST))?;
+            Ok((text, comment.map(String::from)))
+        }
+        None => Err(Error::status(sys::VALUE_UNDEFINED)),
     }
 }
 
-/// The value of the first card named `name` with a value, as written on the
-/// card.
-fn written_value(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<String> {
+/// The value and comment of `name` as text, as cfitsio's `ffgkls` returns
+/// them: [`read_string_key`], but with a string continued over `CONTINUE`
+/// cards read whole, and the last comment among them.
+fn read_long_string_key(
+    file: &FitsFile,
+    hdu: &FitsHdu,
+    name: &str,
+) -> Result<(String, Option<String>)> {
+    let (value, comment) = find_card(file, hdu, name)?;
+    match value {
+        crate::value::Value::String(s) => Ok((s.trim_end().to_string(), comment)),
+        _ => read_string_key(file, hdu, name),
+    }
+}
+
+/// The value field of the first card named `name` with a value, as written
+/// on the card: what follows `= `, or a `HIERARCH` card's `=`. `CONTINUE`
+/// cards after it are not part of it.
+fn value_field(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<Vec<u8>> {
     let core_hdu = file
         .parsed()?
         .get(hdu.number)
@@ -186,10 +212,10 @@ fn written_value(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<String> {
     file.read_at(core_hdu.header_start, &mut header)?;
     for card in header.chunks_exact(crate::CARD_SIZE) {
         let keyword = core::str::from_utf8(&card[..8]).unwrap_or("").trim_end();
-        if keyword.eq_ignore_ascii_case(name) && &card[8..10] == b"= " {
-            if let Some(text) = value_token(&card[10..]) {
-                return Ok(text);
-            }
+        // cfitsio also reads `KEY     ='value'`, with no blank after `=`.
+        if keyword.eq_ignore_ascii_case(name) && card[8] == b'=' {
+            let start = if card[9] == b' ' { 10 } else { 9 };
+            return Ok(card[start..].to_vec());
         }
     }
     let name = crate::header::strip_hierarch(name);
@@ -198,9 +224,7 @@ fn written_value(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<String> {
             if key.eq_ignore_ascii_case(name) {
                 let text = card.comment.as_deref().unwrap_or("");
                 let after_eq = text.find('=').map_or("", |eq| &text[eq + 1..]);
-                if let Some(text) = value_token(after_eq.as_bytes()) {
-                    return Ok(text);
-                }
+                return Ok(after_eq.as_bytes().to_vec());
             }
         }
     }
@@ -235,6 +259,26 @@ impl ReadsKey for String {
 impl ReadsKey for HeaderValue<String> {
     fn read_key(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<Self> {
         let (value, comment) = read_string_key(file, hdu, name)?;
+        Ok(HeaderValue { value, comment })
+    }
+}
+
+/// Types a string key can be read as with its `CONTINUE` cards, as cfitsio's
+/// `ffgkls` (`fits_read_key_longstr`) reads it: `String` and
+/// [`HeaderValue<String>`]. See [`FitsHdu::read_key_longstr`].
+pub trait ReadsLongStr: Sized {
+    fn read_key_longstr(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<Self>;
+}
+
+impl ReadsLongStr for String {
+    fn read_key_longstr(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<Self> {
+        Ok(read_long_string_key(file, hdu, name)?.0)
+    }
+}
+
+impl ReadsLongStr for HeaderValue<String> {
+    fn read_key_longstr(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<Self> {
+        let (value, comment) = read_long_string_key(file, hdu, name)?;
         Ok(HeaderValue { value, comment })
     }
 }
@@ -887,11 +931,17 @@ mod hierarch_tests {
         let value = "v".repeat(60);
         let name = "ESO A VERY LONG KEYWORD NAME";
         String::write_key(&mut f, &hdu, name, &value).unwrap();
-        assert_eq!(String::read_key(&f, &hdu, name).unwrap(), value);
+        assert_eq!(String::read_key_longstr(&f, &hdu, name).unwrap(), value);
+        // As cfitsio's ffgkys, read_key gives the first card's part.
+        let first = String::read_key(&f, &hdu, name).unwrap();
+        assert!(first.ends_with('&') && value.starts_with(&first[..first.len() - 1]));
         // Rewriting the key replaces its CONTINUE cards too.
         String::write_key(&mut f, &hdu, name, &"w".repeat(90)).unwrap();
         String::write_key(&mut f, &hdu, "OBJECT", &"M31".to_string()).unwrap();
-        assert_eq!(String::read_key(&f, &hdu, name).unwrap(), "w".repeat(90));
+        assert_eq!(
+            String::read_key_longstr(&f, &hdu, name).unwrap(),
+            "w".repeat(90)
+        );
         let cards = header_cards_all(f);
         let continued = cards.iter().filter(|c| c.starts_with("CONTINUE")).count();
         assert_eq!(continued, 1, "{cards:#?}");
