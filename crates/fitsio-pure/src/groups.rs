@@ -234,16 +234,42 @@ impl<W: Write> GroupsWriter<W> {
     ) -> Result<Self> {
         let mut cards = groups_header(bitpix, naxes, params, gcount)?;
         cards.extend_from_slice(extra);
+        Self::with_header(inner, &cards)
+    }
+
+    /// Write `cards` as the header, in the order given, and get ready for
+    /// the first group.
+    ///
+    /// For a header laid out as another writer laid it out, such as a port
+    /// of a cfitsio writer that wrote `BSCALE` between `ffphpr`'s cards and
+    /// the parameters'. The cards must make a random-groups primary header:
+    /// `SIMPLE`, `BITPIX`, `NAXIS`, `NAXIS1 = 0`, `NAXISn`, `GROUPS = T`,
+    /// `PCOUNT` and `GCOUNT`, from which the group size and count are taken.
+    /// [`groups_header`] builds such a header to start from. The `END` card
+    /// and padding are added.
+    pub fn with_header(inner: W, cards: &[Card]) -> Result<Self> {
+        if cards.first().map(Card::keyword_str) != Some("SIMPLE") {
+            return Err(Error::MissingKeyword("SIMPLE"));
+        }
+        let crate::hdu::HduInfo::RandomGroups {
+            bitpix,
+            naxes,
+            pcount,
+            gcount,
+        } = crate::hdu::parse_hdu_info(cards, true)?
+        else {
+            return Err(Error::InvalidHeader(
+                "not a random-groups header: needs NAXIS1 = 0 and GROUPS = T",
+            ));
+        };
         let overflow = || Error::InvalidHeader("random-groups data size overflows");
         let data_len = naxes
             .iter()
             .try_fold(1u64, |acc, &n| acc.checked_mul(n as u64))
             .ok_or_else(overflow)?;
-        let group_len = data_len
-            .checked_add(params.len() as u64)
-            .ok_or_else(overflow)?;
+        let group_len = data_len.checked_add(pcount as u64).ok_or_else(overflow)?;
         let expected = group_len.checked_mul(gcount as u64).ok_or_else(overflow)?;
-        let samples = ImageWriter::start(inner, &cards, bitpix, expected, DEFAULT_CHUNK_BYTES)?;
+        let samples = ImageWriter::start(inner, cards, bitpix, expected, DEFAULT_CHUNK_BYTES)?;
         Ok(GroupsWriter {
             samples,
             group_len,
@@ -371,6 +397,51 @@ mod tests {
         let mut out = Vec::new();
         let mut writer = GroupsWriter::new(&mut out, -32, &[2], &[], 1, &[]).unwrap();
         assert!(writer.write_group(&[1.0f64, 2.0]).is_err());
+    }
+
+    #[test]
+    fn with_header_keeps_the_callers_card_order() {
+        let mut cards = groups_header(-32, &[2], &params(), 2).unwrap();
+        let ptype1 = cards
+            .iter()
+            .position(|c| c.keyword_str() == "PTYPE1")
+            .unwrap();
+        cards.insert(ptype1, Card::new("BSCALE", Value::Float(1.0)).unwrap());
+        let mut out = Vec::new();
+        let mut writer = GroupsWriter::with_header(&mut out, &cards).unwrap();
+        assert_eq!(writer.group_len(), 6);
+        writer.write_group(&[1.0f32; 6]).unwrap();
+        writer.finish().unwrap();
+
+        let hdu = parse_fits(&out).unwrap().hdus.remove(0);
+        let keys: Vec<&str> = hdu.cards.iter().map(Card::keyword_str).collect();
+        let bscale = keys.iter().position(|&k| k == "BSCALE").unwrap();
+        assert_eq!(keys[bscale + 1], "PTYPE1");
+        assert_eq!(hdu.data_len, 2 * 6 * 4);
+        assert_eq!(group_params(&hdu.cards, 4), params());
+    }
+
+    #[test]
+    fn with_header_needs_a_random_groups_header() {
+        let header = |edit: &dyn Fn(&mut Vec<Card>)| {
+            let mut cards = groups_header(16, &[3], &[GroupParam::new("A")], 1).unwrap();
+            edit(&mut cards);
+            GroupsWriter::with_header(Vec::new(), &cards).map(|_| ())
+        };
+        assert!(header(&|_| {}).is_ok());
+        let set = |key: &'static str, value: Value| {
+            move |cards: &mut Vec<Card>| {
+                let card = cards.iter_mut().find(|c| c.keyword_str() == key).unwrap();
+                card.value = Some(value.clone());
+            }
+        };
+        assert!(header(&set("NAXIS1", Value::Integer(3))).is_err());
+        assert!(header(&set("GROUPS", Value::Logical(false))).is_err());
+        assert!(header(&|cards| cards.retain(|c| c.keyword_str() != "PCOUNT")).is_err());
+        assert!(header(&|cards| {
+            cards.remove(0);
+        })
+        .is_err());
     }
 
     #[test]
