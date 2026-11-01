@@ -21,6 +21,17 @@ Written headers change bytes. Values and comments read back the same, except whe
   - **To write cfitsio's text through the native API,** for example random-groups `PZEROn` cards, write `Value::Float(value::cfitsio_rounded(v))`.
   - A value longer than the 20-column field (`-1.2345678901234567E-100`) now starts at column 11 instead of being cut off. A comment after it follows it, rather than overwriting it.
   - Headers that compat rewrites, such as on any `write_key`, now keep a cfitsio-written float card's text as cfitsio wrote it.
+- **Compat `FitsFile::create` and `create_table` write cfitsio's headers.** (#180) Files made through them, data included, are byte-identical to `fitsio`'s from the same calls.
+  - **Primary HDU:** `create()`'s primary (and `with_custom_primary`'s) is the one cfitsio's `ffphpr` writes. It uses cfitsio's comments (`file does conform to FITS standard`, `number of bits per data pixel`, `length of data axis n`), then `EXTEND = T` and the two `COMMENT` cards citing the FITS definition. Before, it had no `EXTEND` or `COMMENT` cards and used different comments.
+  - **Unsigned and signed-byte images** (primary and `create_image`): `BZERO`/`BSCALE` carry cfitsio's comments (`offset data range to that of unsigned short`, `default scaling factor`).
+  - **Tables:** `create_table` lays the header out as `ffphbn` does:
+    - its comments (`binary table extension`, `width of table in bytes`, `label for field   1`, `name of this binary table extension`, …);
+    - `TTYPEn` before `TFORMn`, with a `TFORMn` comment naming the stored type (`BIT`, `4-byte INTEGER`, `ASCII Character`, …);
+    - for unsigned and signed-byte columns, `TZEROn` with its comment, then `TSCALn = 1`.
+
+    Before, there were no comments and `TFORMn` came first.
+  - The native builders (`primary::build_primary_header`, `bintable::build_binary_table_cards`) are unchanged.
+  - **One remaining difference:** the `u64` offset (`2^63`, for `UnsignedLongLong` columns and images) is written `9.223372036854775808E+18`, where cfitsio writes the integer `9223372036854775808`. A header value can't hold that integer.
 
 ## 0.24.0
 
