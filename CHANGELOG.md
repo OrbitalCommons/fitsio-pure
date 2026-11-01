@@ -1,6 +1,15 @@
 # Changelog
 
-## Unreleased
+## 0.25.0
+
+A minor release from the MWA chain's switch to fitsio-pure. Compat now writes the files `fitsio` writes byte for byte, and reads and appends far faster with far fewer syscalls. Nothing in the API is removed or changed. `GroupsWriter::with_header` and `value::cfitsio_rounded` are new. Written bytes change, so read the output changes.
+
+- **cargo-semver-checks against 0.24.0** (`--all-features`): 202 checks, 202 pass. It can't see the output changes.
+- **Checks against this release:**
+  - The MWA comparison (mwalib, Birli and hyperdrive with each backend) finds 79 of 80 outputs byte-identical before #188, which fixes the last.
+  - Birli runs in 2.8 s against cfitsio's 2.9 s (18 s with 0.24.0).
+  - FastFitsCutter, soar-video, Transit-Detector, serialimage, refimage and AstroBurst pass against it unchanged. rustafits passes but for its existing timing test.
+  - FastFitsCutter writes WCS floats through compat `write_key::<f64>`, so its cutouts' `CRVALn`/`CDELTn` are now written with 15 significant digits, as they were under `fitsio`.
 
 ### Output changes
 
