@@ -361,12 +361,9 @@ impl FitsFile {
     ) -> Result<FitsHdu> {
         self.check_writable()?;
         // `dimensions` are row-major, as in `fitsio`; FITS lists NAXIS1 first.
-        let cards = crate::extension::build_extension_header(
-            crate::extension::ExtensionType::Image,
+        let cards = cfitsio_extension_cards(
             desc.data_type.to_bitpix(),
             &super::hdu::row_major(desc.dimensions),
-            0,
-            1,
         )?;
         let extname = extname.into();
         append_image_hdu(self.bytes_mut()?, cards, &extname, desc)?;
@@ -776,25 +773,67 @@ fn primary_hdu_bytes(desc: Option<&ImageDescription>) -> Result<Vec<u8>> {
 /// comments, `EXTEND = T`, and the two `COMMENT` cards citing the FITS
 /// definition.
 fn cfitsio_primary_cards(bitpix: i64, naxes: &[usize]) -> Result<Vec<crate::header::Card>> {
-    use crate::header::Card;
     use crate::value::Value;
-    let card = |keyword: &str, value: Value, comment: &str| -> Result<Card> {
-        let mut card = Card::new(keyword, value)?;
-        card.comment = Some(comment.to_string());
-        Ok(card)
-    };
+    let simple = commented_card(
+        "SIMPLE",
+        Value::Logical(true),
+        "file does conform to FITS standard",
+    )?;
+    let mut cards = cfitsio_image_cards(simple, bitpix, naxes)?;
+    cards.push(commented_card(
+        "EXTEND",
+        Value::Logical(true),
+        "FITS dataset may contain extensions",
+    )?);
+    for text in crate::primary::FITS_DEFINITION_COMMENTS {
+        cards.push(crate::header::Card {
+            keyword: *b"COMMENT ",
+            value: None,
+            comment: Some(text.to_string()),
+        });
+    }
+    Ok(cards)
+}
+
+/// The image extension header cfitsio's `ffphext` writes, as `fitsio`'s
+/// `create_image` writes it: `XTENSION`, `BITPIX`, `NAXIS`, `NAXISn`,
+/// `PCOUNT` and `GCOUNT`, with cfitsio's comments.
+fn cfitsio_extension_cards(bitpix: i64, naxes: &[usize]) -> Result<Vec<crate::header::Card>> {
+    use crate::value::Value;
+    let xtension = commented_card(
+        "XTENSION",
+        Value::String("IMAGE".to_string()),
+        "IMAGE extension",
+    )?;
+    let mut cards = cfitsio_image_cards(xtension, bitpix, naxes)?;
+    cards.push(commented_card(
+        "PCOUNT",
+        Value::Integer(0),
+        "required keyword; must = 0",
+    )?);
+    cards.push(commented_card(
+        "GCOUNT",
+        Value::Integer(1),
+        "required keyword; must = 1",
+    )?);
+    Ok(cards)
+}
+
+/// `first`, then `BITPIX`, `NAXIS` and `NAXISn` with cfitsio's comments.
+fn cfitsio_image_cards(
+    first: crate::header::Card,
+    bitpix: i64,
+    naxes: &[usize],
+) -> Result<Vec<crate::header::Card>> {
+    use crate::value::Value;
     let mut cards = vec![
-        card(
-            "SIMPLE",
-            Value::Logical(true),
-            "file does conform to FITS standard",
-        )?,
-        card(
+        first,
+        commented_card(
             "BITPIX",
             Value::Integer(bitpix),
             "number of bits per data pixel",
         )?,
-        card(
+        commented_card(
             "NAXIS",
             Value::Integer(naxes.len() as i64),
             "number of data axes",
@@ -802,25 +841,23 @@ fn cfitsio_primary_cards(bitpix: i64, naxes: &[usize]) -> Result<Vec<crate::head
     ];
     for (i, &len) in naxes.iter().enumerate() {
         let n = i + 1;
-        cards.push(card(
+        cards.push(commented_card(
             &format!("NAXIS{n}"),
             Value::Integer(len as i64),
             &format!("length of data axis {n}"),
         )?);
     }
-    cards.push(card(
-        "EXTEND",
-        Value::Logical(true),
-        "FITS dataset may contain extensions",
-    )?);
-    for text in crate::primary::FITS_DEFINITION_COMMENTS {
-        cards.push(Card {
-            keyword: *b"COMMENT ",
-            value: None,
-            comment: Some(text.to_string()),
-        });
-    }
     Ok(cards)
+}
+
+fn commented_card(
+    keyword: &str,
+    value: crate::value::Value,
+    comment: &str,
+) -> Result<crate::header::Card> {
+    let mut card = crate::header::Card::new(keyword, value)?;
+    card.comment = Some(comment.to_string());
+    Ok(card)
 }
 
 /// Finish an image HDU from its structural `cards`: add the unsigned-type
@@ -874,7 +911,6 @@ fn append_image_hdu(
 /// `fitsio` checks the open mode itself.
 const READONLY_STATUS: u32 = 602;
 
-/// Fill `buf` with the bytes of `file` from `offset`.
 fn gunzip_if_compressed(data: Vec<u8>) -> Result<Vec<u8>> {
     if crate::gzip::is_gzip(&data) {
         Ok(crate::gzip::decompress(&data)?)
