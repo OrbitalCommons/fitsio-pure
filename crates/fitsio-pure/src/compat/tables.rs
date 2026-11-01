@@ -501,7 +501,13 @@ fn range_values<'a, T>(data: &'a [T], rows: &std::ops::Range<usize>) -> Result<&
 /// column number, such as `"3"`, picks that column; anything else is
 /// `COL_NOT_FOUND` (219).
 fn find_column_index(cards: &[crate::header::Card], name: &str, tfields: usize) -> Result<usize> {
-    let ttypes: Vec<&str> = (1..=tfields)
+    match_column(&column_names(cards, tfields), name)
+}
+
+/// Each column's `TTYPEn` value, as [`find_column_index`] matches names
+/// against them: blank for a column without one.
+fn column_names(cards: &[crate::header::Card], tfields: usize) -> Vec<&str> {
+    (1..=tfields)
         .map(|i| {
             let ttype_key = format!("TTYPE{i}");
             cards
@@ -514,7 +520,13 @@ fn find_column_index(cards: &[crate::header::Card], name: &str, tfields: usize) 
                 })
                 .unwrap_or("")
         })
-        .collect();
+        .collect()
+}
+
+/// [`find_column_index`] given the columns' names.
+fn match_column<S: AsRef<str>>(ttypes: &[S], name: &str) -> Result<usize> {
+    let tfields = ttypes.len();
+    let ttypes: Vec<&str> = ttypes.iter().map(AsRef::as_ref).collect();
     if let Some(i) = ttypes.iter().position(|ttype| ttype.trim_end() == name) {
         return Ok(i);
     }
@@ -873,15 +885,9 @@ fn write_scaled<T: ColumnScalar>(
     data: &[T],
     first_row: usize,
 ) -> Result<()> {
-    let col_data = {
-        let (idx, col_idx) = resolve_column(file, hdu, name)?;
-        let parsed = file.parsed()?;
-        let core_hdu = &parsed.hdus[idx];
-        let columns =
-            crate::bintable::parse_binary_table_columns(&core_hdu.cards, get_tfields(core_hdu)?)?;
-        let (tscal, tzero) = crate::bintable::extract_column_scaling(&core_hdu.cards, col_idx + 1);
-        unscale_column(data, &columns[col_idx], tscal, tzero, name)?
-    };
+    let (_, col_idx, layout) = resolve_layout(file, hdu, name)?;
+    let (tscal, tzero) = layout.scaling[col_idx];
+    let col_data = unscale_column(data, &layout.columns[col_idx], tscal, tzero, name)?;
     write_col_inner(file, hdu, name, &col_data, first_row)
 }
 
@@ -972,6 +978,51 @@ fn resolve_column(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<(usize, 
     Ok((idx, col_idx))
 }
 
+/// What a binary table's header says about its columns, parsed once and
+/// kept by the file until its headers change (see
+/// [`FitsFile::table_layout`]), so that writing a row at a time doesn't
+/// parse the header for every row.
+pub(crate) struct TableLayout {
+    /// Each column's `TTYPEn`, as [`match_column`] matches names.
+    names: Vec<String>,
+    columns: Vec<crate::bintable::BinaryColumnDescriptor>,
+    /// Each column's byte offset within a row.
+    offsets: Vec<usize>,
+    /// Each column's `(TSCALn, TZEROn)`.
+    scaling: Vec<(f64, f64)>,
+}
+
+impl TableLayout {
+    pub(crate) fn parse(hdu: &crate::hdu::Hdu) -> Result<TableLayout> {
+        let tfields = get_tfields(hdu)?;
+        let columns = crate::bintable::parse_binary_table_columns(&hdu.cards, tfields)?;
+        Ok(TableLayout {
+            names: column_names(&hdu.cards, tfields)
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            offsets: crate::bintable::column_offsets(&columns),
+            scaling: (1..=tfields)
+                .map(|n| crate::bintable::extract_column_scaling(&hdu.cards, n))
+                .collect(),
+            columns,
+        })
+    }
+}
+
+/// HDU `hdu`'s index, its column `name`'s index, and the table's layout,
+/// for a column write.
+fn resolve_layout(
+    file: &FitsFile,
+    hdu: &FitsHdu,
+    name: &str,
+) -> Result<(usize, usize, std::sync::Arc<TableLayout>)> {
+    let idx = validate_hdu_index(file, hdu)?;
+    let layout = file.table_layout(idx)?;
+    let col_idx = match_column(&layout.names, name)?;
+    Ok((idx, col_idx, layout))
+}
+
 /// [`resolve_column`] for a column read, with a missing column reported as
 /// `fitsio`'s reads report it (see [`read_column_index`]).
 fn resolve_read_column(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<(usize, usize)> {
@@ -1056,27 +1107,19 @@ fn write_col_inner(
     first_row: usize,
 ) -> Result<()> {
     file.check_writable()?;
-    let (idx, col_idx, rows, naxis2) = {
-        let idx = validate_hdu_index(file, hdu)?;
-        let parsed = file.parsed()?;
-        let core_hdu = &parsed.hdus[idx];
-        let tfields = get_tfields(core_hdu)?;
-        let col_idx = find_column_index(&core_hdu.cards, name, tfields)?;
-        let columns = crate::bintable::parse_binary_table_columns(&core_hdu.cards, tfields)?;
-        let rows = crate::bintable::column_data_rows(&columns[col_idx], col_data)?;
-        let naxis2 = match core_hdu.info {
-            crate::hdu::HduInfo::BinaryTable { naxis2, .. } => naxis2,
-            _ => return Err(Error::Message("HDU is not a binary table".to_string())),
-        };
-        (idx, col_idx, rows, naxis2)
+    let (idx, col_idx, layout) = resolve_layout(file, hdu, name)?;
+    let column = &layout.columns[col_idx];
+    let rows = crate::bintable::column_data_rows(column, col_data)?;
+    let core_hdu = &file.parsed()?.hdus[idx];
+    let crate::hdu::HduInfo::BinaryTable { naxis1, naxis2, .. } = core_hdu.info else {
+        return Err(Error::Message("HDU is not a binary table".to_string()));
     };
+    let column_start = core_hdu.data_start + layout.offsets[col_idx];
     if first_row + rows > naxis2 {
         grow_table(file, idx, first_row + rows)?;
     }
-    // Clone the HDU so nothing borrows `file` while its bytes are written.
-    let core_hdu = file.parsed()?.hdus[idx].clone();
     let data = file.data_mut()?;
-    crate::bintable::write_binary_column_rows(data, &core_hdu, col_idx, first_row, col_data)?;
+    crate::bintable::write_column_cells(data, column_start, naxis1, column, first_row, col_data)?;
     Ok(())
 }
 
@@ -1086,67 +1129,72 @@ fn write_col_inner(
 /// blocks are inserted, at the end of the HDU, only when the data outgrows
 /// its padding, so growing the last HDU of a file a row at a time never
 /// moves anything before it.
+///
+/// The file's parse is updated to match rather than redone, so appending a
+/// row at a time costs the row, not a parse of the file.
 fn grow_table(file: &mut FitsFile, idx: usize, rows: usize) -> Result<()> {
-    let hdu = file.parsed()?.hdus[idx].clone();
-    let (naxis1, naxis2) = match hdu.info {
-        crate::hdu::HduInfo::BinaryTable { naxis1, naxis2, .. } => (naxis1, naxis2),
-        _ => return Err(Error::Message("HDU is not a binary table".to_string())),
+    let (data, parsed) = file.bytes_and_parse_mut()?;
+    let (hdus, later) = parsed.hdus.split_at_mut(idx + 1);
+    let hdu = &mut hdus[idx];
+    let crate::hdu::HduInfo::BinaryTable { naxis1, naxis2, .. } = &mut hdu.info else {
+        return Err(Error::Message("HDU is not a binary table".to_string()));
     };
-    let added = (rows - naxis2) * naxis1;
-    let table_end = hdu.data_start + naxis1 * naxis2;
-    let heap_len = hdu.data_len - naxis1 * naxis2;
+    let (naxis1, old_rows) = (*naxis1, std::mem::replace(naxis2, rows));
+    let added = (rows - old_rows) * naxis1;
+    let table_end = hdu.data_start + naxis1 * old_rows;
+    let heap_len = hdu.data_len - naxis1 * old_rows;
     let old_end = hdu.data_start + crate::block::padded_byte_len(hdu.data_len);
     let new_end = hdu.data_start + crate::block::padded_byte_len(hdu.data_len + added);
 
-    set_card_value(
-        file,
-        &hdu,
-        "NAXIS2",
-        crate::value::Value::Integer(rows as i64),
-    )?;
-    if let Some(crate::value::Value::Integer(theap)) = hdu
-        .cards
-        .iter()
-        .find(|c| c.keyword_str() == "THEAP")
-        .and_then(|c| c.value.clone())
-    {
-        let theap = crate::value::Value::Integer(theap + added as i64);
-        set_card_value(file, &hdu, "THEAP", theap)?;
+    set_card_value(data, hdu, "NAXIS2", |_| rows as i64)?;
+    let theap = hdu.cards.iter().find(|c| c.keyword_str() == "THEAP");
+    if matches!(
+        theap.and_then(|c| c.value.as_ref()),
+        Some(crate::value::Value::Integer(_))
+    ) {
+        set_card_value(data, hdu, "THEAP", |theap| theap + added as i64)?;
     }
     if new_end > old_end {
-        file.replace_bytes(old_end..old_end, &vec![0; new_end - old_end])?;
+        data.splice(old_end..old_end, core::iter::repeat_n(0, new_end - old_end));
+        for later in later {
+            later.header_start += new_end - old_end;
+            later.data_start += new_end - old_end;
+        }
     }
-    let data = file.data_mut()?;
     data.copy_within(table_end..table_end + heap_len, table_end + added);
     data[table_end..table_end + added].fill(0);
+    hdu.data_len += added;
     Ok(())
 }
 
-/// Rewrite the value of `keyword`'s card in `hdu`'s header in place,
-/// keeping its comment and leaving every other card's bytes as they are.
+/// Rewrite the value of integer card `keyword` in `hdu`'s header in place,
+/// as `value` of its old value, keeping its comment and leaving every other
+/// card's bytes as they are. `hdu`'s parsed card is updated to match.
 fn set_card_value(
-    file: &mut FitsFile,
-    hdu: &crate::hdu::Hdu,
+    data: &mut [u8],
+    hdu: &mut crate::hdu::Hdu,
     keyword: &str,
-    value: crate::value::Value,
+    value: impl FnOnce(i64) -> i64,
 ) -> Result<()> {
-    let mut header = vec![0u8; hdu.data_start - hdu.header_start];
-    file.read_at(hdu.header_start, &mut header)?;
+    let header = &mut data[hdu.header_start..hdu.data_start];
     let at = header
         .chunks_exact(crate::CARD_SIZE)
         .position(|card| card[..8].trim_ascii_end() == keyword.as_bytes())
         .ok_or_else(|| Error::Message(format!("no {keyword} card to update")))?;
-    let mut card = crate::header::Card::new(keyword, value)?;
-    card.comment = hdu
+    let parsed = hdu
         .cards
-        .iter()
+        .iter_mut()
         .find(|c| c.keyword_str() == keyword)
-        .and_then(|c| c.comment.clone());
-    let start = hdu.header_start + at * crate::CARD_SIZE;
-    file.replace_bytes(
-        start..start + crate::CARD_SIZE,
-        &crate::header::format_card(&card),
-    )
+        .ok_or_else(|| Error::Message(format!("no {keyword} card to update")))?;
+    let Some(crate::value::Value::Integer(old)) = parsed.value else {
+        return Err(Error::Message(format!("{keyword} is not an integer")));
+    };
+    let mut card = crate::header::Card::new(keyword, crate::value::Value::Integer(value(old)))?;
+    card.comment = parsed.comment.clone();
+    let bytes = crate::header::format_card(&card);
+    *parsed = crate::header::parse_card(&bytes)?;
+    header[at * crate::CARD_SIZE..][..crate::CARD_SIZE].copy_from_slice(&bytes);
+    Ok(())
 }
 
 /// Where a bit (`X`) or byte (`B`) column's bytes are, for bit reads and
@@ -1165,21 +1213,22 @@ struct BitColumn {
 
 impl BitColumn {
     fn find(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<BitColumn> {
-        let (idx, col_idx) = resolve_column(file, hdu, name)?;
+        let idx = validate_hdu_index(file, hdu)?;
         let core_hdu = &file.parsed()?.hdus[idx];
-        let (naxis1, naxis2) = match core_hdu.info {
-            crate::hdu::HduInfo::BinaryTable { naxis1, naxis2, .. } => (naxis1, naxis2),
-            _ => return Err(Error::status(sys::NOT_BTABLE)),
+        let crate::hdu::HduInfo::BinaryTable { naxis1, naxis2, .. } = core_hdu.info else {
+            // A missing column is reported first, as cfitsio does.
+            resolve_column(file, hdu, name)?;
+            return Err(Error::status(sys::NOT_BTABLE));
         };
-        let columns =
-            crate::bintable::parse_binary_table_columns(&core_hdu.cards, get_tfields(core_hdu)?)?;
-        let column = &columns[col_idx];
+        let layout = file.table_layout(idx)?;
+        let col_idx = match_column(&layout.names, name)?;
+        let column = &layout.columns[col_idx];
         let bytes_per_row = match column.col_type {
             BinaryColumnType::Bit => column.repeat.div_ceil(8),
             BinaryColumnType::Byte => column.repeat,
             _ => return Err(Error::status(sys::NOT_LOGICAL_COL)),
         };
-        let offset = crate::bintable::column_offsets(&columns)[col_idx];
+        let offset = layout.offsets[col_idx];
         Ok(BitColumn {
             idx,
             start: core_hdu.data_start + offset,
@@ -1261,20 +1310,25 @@ pub(crate) fn write_bits(
     let start = column.first_bit(first_row, first_bit)?;
     let end = start + bits.len();
     let rows = end.div_ceil(8).div_ceil(column.bytes_per_row);
-    let column = if rows > column.naxis2 {
+    if rows > column.naxis2 {
         grow_table(file, column.idx, rows)?;
-        BitColumn::find(file, hdu, name)?
-    } else {
-        column
-    };
+    }
     let data = file.data_mut()?;
-    for (bit, &set) in (start..end).zip(bits) {
-        let (byte, mask) = column.locate(bit);
-        if set {
-            data[byte] |= mask;
-        } else {
-            data[byte] &= !mask;
+    // A byte at a time: the bits up to the first byte boundary, then 8 at a
+    // time.
+    let (head, tail) = bits.split_at((8 - start % 8).min(bits.len()));
+    let mut bit = start;
+    for byte_bits in std::iter::once(head).chain(tail.chunks(8)) {
+        let (byte, first_mask) = column.locate(bit);
+        let (mut mask, mut set) = (0, 0);
+        for (i, &on) in byte_bits.iter().enumerate() {
+            mask |= first_mask >> i;
+            if on {
+                set |= first_mask >> i;
+            }
         }
+        data[byte] = data[byte] & !mask | set;
+        bit += byte_bits.len();
     }
     Ok(())
 }
@@ -1759,6 +1813,64 @@ mod tests {
                 num_rows: 5
             }
         );
+    }
+
+    #[test]
+    fn appending_rows_keeps_the_parse_as_a_fresh_parse_reads_it() {
+        let mut f = FitsFile::create_in_memory().unwrap();
+        let flags = f
+            .create_table(
+                "FLAGS",
+                &[
+                    concrete("FLAGS", ColumnDataType::Bit, 768),
+                    concrete("N", ColumnDataType::Int, 1),
+                ],
+            )
+            .unwrap();
+        // A table after the one growing, which moves down as it grows.
+        let after = f
+            .create_table("AFTER", &[concrete("X", ColumnDataType::Short, 1)])
+            .unwrap();
+        after.write_col(&mut f, "X", &[1i16, 2, 3]).unwrap();
+        let bits: Vec<bool> = (0..768).map(|i| i % 3 == 0).collect();
+        // 100-byte rows: past several block boundaries.
+        for row in 0..100 {
+            flags.write_col_bit(&mut f, "FLAGS", row, 0, &bits).unwrap();
+            flags
+                .write_col_range(&mut f, "N", &[row as i32], &(row..row + 1))
+                .unwrap();
+            let fresh = crate::hdu::parse_fits(f.data().unwrap()).unwrap();
+            assert_eq!(
+                format!("{:?}", f.parsed().unwrap()),
+                format!("{fresh:?}"),
+                "row {row}"
+            );
+        }
+        let n: Vec<i32> = flags.read_col(&f, "N").unwrap();
+        assert_eq!(n, (0..100).collect::<Vec<_>>());
+        let mut read = vec![false; 768];
+        flags.read_col_bit(&f, "FLAGS", 99, 0, &mut read).unwrap();
+        assert_eq!(read, bits);
+        let x: Vec<i16> = after.read_col(&f, "X").unwrap();
+        assert_eq!(x, [1, 2, 3]);
+    }
+
+    #[test]
+    fn a_header_change_is_seen_by_the_next_write() {
+        let mut f = FitsFile::create_in_memory().unwrap();
+        let hdu = f
+            .create_table("T", &[concrete("N", ColumnDataType::Int, 1)])
+            .unwrap();
+        hdu.write_col(&mut f, "N", &[10i32]).unwrap();
+        hdu.write_key(&mut f, "TSCAL1", 2.0).unwrap();
+        hdu.write_key(&mut f, "TTYPE1", "M").unwrap();
+        hdu.write_col_range(&mut f, "M", &[10i32], &(1..2)).unwrap();
+        // The second value is written through TSCAL1 = 2, as 5, and the first,
+        // written before it, now reads as 20.
+        let values: Vec<i32> = hdu.read_col(&f, "M").unwrap();
+        assert_eq!(values, [20, 10]);
+        let stored = &f.data().unwrap()[f.parsed().unwrap().hdus[1].data_start..][..8];
+        assert_eq!(stored, [0, 0, 0, 10, 0, 0, 0, 5]);
     }
 
     #[test]

@@ -463,19 +463,34 @@ pub fn write_binary_column_rows(
         return Err(Error::InvalidValue);
     }
 
-    let offsets = column_offsets(&columns);
     let col = &columns[col_index];
-    let col_offset = offsets[col_index];
-    let data_start = hdu.data_start;
-
-    let rows = column_data_rows(col, data)?;
-    if first_row + rows > naxis2 {
+    if first_row + column_data_rows(col, data)? > naxis2 {
         return Err(Error::InvalidValue);
     }
+    let col_offset = column_offsets(&columns)[col_index];
+    write_column_cells(
+        fits_data,
+        hdu.data_start + col_offset,
+        naxis1,
+        col,
+        first_row,
+        data,
+    )
+}
 
-    for row in 0..rows {
+/// Write `data` to column `col` from row `first_row` on, given where the
+/// column's first cell is and the row length. The rows must exist.
+pub(crate) fn write_column_cells(
+    fits_data: &mut [u8],
+    column_start: usize,
+    naxis1: usize,
+    col: &BinaryColumnDescriptor,
+    first_row: usize,
+    data: &BinaryColumnData,
+) -> Result<()> {
+    for row in 0..column_data_rows(col, data)? {
         let cell_bytes = serialize_binary_column_value(&col.col_type, col.repeat, data, row)?;
-        let base = data_start + (first_row + row) * naxis1 + col_offset;
+        let base = column_start + (first_row + row) * naxis1;
         fits_data[base..base + cell_bytes.len()].copy_from_slice(&cell_bytes);
     }
     Ok(())
