@@ -1005,7 +1005,7 @@ pub fn serialize_binary_column_value(
     }
 }
 
-fn tform_string(repeat: usize, col_type: &BinaryColumnType) -> String {
+pub(crate) fn tform_string(repeat: usize, col_type: &BinaryColumnType) -> String {
     let ch = match col_type {
         BinaryColumnType::Logical => 'L',
         BinaryColumnType::Bit => 'X',

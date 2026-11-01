@@ -141,7 +141,7 @@ fn long_string_and_hierarch_cards_are_written_as_cfitsio_wrote_them() {
             .map(|c| String::from_utf8_lossy(c).into_owned())
             .collect()
     };
-    let ours: Vec<String> = cards(&f.into_bytes().unwrap()).split_off(3);
+    let ours: Vec<String> = cards(&f.into_bytes().unwrap()).split_off(6);
     let theirs = cards(&std::fs::read(&path).unwrap());
     let first = theirs
         .iter()

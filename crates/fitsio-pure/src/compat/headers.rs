@@ -1025,13 +1025,14 @@ mod hierarch_tests {
         assert_eq!(i64::read_key(&f, &hdu, "FREE").unwrap(), 42);
     }
 
-    /// The cards after the empty primary header's `NAXIS`, trimmed.
+    /// The cards after the empty primary header cfitsio writes (through its
+    /// two `COMMENT` cards), trimmed.
     fn cards_after_naxis(f: FitsFile) -> Vec<String> {
         let bytes = f.into_bytes().unwrap();
         bytes[..2880]
             .chunks(80)
             .map(|c| String::from_utf8_lossy(c).trim_end().to_string())
-            .skip(3)
+            .skip(6)
             .take_while(|c| c != "END")
             .collect()
     }

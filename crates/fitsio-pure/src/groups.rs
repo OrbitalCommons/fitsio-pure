@@ -179,12 +179,9 @@ pub fn groups_header(
         Value::Integer(gcount as i64),
         "number of random groups",
     )?);
-    cards.push(commentary(
-        "  FITS (Flexible Image Transport System) format is defined in 'Astronomy",
-    ));
-    cards.push(commentary(
-        "  and Astrophysics', volume 376, page 359; bibcode: 2001A&A...376..359H",
-    ));
+    for text in crate::primary::FITS_DEFINITION_COMMENTS {
+        cards.push(commentary(text));
+    }
     for (i, param) in params.iter().enumerate() {
         let n = i + 1;
         cards.push(card(

@@ -910,3 +910,147 @@ fn read_col_range_matches_fitsio_on_a_metafits() {
         assert_eq!(p_north, c_north, "North {range:?}");
     }
 }
+
+/// Files `create` and `create_table` make are byte-identical to the ones
+/// `fitsio` makes from the same calls: an mwaf-shaped file (an empty
+/// primary, a `768X` table, a `1J`/`1K`/`1D` table and a `1J`/`8A` table,
+/// with rows written), plus the unsigned and signed-byte columns.
+#[test]
+fn created_files_match_fitsio_byte_for_byte() {
+    use fitsio_pure::compat::tables::{ColumnDataType as PColType, ColumnDescription as PColDesc};
+    let tables: [(&str, &[(&str, CColType, PColType, usize)]); 4] = [
+        ("FLAGS", &[("FLAGS", CColType::Bit, PColType::Bit, 768)]),
+        (
+            "CH_OCC",
+            &[
+                ("Antenna", CColType::Int, PColType::Int, 1),
+                ("Count", CColType::LongLong, PColType::LongLong, 1),
+                ("Occupancy", CColType::Double, PColType::Double, 1),
+            ],
+        ),
+        (
+            "TILES",
+            &[
+                ("Antenna", CColType::Int, PColType::Int, 1),
+                ("TileName", CColType::String, PColType::String, 8),
+            ],
+        ),
+        (
+            "UNSIGNED",
+            &[
+                ("U16", CColType::UnsignedShort, PColType::UnsignedShort, 1),
+                ("U32", CColType::UnsignedLong, PColType::UnsignedLong, 2),
+                ("I8", CColType::SignedByte, PColType::SignedByte, 1),
+                ("L", CColType::Logical, PColType::Logical, 1),
+                ("F", CColType::Float, PColType::Float, 3),
+                ("S", CColType::Short, PColType::Short, 1),
+                ("B", CColType::Byte, PColType::Byte, 4),
+            ],
+        ),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let c_path = dir.path().join("c.fits");
+    let p_path = dir.path().join("p.fits");
+    {
+        let mut c = CFits::create(&c_path).open().unwrap();
+        for (extname, cols) in tables {
+            let cols: Vec<_> = cols
+                .iter()
+                .map(|(n, t, _, r)| {
+                    CColDesc::new(*n)
+                        .with_type(*t)
+                        .that_repeats(*r)
+                        .create()
+                        .unwrap()
+                })
+                .collect();
+            let hdu = c.create_table(extname.to_string(), &cols).unwrap();
+            if extname == "TILES" {
+                hdu.write_col(&mut c, "Antenna", &[11i32, 12]).unwrap();
+                hdu.write_col(
+                    &mut c,
+                    "TileName",
+                    &["Tile011".to_string(), "Tile012".to_string()],
+                )
+                .unwrap();
+            }
+            if extname == "CH_OCC" {
+                hdu.write_col(&mut c, "Occupancy", &[0.25f64, 0.5, 1.0])
+                    .unwrap();
+            }
+        }
+    }
+    {
+        let mut p = PureFits::create(&p_path).open().unwrap();
+        for (extname, cols) in tables {
+            let cols: Vec<_> = cols
+                .iter()
+                .map(|(n, _, t, r)| {
+                    PColDesc::new(*n)
+                        .with_type(*t)
+                        .that_repeats(*r)
+                        .create()
+                        .unwrap()
+                })
+                .collect();
+            let hdu = p.create_table(extname.to_string(), &cols).unwrap();
+            if extname == "TILES" {
+                hdu.write_col(&mut p, "Antenna", &[11i32, 12]).unwrap();
+                hdu.write_col(
+                    &mut p,
+                    "TileName",
+                    &["Tile011".to_string(), "Tile012".to_string()],
+                )
+                .unwrap();
+            }
+            if extname == "CH_OCC" {
+                hdu.write_col(&mut p, "Occupancy", &[0.25f64, 0.5, 1.0])
+                    .unwrap();
+            }
+        }
+    }
+    let (c_bytes, p_bytes) = (
+        std::fs::read(&c_path).unwrap(),
+        std::fs::read(&p_path).unwrap(),
+    );
+    let cards = |b: &[u8]| -> Vec<String> {
+        b.chunks(80)
+            .map(|c| String::from_utf8_lossy(c).into_owned())
+            .collect()
+    };
+    assert_eq!(cards(&p_bytes), cards(&c_bytes));
+    assert!(p_bytes == c_bytes);
+
+    // A custom primary, float and unsigned.
+    use fitsio::images::{ImageDescription as CDesc, ImageType as CType};
+    use fitsio_pure::compat::images::{ImageDescription as PDesc, ImageType as PType};
+    for (c_type, p_type) in [
+        (CType::Float, PType::Float),
+        (CType::UnsignedShort, PType::UnsignedShort),
+        (CType::UnsignedLong, PType::UnsignedLong),
+        (CType::Byte, PType::Byte),
+    ] {
+        let _ = std::fs::remove_file(&c_path);
+        let _ = std::fs::remove_file(&p_path);
+        let dims = [3, 4];
+        CFits::create(&c_path)
+            .with_custom_primary(&CDesc {
+                data_type: c_type,
+                dimensions: &dims,
+            })
+            .open()
+            .unwrap();
+        PureFits::create(&p_path)
+            .with_custom_primary(&PDesc {
+                data_type: p_type,
+                dimensions: &dims,
+            })
+            .open()
+            .unwrap();
+        let (c_bytes, p_bytes) = (
+            std::fs::read(&c_path).unwrap(),
+            std::fs::read(&p_path).unwrap(),
+        );
+        assert_eq!(cards(&p_bytes), cards(&c_bytes), "{c_type:?}");
+    }
+}

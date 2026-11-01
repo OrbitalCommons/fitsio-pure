@@ -116,6 +116,13 @@ pub fn parse_primary_header(cards: &[Card]) -> Result<PrimaryHeader> {
     })
 }
 
+/// The two `COMMENT` cards cfitsio writes in every primary header it
+/// creates, citing the FITS definition.
+pub(crate) const FITS_DEFINITION_COMMENTS: [&str; 2] = [
+    "  FITS (Flexible Image Transport System) format is defined in 'Astronomy",
+    "  and Astrophysics', volume 376, page 359; bibcode: 2001A&A...376..359H",
+];
+
 /// Build the minimal set of cards for a primary HDU header.
 pub fn build_primary_header(bitpix: i64, naxes: &[usize]) -> Result<Vec<Card>> {
     if !VALID_BITPIX.contains(&bitpix) {

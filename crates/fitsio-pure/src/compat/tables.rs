@@ -327,31 +327,104 @@ impl ConcreteColumnDescription {
 }
 
 /// The binary-table header cards for `columns`, without `EXTNAME`.
+///
+/// They are laid out as cfitsio's `ffphbn` writes them for `fitsio`'s
+/// `create_table`: its comments, each column's `TTYPEn` then `TFORMn` (whose
+/// comment names the stored type), and for an offset column `TZEROn` and
+/// `TSCALn = 1`.
 pub(crate) fn table_cards(
     columns: &[ConcreteColumnDescription],
 ) -> Result<Vec<crate::header::Card>> {
+    use crate::header::Card;
+    use crate::value::Value;
+    let card = |keyword: &str, value: Value, comment: &str| -> Result<Card> {
+        let mut card = Card::new(keyword, value)?;
+        card.comment = Some(comment.to_string());
+        Ok(card)
+    };
     let stored: Vec<_> = columns.iter().map(|c| c.storage()).collect();
-    let descriptors: Vec<_> = stored.iter().map(|(d, _, _)| d.clone()).collect();
-    let mut cards = crate::bintable::build_binary_table_cards(&descriptors, 0, 0)?;
-    for (i, (_, tzero, tform)) in stored.into_iter().enumerate() {
+    let naxis1: usize = stored.iter().map(|(d, _, _)| d.byte_width).sum();
+    let mut cards = vec![
+        card(
+            "XTENSION",
+            Value::String("BINTABLE".to_string()),
+            "binary table extension",
+        )?,
+        card("BITPIX", Value::Integer(8), "8-bit bytes")?,
+        card("NAXIS", Value::Integer(2), "2-dimensional binary table")?,
+        card(
+            "NAXIS1",
+            Value::Integer(naxis1 as i64),
+            "width of table in bytes",
+        )?,
+        card("NAXIS2", Value::Integer(0), "number of rows in table")?,
+        card("PCOUNT", Value::Integer(0), "size of special data area")?,
+        card(
+            "GCOUNT",
+            Value::Integer(1),
+            "one data group (required keyword)",
+        )?,
+        card(
+            "TFIELDS",
+            Value::Integer(columns.len() as i64),
+            "number of fields in each row",
+        )?,
+    ];
+    for (i, (column, tzero, tform)) in stored.into_iter().enumerate() {
         let n = i + 1;
-        if let Some(tform) = tform {
-            let keyword = format!("TFORM{n}");
-            if let Some(card) = cards.iter_mut().find(|c| c.keyword_str() == keyword) {
-                card.value = Some(crate::value::Value::String(tform));
-            }
-        }
+        cards.push(card(
+            &format!("TTYPE{n}"),
+            Value::String(column.name.clone().unwrap_or_default()),
+            &format!("label for field {n:3}"),
+        )?);
+        let tform =
+            tform.unwrap_or_else(|| crate::bintable::tform_string(column.repeat, &column.col_type));
+        // cfitsio names the type, except for a signed-byte column.
+        let signed_byte = tzero.is_some() && column.col_type == BinaryColumnType::Byte;
+        let tform_comment = if signed_byte {
+            "data format of field".to_string()
+        } else {
+            format!("data format of field: {}", type_name(column.col_type))
+        };
+        cards.push(card(
+            &format!("TFORM{n}"),
+            Value::String(tform),
+            &tform_comment,
+        )?);
         if let Some(tzero) = tzero {
-            // As cfitsio does, right after the column's `TFORMn`.
-            let after = format!("TFORM{n}");
-            let at = cards
-                .iter()
-                .position(|c| c.keyword_str() == after)
-                .map_or(cards.len(), |i| i + 1);
-            cards.insert(at, crate::header::Card::new(&format!("TZERO{n}"), tzero)?);
+            let what = if column.col_type == BinaryColumnType::Byte {
+                "offset for signed bytes"
+            } else {
+                "offset for unsigned integers"
+            };
+            cards.push(card(&format!("TZERO{n}"), tzero, what)?);
+            cards.push(card(
+                &format!("TSCAL{n}"),
+                Value::Integer(1),
+                "data are not scaled",
+            )?);
         }
     }
     Ok(cards)
+}
+
+/// How cfitsio's `ffphbn` names a column's stored type in its `TFORMn`
+/// comment.
+fn type_name(col_type: BinaryColumnType) -> &'static str {
+    match col_type {
+        BinaryColumnType::Logical => "1-byte LOGICAL",
+        BinaryColumnType::Bit => "BIT",
+        BinaryColumnType::Byte => "BYTE",
+        BinaryColumnType::Short => "2-byte INTEGER",
+        BinaryColumnType::Int => "4-byte INTEGER",
+        BinaryColumnType::Long => "8-byte INTEGER",
+        BinaryColumnType::Float => "4-byte REAL",
+        BinaryColumnType::Double => "8-byte DOUBLE",
+        BinaryColumnType::ComplexFloat => "COMPLEX",
+        BinaryColumnType::ComplexDouble => "DOUBLE COMPLEX",
+        BinaryColumnType::Ascii => "ASCII Character",
+        BinaryColumnType::VarArrayP(_) | BinaryColumnType::VarArrayQ(_) => "variable length array",
+    }
 }
 
 /// A typed column read from a table.
@@ -2035,7 +2108,10 @@ mod tests {
             .filter(|(a, b)| a != b)
             .map(|(_, b)| String::from_utf8_lossy(b).trim_end().to_string())
             .collect();
-        assert_eq!(changed, ["NAXIS2  =                  300"]);
+        assert_eq!(
+            changed,
+            ["NAXIS2  =                  300 / number of rows in table"]
+        );
         // The data unit grew by whole blocks: 300 rows of 24 bytes.
         let core = f.parsed().unwrap().hdus[1].clone();
         assert_eq!(core.data_len, 300 * 24);

@@ -374,7 +374,7 @@ impl FitsFile {
         let extname_card = crate::header::Card {
             keyword: make_keyword("EXTNAME"),
             value: Some(crate::value::Value::String(extname.into())),
-            comment: None,
+            comment: Some("name of this binary table extension".to_string()),
         };
         cards.push(extname_card);
 
@@ -700,12 +700,12 @@ impl<'a> NewFitsFile<'a> {
 fn primary_hdu_bytes(desc: Option<&ImageDescription>) -> Result<Vec<u8>> {
     match desc {
         None => {
-            let cards = crate::primary::build_primary_header(8, &[])?;
+            let cards = cfitsio_primary_cards(8, &[])?;
             Ok(crate::header::serialize_header(&cards)?)
         }
         Some(desc) => {
             // `dimensions` are row-major, as in `fitsio`; FITS lists NAXIS1 first.
-            let cards = crate::primary::build_primary_header(
+            let cards = cfitsio_primary_cards(
                 desc.data_type.to_bitpix(),
                 &super::hdu::row_major(desc.dimensions),
             )?;
@@ -714,6 +714,58 @@ fn primary_hdu_bytes(desc: Option<&ImageDescription>) -> Result<Vec<u8>> {
             Ok(bytes)
         }
     }
+}
+
+/// The primary header cfitsio's `ffphpr` writes, as `fitsio`'s `create`
+/// writes it: `SIMPLE`, `BITPIX`, `NAXIS` and `NAXISn` with cfitsio's
+/// comments, `EXTEND = T`, and the two `COMMENT` cards citing the FITS
+/// definition.
+fn cfitsio_primary_cards(bitpix: i64, naxes: &[usize]) -> Result<Vec<crate::header::Card>> {
+    use crate::header::Card;
+    use crate::value::Value;
+    let card = |keyword: &str, value: Value, comment: &str| -> Result<Card> {
+        let mut card = Card::new(keyword, value)?;
+        card.comment = Some(comment.to_string());
+        Ok(card)
+    };
+    let mut cards = vec![
+        card(
+            "SIMPLE",
+            Value::Logical(true),
+            "file does conform to FITS standard",
+        )?,
+        card(
+            "BITPIX",
+            Value::Integer(bitpix),
+            "number of bits per data pixel",
+        )?,
+        card(
+            "NAXIS",
+            Value::Integer(naxes.len() as i64),
+            "number of data axes",
+        )?,
+    ];
+    for (i, &len) in naxes.iter().enumerate() {
+        let n = i + 1;
+        cards.push(card(
+            &format!("NAXIS{n}"),
+            Value::Integer(len as i64),
+            &format!("length of data axis {n}"),
+        )?);
+    }
+    cards.push(card(
+        "EXTEND",
+        Value::Logical(true),
+        "FITS dataset may contain extensions",
+    )?);
+    for text in crate::primary::FITS_DEFINITION_COMMENTS {
+        cards.push(Card {
+            keyword: *b"COMMENT ",
+            value: None,
+            comment: Some(text.to_string()),
+        });
+    }
+    Ok(cards)
 }
 
 /// Finish an image HDU from its structural `cards`: add the unsigned-type
@@ -727,15 +779,21 @@ fn append_image_hdu(
     // For unsigned pixel types, record the cfitsio storage convention
     // (signed BITPIX offset by BZERO) so readers recover unsigned values.
     if let Some(bzero) = desc.data_type.unsigned_bzero() {
+        let range = match desc.data_type {
+            super::images::ImageType::Byte => "signed byte",
+            super::images::ImageType::UnsignedShort => "unsigned short",
+            super::images::ImageType::UnsignedLong => "unsigned long",
+            _ => "unsigned long long",
+        };
         cards.push(crate::header::Card {
             keyword: make_keyword("BZERO"),
             value: Some(bzero),
-            comment: None,
+            comment: Some(format!("offset data range to that of {range}")),
         });
         cards.push(crate::header::Card {
             keyword: make_keyword("BSCALE"),
             value: Some(crate::value::Value::Integer(1)),
-            comment: None,
+            comment: Some("default scaling factor".to_string()),
         });
     }
 
