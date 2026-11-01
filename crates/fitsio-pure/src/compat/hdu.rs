@@ -1,6 +1,6 @@
 use super::errors::{Error, Result};
 use super::fitsfile::FitsFile;
-use super::headers::{ReadsKey, WritesKey};
+use super::headers::{ReadsKey, ReadsLongStr, WritesKey};
 use super::images::{ReadImage, WriteImage};
 use super::tables::{ConcreteColumnDescription, ReadsCol, WritesCol};
 use std::ops::Range;
@@ -49,9 +49,23 @@ pub(crate) fn row_major(naxes: &[usize]) -> Vec<usize> {
 }
 
 impl FitsHdu {
-    /// Read a header keyword value from this HDU.
+    /// Read a header keyword value from this HDU, as `fitsio` does.
+    ///
+    /// A `String` is read as cfitsio's `ffgkys` reads it: from the key's own
+    /// card, so a value continued over `CONTINUE` cards is the first card's
+    /// part, ending in `&`. Read the whole value with
+    /// [`read_key_longstr`](Self::read_key_longstr).
     pub fn read_key<T: ReadsKey>(&self, file: &FitsFile, name: &str) -> Result<T> {
         T::read_key(file, self, name)
+    }
+
+    /// Read a string key whole, with any `CONTINUE` cards after it, as
+    /// cfitsio's `ffgkls` (`fits_read_key_longstr`) does, into a `String` or
+    /// a [`HeaderValue<String>`](super::headers::HeaderValue), whose comment
+    /// is the last one among the cards. A key that isn't continued reads as
+    /// [`read_key`](Self::read_key) reads it.
+    pub fn read_key_longstr<T: ReadsLongStr>(&self, file: &FitsFile, name: &str) -> Result<T> {
+        T::read_key_longstr(file, self, name)
     }
 
     /// Write a header keyword value to this HDU.
