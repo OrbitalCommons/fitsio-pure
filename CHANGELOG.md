@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- **Compat `read_col_range` takes `rows: &Range<usize>`, as in `fitsio`.** (#173) Before, it took `start_row, num_rows`, so code written for `fitsio` failed to compile with E0061. This applies to `FitsHdu::read_col_range(file, name, &range)` and `ReadsColRange::read_col_range(file, hdu, name, &range)`. Migrate `read_col_range(f, name, start, n)` to `read_col_range(f, name, &(start..start + n))`. As before, every value of each row is read, `repeat` of them for a vector column. On mwalib's metafits `TILEDATA` (`16I` `Delays`, scalar `Antenna` and `North`), the values equal `fitsio`'s for every range tried.
+
 ### Fixed
 
 - **The published crate's tests pass.** `tests/parallel.rs` and `tests/physical_f32.rs` read HCOMPRESS/PLIO fixtures from `crates/compat-parity`, which isn't packaged, so `cargo test` on the `.crate` failed with `NotFound`. They now skip those checks when the fixtures are absent, as the corpus tests already do. The packaged crate's tests now pass with default features, with `compat`, and with all features.

@@ -825,10 +825,9 @@ macro_rules! impl_numeric_col {
                 file: &FitsFile,
                 hdu: &FitsHdu,
                 name: &str,
-                start_row: usize,
-                num_rows: usize,
+                rows: &std::ops::Range<usize>,
             ) -> Result<Vec<Self>> {
-                read_scaled(file, hdu, name, Some((start_row, num_rows)))
+                read_scaled(file, hdu, name, Some((rows.start, rows.len())))
             }
         }
 
@@ -878,14 +877,16 @@ impl ReadsCol for bool {
     }
 }
 
-/// Trait for reading a range of rows from a table column.
+/// Reads of a range of rows from a table column.
 pub trait ReadsColRange: Sized {
+    /// The values of rows `rows` of column `name`, as `fitsio`'s
+    /// `read_col_range` reads them: every value of each row, so `repeat`
+    /// values a row for a vector column. Rows past the end are an error.
     fn read_col_range(
         file: &FitsFile,
         hdu: &FitsHdu,
         name: &str,
-        start_row: usize,
-        num_rows: usize,
+        rows: &std::ops::Range<usize>,
     ) -> Result<Vec<Self>>;
 }
 
@@ -929,13 +930,13 @@ macro_rules! impl_reads_col_range {
                 file: &FitsFile,
                 hdu: &FitsHdu,
                 name: &str,
-                start_row: usize,
-                num_rows: usize,
+                rows: &std::ops::Range<usize>,
             ) -> Result<Vec<Self>> {
                 let (idx, col_idx) = resolve_read_column(file, hdu, name)?;
                 let parsed = file.parsed()?;
                 let core_hdu = &parsed.hdus[idx];
-                let col_data = read_column(file, core_hdu, col_idx, Some((start_row, num_rows)))?;
+                let col_data =
+                    read_column(file, core_hdu, col_idx, Some((rows.start, rows.len())))?;
                 #[allow(clippy::redundant_closure_call)]
                 $convert(col_data)
             }
@@ -1449,7 +1450,9 @@ mod tests {
             message(String::read_col(&f, &hdu, "MISSING").unwrap_err()),
             missing
         );
-        let err = hdu.read_col_range::<f64>(&f, "MISSING", 0, 1).unwrap_err();
+        let err = hdu
+            .read_col_range::<f64>(&f, "MISSING", &(0..1))
+            .unwrap_err();
         assert_eq!(message(err), missing);
         let err = hdu.read_cell_value::<i64>(&f, "MISSING", 0).unwrap_err();
         assert_eq!(message(err), missing);
@@ -1554,10 +1557,10 @@ mod tests {
         let mut f = FitsFile::create(&path).open().unwrap();
         let hdu = make_test_table(&mut f);
 
-        let ids: Vec<i32> = i32::read_col_range(&f, &hdu, "ID", 1, 3).unwrap();
+        let ids: Vec<i32> = i32::read_col_range(&f, &hdu, "ID", &(1..4)).unwrap();
         assert_eq!(ids, vec![20, 30, 40]);
 
-        let vals: Vec<f64> = f64::read_col_range(&f, &hdu, "VAL", 2, 2).unwrap();
+        let vals: Vec<f64> = f64::read_col_range(&f, &hdu, "VAL", &(2..4)).unwrap();
         assert!((vals[0] - 3.5).abs() < 1e-10);
         assert!((vals[1] - 4.5).abs() < 1e-10);
     }
@@ -1569,7 +1572,7 @@ mod tests {
         let mut f = FitsFile::create(&path).open().unwrap();
         let hdu = make_test_table(&mut f);
 
-        let ids: Vec<i32> = i32::read_col_range(&f, &hdu, "ID", 0, 1).unwrap();
+        let ids: Vec<i32> = i32::read_col_range(&f, &hdu, "ID", &(0..1)).unwrap();
         assert_eq!(ids, vec![10]);
     }
 
@@ -1580,7 +1583,7 @@ mod tests {
         let mut f = FitsFile::create(&path).open().unwrap();
         let hdu = make_test_table(&mut f);
 
-        assert!(i32::read_col_range(&f, &hdu, "ID", 3, 5).is_err());
+        assert!(i32::read_col_range(&f, &hdu, "ID", &(3..8)).is_err());
     }
 
     #[test]
@@ -1755,7 +1758,7 @@ mod tests {
         let mut f = FitsFile::create(&path).open().unwrap();
         let hdu = make_test_table(&mut f);
 
-        let vals: Vec<f64> = hdu.read_col_range(&f, "VAL", 0, 3).unwrap();
+        let vals: Vec<f64> = hdu.read_col_range(&f, "VAL", &(0..3)).unwrap();
         assert_eq!(vals.len(), 3);
         assert!((vals[0] - 1.5).abs() < 1e-10);
         assert!((vals[2] - 3.5).abs() < 1e-10);
@@ -1811,7 +1814,7 @@ mod tests {
         let flags: Vec<bool> = hdu.read_col(&f, "FLAG").unwrap();
         assert_eq!(flags, vec![true, false, true, true]);
 
-        let range: Vec<bool> = hdu.read_col_range(&f, "FLAG", 1, 2).unwrap();
+        let range: Vec<bool> = hdu.read_col_range(&f, "FLAG", &(1..3)).unwrap();
         assert_eq!(range, vec![false, true]);
 
         assert!(bool::read_col(&f, &hdu, "SHORT").is_err());
@@ -1831,7 +1834,7 @@ mod tests {
 
         // -1 and 300 do not fit in a u8; the middle two rows do.
         assert!(u8::read_col(&f, &hdu, "SHORT").is_err());
-        let narrow: Vec<u8> = hdu.read_col_range(&f, "SHORT", 1, 2).unwrap();
+        let narrow: Vec<u8> = hdu.read_col_range(&f, "SHORT", &(1..3)).unwrap();
         assert_eq!(narrow, vec![0, 255]);
     }
 
@@ -2040,12 +2043,12 @@ mod tests {
 
         hdu.write_col_range(&mut f, "XY", &[1.0f64, 2.0, 3.0, 4.0], &(10..14))
             .unwrap();
-        let xy: Vec<f64> = hdu.read_col_range(&f, "XY", 10, 3).unwrap();
+        let xy: Vec<f64> = hdu.read_col_range(&f, "XY", &(10..13)).unwrap();
         assert_eq!(xy, [1.0, 2.0, 3.0, 4.0, 0.0, 0.0]);
         let names = ["a".to_string(), "b".to_string()];
         hdu.write_col_range(&mut f, "NAME", &names, &(299..301))
             .unwrap();
-        let tail: Vec<String> = hdu.read_col_range(&f, "NAME", 298, 3).unwrap();
+        let tail: Vec<String> = hdu.read_col_range(&f, "NAME", &(298..301)).unwrap();
         assert_eq!(tail, ["", "a", "b"]);
         // Too few values, or part of a vector row, is an error.
         assert!(hdu.write_col_range(&mut f, "ID", &[1i32], &(0..2)).is_err());
@@ -2083,7 +2086,10 @@ mod tests {
         let f = FitsFile::open(&path).unwrap();
         let hdu = f.hdu("T").unwrap();
         assert_eq!(hdu.read_col::<i32>(&f, "ID").unwrap(), [1, 2, 3]);
-        assert_eq!(hdu.read_col_range::<i64>(&f, "ID", 1, 2).unwrap(), [2, 3]);
+        assert_eq!(
+            hdu.read_col_range::<i64>(&f, "ID", &(1..3)).unwrap(),
+            [2, 3]
+        );
         assert_eq!(hdu.read_cell_value::<String>(&f, "NAME", 2).unwrap(), "ccc");
         assert_eq!(
             hdu.read_col::<String>(&f, "NAME").unwrap(),
@@ -2092,7 +2098,7 @@ mod tests {
         let mut bits = [false; 4];
         hdu.read_col_bit(&f, "F", 1, 1, &mut bits).unwrap();
         assert_eq!(bits, [false, true, true, true]);
-        assert!(hdu.read_col_range::<i32>(&f, "ID", 2, 2).is_err());
+        assert!(hdu.read_col_range::<i32>(&f, "ID", &(2..4)).is_err());
         assert!(!f.is_loaded());
     }
 }
