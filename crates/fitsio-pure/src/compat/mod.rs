@@ -14,6 +14,7 @@
 #![allow(missing_docs)]
 
 mod compression;
+mod disk;
 pub mod errors;
 /// FITS file open/create/save operations.
 pub mod fitsfile;

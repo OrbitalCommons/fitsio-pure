@@ -43,6 +43,19 @@ Written headers change bytes. Values and comments read back the same, except whe
   - bit writes go a byte at a time.
 
   Writing 396,288 rows of a `768X` column (Birli's mwaf flags) one row at a time took 6.8 s and now takes 0.63 s. Writing single `J` cells went from 16 µs to 2.1 µs each. The bytes written are unchanged.
+- **Files opened with compat `FitsFile::open` are read with far fewer, larger requests.** (#185) This matters on network filesystems such as Lustre.
+  - **Positional reads:** `pread` on Unix, `seek_read` on Windows, instead of a seek and a read under a lock. That halves the syscalls, and threads reading one file no longer wait for each other.
+  - **Small reads come from a cache:** a read under 64 KiB, such as a table cell, a group's parameters or a header, is served from the 64 KiB block it falls in. The last 16 blocks read (1 MiB) are kept.
+  - **Image reads into a buffer** (`read_image_into_buffer`, `read_section_into_buffer`) read up to 1 MiB at a time rather than 16 KiB.
+  - **Column reads** also use the cached column layout. Reading a 256-row, 15-column table a cell at a time took 116 ms and now takes 2.3 ms.
+
+  Reads and seeks, on synthetic versions of the MWA workloads:
+
+  | workload | before | now |
+  |---|---|---|
+  | every cell of a 256 × 15 table, one at a time | 7,688 | 3 |
+  | params then data of each of 2,000 UVFITS groups (74 MB) | 16,004 | 1,128 |
+  | 24 × 1 MiB images, read into a buffer | 3,124 | 52 |
 
 ## 0.24.0
 
