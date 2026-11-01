@@ -10,8 +10,10 @@ use fitsio::FitsFile as CFits;
 use fitsio_pure::bintable::{
     serialize_binary_table_hdu, BinaryColumnData, BinaryColumnDescriptor, BinaryColumnType,
 };
-use fitsio_pure::groups::{group_params, GroupParam, GroupsWriter};
+use fitsio_pure::groups::{group_params, groups_header, GroupParam, GroupsWriter};
 use fitsio_pure::hdu::{parse_fits, HduInfo};
+use fitsio_pure::header::Card;
+use fitsio_pure::value::Value;
 
 /// Marlu's parameters: the Julian date split over two `DATE`s, only the
 /// first with a zero point.
@@ -66,6 +68,16 @@ fn cfitsio_writes(path: &Path) {
             1,
             &mut status,
         );
+        // As Marlu does: BSCALE between ffphpr's cards and the parameters'.
+        let bscale = CString::new("BSCALE").unwrap();
+        fitsio::sys::ffukyd(
+            fptr,
+            bscale.as_ptr(),
+            1.0,
+            -15,
+            std::ptr::null_mut(),
+            &mut status,
+        );
         for (i, param) in params().iter().enumerate() {
             let n = i + 1;
             let key = |k: &str| CString::new(format!("{k}{n}")).unwrap();
@@ -117,7 +129,15 @@ fn cfitsio_writes(path: &Path) {
 
 fn pure_writes(path: &Path) {
     let file = BufWriter::new(std::fs::File::create(path).unwrap());
-    let mut writer = GroupsWriter::new(file, -32, &NAXES, &params(), GCOUNT, &[]).unwrap();
+    // Marlu's order: BSCALE before the parameters' cards.
+    let mut cards = groups_header(-32, &NAXES, &params(), GCOUNT).unwrap();
+    let ptype1 = cards
+        .iter()
+        .position(|c| c.keyword_str() == "PTYPE1")
+        .unwrap();
+    let bscale = Card::new("BSCALE", Value::Float(1.0)).unwrap();
+    cards.insert(ptype1, bscale);
+    let mut writer = GroupsWriter::with_header(file, &cards).unwrap();
     for values in writes() {
         writer.write_group(&values).unwrap();
     }
@@ -176,13 +196,8 @@ fn groups_match_cfitsio() {
     // The groups data, short groups and unwritten groups included, is
     // byte-identical.
     assert_eq!(p_data, c_data);
-    // So are the header cards up to the parameters, whose numbers cfitsio
-    // formats its own way (`1.` rather than `1.0E0`).
-    let fixed = c_header
-        .iter()
-        .position(|c| c.starts_with("PTYPE1"))
-        .unwrap();
-    assert_eq!(p_header[..fixed], c_header[..fixed]);
+    // So is the header, card for card, with BSCALE where Marlu writes it.
+    assert_eq!(p_header, c_header);
 
     // The parameters read back the same from both files.
     for path in [&c_path, &p_path] {

@@ -32,6 +32,7 @@ Written headers change bytes. Values and comments read back the same, except whe
     Before, there were no comments and `TFORMn` came first.
   - The native builders (`primary::build_primary_header`, `bintable::build_binary_table_cards`) are unchanged.
   - **One remaining difference:** the `u64` offset (`2^63`, for `UnsignedLongLong` columns and images) is written `9.223372036854775808E+18`, where cfitsio writes the integer `9223372036854775808`. A header value can't hold that integer.
+- **`GroupsWriter::with_header` writes a random-groups header in the caller's order.** (#179) `GroupsWriter::new` always writes the `PTYPEn`/`PSCALn`/`PZEROn` cards before the caller's, so Marlu's UVFITS order, `BSCALE` before the parameters, couldn't be reproduced. `with_header` takes the whole header, from `SIMPLE` on, writes it as given, and takes the shape of the data from it. Built from `groups_header` with `BSCALE` inserted before `PTYPE1`, a UVFITS header is now byte-identical to Marlu's cfitsio-written one. `new` writes what it did before.
 
 ## 0.24.0
 
