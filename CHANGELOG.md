@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.24.0
+
+A minor release with two changes to compat, found while adding an opt-in fitsio-pure backend across the MWA chain. Both make compat behave as `fitsio` 0.21 does. One changes behaviour silently, so read the first section.
+
+- **cargo-semver-checks against 0.23.0** (`--all-features`): 202 checks, 200 pass, 2 fail, both the expected `read_col_range` signature change (`FitsHdu::read_col_range` and `ReadsColRange::read_col_range`). It can't see the `read_key::<String>` behaviour change.
+- **Native (non-compat) API:** no source change since 0.23.0.
+- **Checks against this release:**
+  - the mwalib port passes 317/317, with its original cfitsio long-string assertions (`ffgkys`) restored and its long-string reads moved to `read_key_longstr`;
+  - FastFitsCutter, soar-video, Transit-Detector, serialimage and refimage pass against it unchanged.
 
 ### Silent behaviour change: `read_key::<String>` no longer merges `CONTINUE` cards
 
