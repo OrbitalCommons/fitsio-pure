@@ -57,15 +57,28 @@ impl DiskFile {
         Ok(())
     }
 
+    /// Fill `buf` with the file's bytes from `offset`, for a small read
+    /// whose neighbours won't be read soon, such as one group's parameters
+    /// out of groups longer than a block. It is served from a kept block if
+    /// there is one, and otherwise read exactly, without reading or keeping
+    /// the rest of its block.
+    pub(crate) fn read_sparse_at(&self, offset: usize, buf: &mut [u8]) -> crate::Result<()> {
+        let end = offset.checked_add(buf.len());
+        let first_block = offset / Self::BLOCK;
+        let all_kept = end.is_some_and(|end| {
+            let blocks = self.lock();
+            (first_block..end.div_ceil(Self::BLOCK))
+                .all(|number| blocks.iter().any(|(n, _)| *n == number))
+        });
+        if !all_kept && end.is_some_and(|end| end <= self.len) {
+            return self.read_exact_at(offset, buf);
+        }
+        self.read_at(offset, buf)
+    }
+
     /// Block `number`, from those kept or read from the file.
     fn block(&self, number: usize) -> crate::Result<Arc<[u8]>> {
-        let kept = |blocks: &mut VecDeque<(usize, Arc<[u8]>)>| {
-            let i = blocks.iter().position(|(n, _)| *n == number)?;
-            let block = blocks.remove(i)?;
-            blocks.push_front(block.clone());
-            Some(block.1)
-        };
-        if let Some(block) = kept(&mut self.lock()) {
+        if let Some(block) = self.kept(number) {
             return Ok(block);
         }
         // Read without holding the lock, so other threads' reads of kept
@@ -80,6 +93,15 @@ impl DiskFile {
             blocks.truncate(Self::KEPT);
         }
         Ok(block)
+    }
+
+    /// Block `number` if it is kept, made the most recent.
+    fn kept(&self, number: usize) -> Option<Arc<[u8]>> {
+        let mut blocks = self.lock();
+        let i = blocks.iter().position(|(n, _)| *n == number)?;
+        let block = blocks.remove(i)?;
+        blocks.push_front(block.clone());
+        Some(block.1)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, VecDeque<(usize, Arc<[u8]>)>> {
@@ -202,6 +224,36 @@ mod tests {
                 Err(crate::Error::UnexpectedEof)
             ));
         }
+    }
+
+    #[test]
+    fn sparse_reads_read_just_their_bytes_or_use_kept_blocks() {
+        let len = 4 * DiskFile::BLOCK + 99;
+        let (tmp, bytes) = file_of(len);
+        let disk = DiskFile::new(File::open(tmp.path()).unwrap(), len);
+        let kept =
+            |disk: &DiskFile| -> Vec<usize> { disk.lock().iter().map(|(n, _)| *n).collect() };
+        let mut params = [0; 20];
+        for offset in (0..len - 20).step_by(36_884) {
+            disk.read_sparse_at(offset, &mut params).unwrap();
+            assert_eq!(params, bytes[offset..offset + 20]);
+        }
+        assert!(kept(&disk).is_empty());
+        // Once a block is kept, sparse reads in it come from it.
+        let mut cell = [0; 8];
+        disk.read_at(DiskFile::BLOCK + 10, &mut cell).unwrap();
+        disk.read_sparse_at(DiskFile::BLOCK + 500, &mut params)
+            .unwrap();
+        assert_eq!(params, bytes[DiskFile::BLOCK + 500..][..20]);
+        // Across a kept and an unkept block, and past the end.
+        let at = 2 * DiskFile::BLOCK - 10;
+        disk.read_sparse_at(at, &mut params).unwrap();
+        assert_eq!(params, bytes[at..at + 20]);
+        assert_eq!(kept(&disk), [1]);
+        assert!(matches!(
+            disk.read_sparse_at(len - 10, &mut params),
+            Err(crate::Error::UnexpectedEof)
+        ));
     }
 
     #[test]

@@ -317,7 +317,7 @@ fn read_into<T: FromPhysical>(
     let scale = Scale::new(bscale, bzero);
     match &core.info {
         crate::hdu::HduInfo::Primary { bitpix, .. } | crate::hdu::HduInfo::Image { bitpix, .. } => {
-            read_run(file, core.data_start, *bitpix, first, scale, buf)
+            read_run(file, core.data_start, *bitpix, first, scale, buf, false)
         }
         _ => {
             let (bytes, local) = file.hdu_data(core)?;
@@ -330,7 +330,8 @@ fn read_into<T: FromPhysical>(
 /// Fill `out` with `out.len()` contiguous stored values of `bitpix` from
 /// value `first` of the data unit at `data_start`, scaled by `scale`. They
 /// are read from the file up to 1 MiB at a time, as the writers write, and
-/// converted into `out`.
+/// converted into `out`. A `sparse` run is one whose neighbours won't be
+/// read soon (see [`FitsFile::read_sparse_at`]).
 fn read_run<T: FromPhysical>(
     file: &FitsFile,
     data_start: usize,
@@ -338,14 +339,18 @@ fn read_run<T: FromPhysical>(
     first: usize,
     scale: Scale,
     out: &mut [T],
+    sparse: bool,
 ) -> Result<()> {
     let bytes_per_value = crate::image::bytes_per_pixel(bitpix)?;
     let mut raw = vec![0u8; (out.len() * bytes_per_value).min(1 << 20)];
     let block = (raw.len() / bytes_per_value).max(1);
     for (i, out) in out.chunks_mut(block).enumerate() {
         let raw = &mut raw[..out.len() * bytes_per_value];
-        let value = first + i * block;
-        file.read_at(data_start + value * bytes_per_value, raw)?;
+        let at = data_start + (first + i * block) * bytes_per_value;
+        match sparse {
+            true => file.read_sparse_at(at, raw)?,
+            false => file.read_at(at, raw)?,
+        }
         scale.apply_raw(raw, bitpix, out)?;
     }
     Ok(())
@@ -463,13 +468,27 @@ fn read_groups<T: FromPhysical>(
         return Err(Error::status(sys::BAD_ROW_NUM));
     }
     let group_len = pcount + data_len;
+    // When a block of the cache holds fewer than 8 groups, their parameters
+    // are a sliver of it (MWA's 36,884-byte groups have 20 bytes of them),
+    // and a scan of parameters would read the whole file through it, so
+    // read just the parameters, as cfitsio does.
+    let sparse = part == GroupPart::Params
+        && group_len * crate::image::bytes_per_pixel(*bitpix)? * 8 > super::disk::DiskFile::BLOCK;
     let mut rest = out;
     let mut at = start;
     while !rest.is_empty() {
         let (group, within) = (at / part_len, at % part_len);
         let (run, tail) = rest.split_at_mut((part_len - within).min(rest.len()));
         let first_value = group * group_len + part_offset + within;
-        read_run(file, core.data_start, *bitpix, first_value, scale, run)?;
+        read_run(
+            file,
+            core.data_start,
+            *bitpix,
+            first_value,
+            scale,
+            run,
+            sparse,
+        )?;
         at += run.len();
         rest = tail;
     }

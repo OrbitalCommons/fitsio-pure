@@ -49,6 +49,7 @@ Written headers change bytes. Values and comments read back the same, except whe
   - **Small reads come from a cache:** a read under 64 KiB, such as a table cell, a group's parameters or a header, is served from the 64 KiB block it falls in. The last 16 blocks read (1 MiB) are kept.
   - **Image reads into a buffer** (`read_image_into_buffer`, `read_section_into_buffer`) read up to 1 MiB at a time rather than 16 KiB.
   - **Column reads** also use the cached column layout. Reading a 256-row, 15-column table a cell at a time took 116 ms and now takes 2.3 ms.
+  - **Group parameters of long groups are read on their own.** (#189) Where fewer than 8 random groups fit in a block, as with MWA's 36,884-byte groups, `read_group_params` reads just the parameters, unless their block is already kept. Otherwise a scan of every group's parameters would read the whole file through the cache. A metadata scan of 4,000 such groups, then a pass over parameters and data, read 2.0× the file and now reads 1.0× (6,316 reads, up from 4,541).
 
   Reads and seeks, on synthetic versions of the MWA workloads:
 

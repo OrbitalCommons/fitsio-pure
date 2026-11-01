@@ -468,10 +468,22 @@ impl FitsFile {
     /// Fill `buf` with the file's bytes from `offset`, reading from disk only
     /// what is asked for.
     pub(crate) fn read_at(&self, offset: usize, buf: &mut [u8]) -> Result<()> {
+        self.read_bytes(offset, buf, false)
+    }
+
+    /// [`FitsFile::read_at`] for a small read whose neighbours won't be
+    /// read soon: from disk, only those bytes are read (see
+    /// [`DiskFile::read_sparse_at`]).
+    pub(crate) fn read_sparse_at(&self, offset: usize, buf: &mut [u8]) -> Result<()> {
+        self.read_bytes(offset, buf, true)
+    }
+
+    fn read_bytes(&self, offset: usize, buf: &mut [u8], sparse: bool) -> Result<()> {
         let data = match &self.storage {
             Storage::Memory(data) => data,
             Storage::Disk { file, loaded, .. } => match loaded.get() {
                 Some(data) => data,
+                None if sparse => return Ok(file.read_sparse_at(offset, buf)?),
                 None => return Ok(file.read_at(offset, buf)?),
             },
         };
