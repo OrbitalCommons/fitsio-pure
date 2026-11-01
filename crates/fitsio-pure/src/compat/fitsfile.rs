@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use super::compression::CompressSpec;
+use super::disk::DiskFile;
 use super::errors::{Error, Result};
 use super::hdu::FitsHdu;
 use super::images::ImageDescription;
@@ -58,7 +59,7 @@ enum Storage {
     /// A file on disk opened read-only, read as needed. `loaded` holds the
     /// whole file once something has needed all of it.
     Disk {
-        file: Mutex<std::fs::File>,
+        file: DiskFile,
         len: usize,
         loaded: OnceLock<Vec<u8>>,
     },
@@ -155,7 +156,7 @@ impl FitsFile {
             Storage::Memory(crate::gzip::decompress(&data)?)
         } else {
             Storage::Disk {
-                file: Mutex::new(file),
+                file: DiskFile::new(file, len),
                 len,
                 loaded: OnceLock::new(),
             }
@@ -271,7 +272,7 @@ impl FitsFile {
         let parsed = match &self.storage {
             Storage::Memory(data) => crate::hdu::parse_fits(data)?,
             Storage::Disk { file, len, .. } => {
-                crate::hdu::parse_fits_headers(*len, |offset, buf| read_file_at(file, offset, buf))?
+                crate::hdu::parse_fits_headers(*len, |offset, buf| file.read_at(offset, buf))?
             }
         };
         // A concurrent caller may have won the race; either parse is equivalent,
@@ -452,7 +453,7 @@ impl FitsFile {
                     return Ok(data);
                 }
                 let mut data = vec![0u8; *len];
-                read_file_at(file, 0, &mut data)?;
+                file.read_at(0, &mut data)?;
                 // A concurrent caller may have loaded it first; keep either.
                 Ok(loaded.get_or_init(|| data))
             }
@@ -474,7 +475,7 @@ impl FitsFile {
             Storage::Memory(data) => data,
             Storage::Disk { file, loaded, .. } => match loaded.get() {
                 Some(data) => data,
-                None => return Ok(read_file_at(file, offset, buf)?),
+                None => return Ok(file.read_at(offset, buf)?),
             },
         };
         let bytes = offset
@@ -874,17 +875,6 @@ fn append_image_hdu(
 const READONLY_STATUS: u32 = 602;
 
 /// Fill `buf` with the bytes of `file` from `offset`.
-fn read_file_at(file: &Mutex<std::fs::File>, offset: usize, buf: &mut [u8]) -> crate::Result<()> {
-    // A panic while holding the lock can't leave the handle inconsistent:
-    // every read seeks first.
-    let mut file = file.lock().unwrap_or_else(|e| e.into_inner());
-    file.seek(SeekFrom::Start(offset as u64))?;
-    file.read_exact(buf).map_err(|e| match e.kind() {
-        std::io::ErrorKind::UnexpectedEof => crate::Error::UnexpectedEof,
-        _ => crate::Error::Io(e),
-    })
-}
-
 fn gunzip_if_compressed(data: Vec<u8>) -> Result<Vec<u8>> {
     if crate::gzip::is_gzip(&data) {
         Ok(crate::gzip::decompress(&data)?)

@@ -496,7 +496,7 @@ pub(crate) fn write_column_cells(
     Ok(())
 }
 
-fn read_column_cells(
+pub(crate) fn read_column_cells(
     fits_data: &[u8],
     data_start: usize,
     naxis1: usize,

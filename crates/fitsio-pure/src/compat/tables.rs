@@ -840,22 +840,21 @@ fn read_scaled<T: ColumnScalar>(
     rows: Option<(usize, usize)>,
 ) -> Result<Vec<T>> {
     let (idx, col_idx) = resolve_read_column(file, hdu, name)?;
-    let parsed = file.parsed()?;
-    let core_hdu = &parsed.hdus[idx];
-    let data = read_column(file, core_hdu, col_idx, rows)?;
-    let (tscal, tzero) = crate::bintable::extract_column_scaling(&core_hdu.cards, col_idx + 1);
+    let data = read_column(file, idx, col_idx, rows)?;
+    let (tscal, tzero) = file.table_layout(idx)?.scaling[col_idx];
     scale_column(data, tscal, tzero, name)
 }
 
-/// Column `col_idx` of binary table `core_hdu`, for `rows` (first row and
+/// Column `col_idx` of binary table HDU `idx`, for `rows` (first row and
 /// count) or for every row, reading only those rows' bytes from the file,
 /// as cfitsio does, rather than the whole file.
 fn read_column(
     file: &FitsFile,
-    core_hdu: &crate::hdu::Hdu,
+    idx: usize,
     col_idx: usize,
     rows: Option<(usize, usize)>,
 ) -> Result<BinaryColumnData> {
+    let core_hdu = &file.parsed()?.hdus[idx];
     let crate::hdu::HduInfo::BinaryTable { naxis1, naxis2, .. } = core_hdu.info else {
         return Err(Error::status(sys::NOT_BTABLE));
     };
@@ -865,16 +864,14 @@ fn read_column(
     }
     let mut bytes = vec![0u8; count * naxis1];
     file.read_at(core_hdu.data_start + first * naxis1, &mut bytes)?;
-    // The rows read, as a table of their own.
-    let mut rows_hdu = core_hdu.clone();
-    rows_hdu.header_start = 0;
-    rows_hdu.data_start = 0;
-    rows_hdu.data_len = bytes.len();
-    if let crate::hdu::HduInfo::BinaryTable { naxis2, .. } = &mut rows_hdu.info {
-        *naxis2 = count;
-    }
-    Ok(crate::bintable::read_binary_column(
-        &bytes, &rows_hdu, col_idx,
+    let layout = file.table_layout(idx)?;
+    Ok(crate::bintable::read_column_cells(
+        &bytes,
+        0,
+        naxis1,
+        count,
+        &layout.columns[col_idx],
+        layout.offsets[col_idx],
     )?)
 }
 
@@ -928,12 +925,8 @@ impl_numeric_col!(u8, i8, i16, u16, i32, u32, i64, u64, f32, f64);
 
 impl ReadsCol for String {
     fn read_col(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<Vec<Self>> {
-        let idx = validate_hdu_index(file, hdu)?;
-        let parsed = file.parsed()?;
-        let core_hdu = &parsed.hdus[idx];
-        let tfields = get_tfields(core_hdu)?;
-        let col_idx = read_column_index(&core_hdu.cards, name, tfields)?;
-        let col_data = read_column(file, core_hdu, col_idx, None)?;
+        let (idx, col_idx) = resolve_read_column(file, hdu, name)?;
+        let col_data = read_column(file, idx, col_idx, None)?;
         match col_data {
             crate::bintable::BinaryColumnData::Ascii(v) => Ok(v),
             _ => Err(Error::Message("column is not string type".to_string())),
@@ -943,12 +936,8 @@ impl ReadsCol for String {
 
 impl ReadsCol for bool {
     fn read_col(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<Vec<Self>> {
-        let idx = validate_hdu_index(file, hdu)?;
-        let parsed = file.parsed()?;
-        let core_hdu = &parsed.hdus[idx];
-        let tfields = get_tfields(core_hdu)?;
-        let col_idx = read_column_index(&core_hdu.cards, name, tfields)?;
-        let col_data = read_column(file, core_hdu, col_idx, None)?;
+        let (idx, col_idx) = resolve_read_column(file, hdu, name)?;
+        let col_data = read_column(file, idx, col_idx, None)?;
         match col_data {
             crate::bintable::BinaryColumnData::Logical(v) => Ok(v),
             _ => Err(Error::Message("column is not boolean type".to_string())),
@@ -1024,20 +1013,24 @@ fn resolve_layout(
 }
 
 /// [`resolve_column`] for a column read, with a missing column reported as
-/// `fitsio`'s reads report it (see [`read_column_index`]).
+/// `fitsio`'s reads report it (see [`not_found_as_read`]). A binary
+/// table's names come from its cached layout.
 fn resolve_read_column(file: &FitsFile, hdu: &FitsHdu, name: &str) -> Result<(usize, usize)> {
-    resolve_column(file, hdu, name).map_err(|e| not_found_as_read(e, name))
+    let idx = validate_hdu_index(file, hdu)?;
+    let found = match file.parsed()?.hdus[idx].info {
+        crate::hdu::HduInfo::BinaryTable { .. } => {
+            match_column(&file.table_layout(idx)?.names, name).map(|col_idx| (idx, col_idx))
+        }
+        _ => resolve_column(file, hdu, name),
+    };
+    found.map_err(|e| not_found_as_read(e, name))
 }
 
-/// [`find_column_index`] for a column read. `fitsio` reads a column by its
-/// own exact-name lookup, and a name no column has is
+/// A column lookup's error, for a column read. `fitsio` reads a column by
+/// its own exact-name lookup, and a name no column has is
 /// `Error::Message("Cannot find column \"name\"")`, which callers such as
 /// mwa_hyperdrive match on to treat a column as optional. Writes go through
 /// cfitsio's `ffgcno` in `fitsio`, so for them it stays `COL_NOT_FOUND`.
-fn read_column_index(cards: &[crate::header::Card], name: &str, tfields: usize) -> Result<usize> {
-    find_column_index(cards, name, tfields).map_err(|e| not_found_as_read(e, name))
-}
-
 fn not_found_as_read(err: Error, name: &str) -> Error {
     match err {
         Error::Fits(e) if e.status == sys::COL_NOT_FOUND as i32 => {
@@ -1057,10 +1050,7 @@ macro_rules! impl_reads_col_range {
                 rows: &std::ops::Range<usize>,
             ) -> Result<Vec<Self>> {
                 let (idx, col_idx) = resolve_read_column(file, hdu, name)?;
-                let parsed = file.parsed()?;
-                let core_hdu = &parsed.hdus[idx];
-                let col_data =
-                    read_column(file, core_hdu, col_idx, Some((rows.start, rows.len())))?;
+                let col_data = read_column(file, idx, col_idx, Some((rows.start, rows.len())))?;
                 #[allow(clippy::redundant_closure_call)]
                 $convert(col_data)
             }

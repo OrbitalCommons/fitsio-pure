@@ -235,8 +235,8 @@ impl<T: ReadPixels> ReadImage for Vec<T> {
 ///
 /// Values are physical, with `BSCALE`/`BZERO` applied, exactly as
 /// [`ReadPixels::read_image`] returns them. An uncompressed image is read from
-/// the file a block at a time straight into the buffer, without allocating;
-/// a tile-compressed one is decompressed from its own data unit.
+/// the file up to 1 MiB at a time and converted into the buffer; a
+/// tile-compressed one is decompressed from its own data unit.
 pub trait ReadImageIntoBuffer: Sized {
     /// Fill `buf` with the image's first `buf.len()` pixels, in the flat,
     /// `NAXIS1`-fastest order. As with `ffgpv`, the buffer may be shorter than
@@ -329,7 +329,8 @@ fn read_into<T: FromPhysical>(
 
 /// Fill `out` with `out.len()` contiguous stored values of `bitpix` from
 /// value `first` of the data unit at `data_start`, scaled by `scale`. They
-/// are read from the file a block at a time straight into `out`.
+/// are read from the file up to 1 MiB at a time, as the writers write, and
+/// converted into `out`.
 fn read_run<T: FromPhysical>(
     file: &FitsFile,
     data_start: usize,
@@ -339,8 +340,8 @@ fn read_run<T: FromPhysical>(
     out: &mut [T],
 ) -> Result<()> {
     let bytes_per_value = crate::image::bytes_per_pixel(bitpix)?;
-    let mut raw = [0u8; 16 * 1024];
-    let block = raw.len() / bytes_per_value;
+    let mut raw = vec![0u8; (out.len() * bytes_per_value).min(1 << 20)];
+    let block = (raw.len() / bytes_per_value).max(1);
     for (i, out) in out.chunks_mut(block).enumerate() {
         let raw = &mut raw[..out.len() * bytes_per_value];
         let value = first + i * block;
