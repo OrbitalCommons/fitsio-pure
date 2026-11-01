@@ -1,14 +1,16 @@
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use super::compression::CompressSpec;
 use super::errors::{Error, Result};
 use super::hdu::FitsHdu;
 use super::images::ImageDescription;
 use super::sys;
+use super::tables::TableLayout;
 use crate::io::{write_atomic_with, Durability};
 
 /// Whether a file is opened for reading or writing.
@@ -35,6 +37,9 @@ pub struct FitsFile {
     /// No backing file, so `flush` and `Drop` never touch disk.
     in_memory: bool,
     cached_parse: OnceLock<crate::hdu::FitsData>,
+    /// Tables' column layouts by HDU index, parsed from `cached_parse`
+    /// as they are needed, and dropped with it.
+    table_layouts: Mutex<HashMap<usize, Arc<TableLayout>>>,
     /// A `[compress …]` spec given to `create`: images are tile-compressed
     /// when the file is saved.
     compression: Option<CompressSpec>,
@@ -161,6 +166,7 @@ impl FitsFile {
             mode: FileOpenMode::ReadOnly,
             in_memory: false,
             cached_parse: OnceLock::new(),
+            table_layouts: Mutex::default(),
             compression: None,
             durability: Durability::Atomic,
             dirty: AtomicBool::new(false),
@@ -196,6 +202,7 @@ impl FitsFile {
             mode: FileOpenMode::ReadWrite,
             in_memory: false,
             cached_parse: OnceLock::new(),
+            table_layouts: Mutex::default(),
             compression: None,
             durability: Durability::Atomic,
             dirty: AtomicBool::new(false),
@@ -215,6 +222,7 @@ impl FitsFile {
             mode: FileOpenMode::ReadOnly,
             in_memory: true,
             cached_parse: OnceLock::new(),
+            table_layouts: Mutex::default(),
             compression: None,
             durability: Durability::Atomic,
             dirty: AtomicBool::new(false),
@@ -248,6 +256,7 @@ impl FitsFile {
             mode: FileOpenMode::ReadWrite,
             in_memory: true,
             cached_parse: OnceLock::new(),
+            table_layouts: Mutex::default(),
             compression: None,
             durability: Durability::Atomic,
             dirty: AtomicBool::new(false),
@@ -277,6 +286,25 @@ impl FitsFile {
     /// Invalidate the cached parse (called after data mutations).
     fn invalidate_cache(&mut self) {
         self.cached_parse.take();
+        self.table_layouts
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+    }
+
+    /// Table HDU `idx`'s column layout, parsed the first time it's needed
+    /// after its header was read or changed.
+    pub(crate) fn table_layout(&self, idx: usize) -> Result<Arc<TableLayout>> {
+        let mut layouts = self
+            .table_layouts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(layout) = layouts.get(&idx) {
+            return Ok(layout.clone());
+        }
+        let layout = Arc::new(TableLayout::parse(&self.parsed()?.hdus[idx])?);
+        layouts.insert(idx, layout.clone());
+        Ok(layout)
     }
 
     /// Return a builder for creating a new FITS file.
@@ -498,16 +526,40 @@ impl FitsFile {
 
     /// The whole file in memory, to change it, reading it in first if needed.
     fn bytes_mut(&mut self) -> Result<&mut Vec<u8>> {
+        self.invalidate_cache();
+        self.loaded_mut()
+    }
+
+    /// The whole file in memory, as [`FitsFile::bytes_mut`], but keeping
+    /// the parse: the caller keeps it up to date.
+    fn loaded_mut(&mut self) -> Result<&mut Vec<u8>> {
         if let Storage::Disk { .. } = self.storage {
             let data = self.data()?.to_vec();
             self.storage = Storage::Memory(data);
         }
-        self.invalidate_cache();
         self.dirty.store(true, Ordering::Relaxed);
         match &mut self.storage {
             Storage::Memory(data) => Ok(data),
             Storage::Disk { .. } => unreachable!("loaded into memory above"),
         }
+    }
+
+    /// The whole file in memory and its parse, for a change that updates
+    /// the parse to match itself, such as appending table rows, rather than
+    /// having the whole file parsed again.
+    pub(crate) fn bytes_and_parse_mut(
+        &mut self,
+    ) -> Result<(&mut Vec<u8>, &mut crate::hdu::FitsData)> {
+        self.parsed()?;
+        self.loaded_mut()?;
+        let Storage::Memory(data) = &mut self.storage else {
+            unreachable!("loaded into memory above")
+        };
+        let parsed = self
+            .cached_parse
+            .get_mut()
+            .expect("parsed above, and loading keeps the parse");
+        Ok((data, parsed))
     }
 
     /// Replace the bytes in `range` with `bytes`, moving what follows only if
@@ -533,10 +585,11 @@ impl FitsFile {
         Ok(())
     }
 
-    /// Mutable access to the FITS bytes, for writes that change bytes in
-    /// place without moving anything.
+    /// Mutable access to the FITS bytes, for writes within data units that
+    /// change bytes in place without moving anything. Headers stay as they
+    /// are, so the parse of them is kept.
     pub(crate) fn data_mut(&mut self) -> Result<&mut [u8]> {
-        Ok(self.bytes_mut()?)
+        Ok(self.loaded_mut()?)
     }
 
     /// Save the file to disk if it was opened for writing from a path and
@@ -684,6 +737,7 @@ impl<'a> NewFitsFile<'a> {
             mode: FileOpenMode::ReadWrite,
             in_memory: false,
             cached_parse: OnceLock::new(),
+            table_layouts: Mutex::default(),
             compression,
             durability: match self.durable {
                 true => Durability::Durable,

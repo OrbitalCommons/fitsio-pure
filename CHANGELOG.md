@@ -34,6 +34,16 @@ Written headers change bytes. Values and comments read back the same, except whe
   - **One remaining difference:** the `u64` offset (`2^63`, for `UnsignedLongLong` columns and images) is written `9.223372036854775808E+18`, where cfitsio writes the integer `9223372036854775808`. A header value can't hold that integer.
 - **`GroupsWriter::with_header` writes a random-groups header in the caller's order.** (#179) `GroupsWriter::new` always writes the `PTYPEn`/`PSCALn`/`PZEROn` cards before the caller's, so Marlu's UVFITS order, `BSCALE` before the parameters, couldn't be reproduced. `with_header` takes the whole header, from `SIMPLE` on, writes it as given, and takes the shape of the data from it. Built from `groups_header` with `BSCALE` inserted before `PTYPE1`, a UVFITS header is now byte-identical to Marlu's cfitsio-written one. `new` writes what it did before.
 
+### Performance
+
+- **Appending table rows one at a time is about 10× faster.** (#184) Writing a row past the end of a table with compat `write_col_bit`, `write_col` or `write_col_range` used to reparse the whole file and the table's columns for every row. Now:
+  - growing the table updates the file's parse in place instead of discarding it;
+  - writes to data no longer discard the parse at all;
+  - each table's column layout is parsed once, until its header changes;
+  - bit writes go a byte at a time.
+
+  Writing 396,288 rows of a `768X` column (Birli's mwaf flags) one row at a time took 6.8 s and now takes 0.63 s. Writing single `J` cells went from 16 µs to 2.1 µs each. The bytes written are unchanged.
+
 ## 0.24.0
 
 A minor release with two changes to compat, found while adding an opt-in fitsio-pure backend across the MWA chain. Both make compat behave as `fitsio` 0.21 does. One changes behaviour silently, so read the first section.
