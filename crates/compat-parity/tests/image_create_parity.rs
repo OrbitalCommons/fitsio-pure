@@ -88,3 +88,77 @@ fn upstream_image_creation_examples_match_cfitsio() {
     assert_eq!((c[0].1, c[0].2.clone()), (-64, vec![103, 52]));
     assert_eq!((p[0].1, p[0].2.clone()), (c[0].1, c[0].2.clone()));
 }
+
+/// hyperdrive's solutions file, shaped as `solutions/hyperdrive.rs` writes
+/// it (4-D and 2-D `f64` images with data), then an image of every type,
+/// written through `$lib`'s `create_image`.
+macro_rules! solutions_file {
+    ($($lib:ident)::+, $path:expr) => {{
+        use $($lib)::+::images::{ImageDescription, ImageType};
+        use $($lib)::+::FitsFile;
+
+        let mut f = FitsFile::create($path).open().unwrap();
+        let dims = [2usize, 3, 4, 8];
+        let solutions = f
+            .create_image(
+                "SOLUTIONS",
+                &ImageDescription {
+                    data_type: ImageType::Double,
+                    dimensions: &dims,
+                },
+            )
+            .unwrap();
+        let values: Vec<f64> = (0..dims.iter().product::<usize>())
+            .map(|i| i as f64 * 0.25)
+            .collect();
+        solutions.write_image(&mut f, &values).unwrap();
+        let results = f
+            .create_image(
+                "RESULTS",
+                &ImageDescription {
+                    data_type: ImageType::Double,
+                    dimensions: &[2, 4],
+                },
+            )
+            .unwrap();
+        results.write_image(&mut f, &[1.5f64; 8]).unwrap();
+        for (name, data_type) in [
+            ("U8", ImageType::UnsignedByte),
+            ("I8", ImageType::Byte),
+            ("I16", ImageType::Short),
+            ("U16", ImageType::UnsignedShort),
+            ("I32", ImageType::Long),
+            ("U32", ImageType::UnsignedLong),
+            ("I64", ImageType::LongLong),
+            ("F32", ImageType::Float),
+        ] {
+            let desc = ImageDescription {
+                data_type,
+                dimensions: &[3, 5],
+            };
+            f.create_image(name, &desc).unwrap();
+        }
+    }};
+}
+
+/// fitsio-pure#188: images `create_image` adds are byte-identical to
+/// `fitsio`'s, header comments included.
+#[test]
+fn created_images_match_fitsio_byte_for_byte() {
+    let dir = tempfile::tempdir().unwrap();
+    let c_path = dir.path().join("c.fits");
+    let p_path = dir.path().join("p.fits");
+    solutions_file!(fitsio, &c_path);
+    solutions_file!(fitsio_pure::compat, &p_path);
+    let (c_bytes, p_bytes) = (
+        std::fs::read(&c_path).unwrap(),
+        std::fs::read(&p_path).unwrap(),
+    );
+    let cards = |b: &[u8]| -> Vec<String> {
+        b.chunks(80)
+            .map(|c| String::from_utf8_lossy(c).into_owned())
+            .collect()
+    };
+    assert_eq!(cards(&p_bytes), cards(&c_bytes));
+    assert!(p_bytes == c_bytes);
+}
