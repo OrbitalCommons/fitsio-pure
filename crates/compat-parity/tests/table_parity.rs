@@ -42,7 +42,7 @@ macro_rules! table_parity_case {
                 let read: Vec<$t> = <$t as ReadsCol>::read_col(&f, &hdu, "VAL").unwrap();
                 assert_eq!(read, written, "pure read_col of cfitsio-written column");
                 let range: Vec<$t> =
-                    <$t as ReadsColRange>::read_col_range(&f, &hdu, "VAL", 1, written.len() - 1)
+                    <$t as ReadsColRange>::read_col_range(&f, &hdu, "VAL", &(1..written.len()))
                         .unwrap();
                 assert_eq!(range, written[1..], "pure read_col_range of cfitsio-written column");
             }
@@ -885,4 +885,28 @@ fn row_by_row_appends_match_cfitsio() {
     let p_bytes = std::fs::read(&p_path).unwrap();
     assert_eq!(p_bytes.len(), c_bytes.len());
     assert!(p_bytes == c_bytes, "files differ");
+}
+
+/// `read_col_range(name, &range)` reads every value of each row in `range`,
+/// as `fitsio`'s does, for a vector (`16I` Delays) and scalar columns of a
+/// real MWA metafits.
+#[test]
+fn read_col_range_matches_fitsio_on_a_metafits() {
+    let path = corpus_file("mwa/1101503312.metafits");
+    let mut c = CFits::open(&path).unwrap();
+    let c_hdu = c.hdu("TILEDATA").unwrap();
+    let p = PureFits::open(&path).unwrap();
+    let p_hdu = p.hdu("TILEDATA").unwrap();
+    for range in [0..1, 0..3, 17..18, 100..140, 255..256, 0..256] {
+        let c_delays: Vec<i32> = c_hdu.read_col_range(&mut c, "Delays", &range).unwrap();
+        let p_delays: Vec<i32> = p_hdu.read_col_range(&p, "Delays", &range).unwrap();
+        assert_eq!(p_delays.len(), 16 * range.len());
+        assert_eq!(p_delays, c_delays, "Delays {range:?}");
+        let c_antenna: Vec<i32> = c_hdu.read_col_range(&mut c, "Antenna", &range).unwrap();
+        let p_antenna: Vec<i32> = p_hdu.read_col_range(&p, "Antenna", &range).unwrap();
+        assert_eq!(p_antenna, c_antenna, "Antenna {range:?}");
+        let c_north: Vec<f64> = c_hdu.read_col_range(&mut c, "North", &range).unwrap();
+        let p_north: Vec<f64> = p_hdu.read_col_range(&p, "North", &range).unwrap();
+        assert_eq!(p_north, c_north, "North {range:?}");
+    }
 }

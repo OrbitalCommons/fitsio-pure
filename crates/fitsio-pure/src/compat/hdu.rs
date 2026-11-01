@@ -69,15 +69,15 @@ impl FitsHdu {
         T::read_col(file, self, name)
     }
 
-    /// Read a range of rows from a binary table column.
+    /// Read rows `range` of a binary table column, as `fitsio` does: every
+    /// value of each row, `repeat` of them for a vector column.
     pub fn read_col_range<T: ReadsCol>(
         &self,
         file: &FitsFile,
         name: &str,
-        start_row: usize,
-        num_rows: usize,
+        range: &Range<usize>,
     ) -> Result<Vec<T>> {
-        T::read_col_range(file, self, name, start_row, num_rows)
+        T::read_col_range(file, self, name, range)
     }
 
     /// Write the first `rows.len()` values of `col_data` to column `name`
@@ -285,7 +285,7 @@ impl FitsHdu {
         name: &str,
         idx: usize,
     ) -> Result<T> {
-        T::read_col_range(file, self, name, idx, 1)?
+        T::read_col_range(file, self, name, &(idx..idx + 1))?
             .pop()
             .ok_or_else(|| Error::Message(format!("row {idx} of column '{name}' not found")))
     }

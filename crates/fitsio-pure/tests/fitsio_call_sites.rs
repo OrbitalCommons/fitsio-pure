@@ -101,4 +101,19 @@ fn upstream_call_sites_compile_and_run() {
     assert_eq!(name, "b");
     let row: Vec<f32> = sci.read_row(&fptr, 1).unwrap();
     assert_eq!(row, [4.0, 5.0, 6.0]);
+    // mwalib 3 `fits_read::read_cell_array`.
+    let ra: Vec<f64> = read_cell_array(&mut fptr, &sources, "RA", 1, 1).unwrap();
+    assert_eq!(ra, [20.0]);
+}
+
+/// mwalib 3 `fits_read::read_cell_array`: `n` rows from `row` through
+/// `read_col_range`'s `&Range`.
+fn read_cell_array<T: fitsio::tables::ReadsCol>(
+    fits_fptr: &mut FitsFile,
+    hdu: &FitsHdu,
+    col_name: &str,
+    row: usize,
+    n: usize,
+) -> Result<Vec<T>, Error> {
+    hdu.read_col_range(fits_fptr, col_name, &(row..row + n))
 }
