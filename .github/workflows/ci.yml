@@ -62,8 +62,11 @@ jobs:
   # Differential roundtrip tests cross-checking our compat shims against the
   # canonical cfitsio-backed `fitsio` crate. This is the only job that links the
   # C library; compat-parity is excluded from the main (C-free) workspace.
+  # Pinned to 24.04's cfitsio 4.3.1: 26.04 ships cfitsio built for x86-64-v3,
+  # whose FMA-contracted float quantizing differs from cfitsio's C source by
+  # an ULP.
   parity:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
         with:

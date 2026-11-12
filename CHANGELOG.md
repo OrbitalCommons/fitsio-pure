@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Lossy HCOMPRESS no longer wraps out-of-range 8- and 16-bit values.** (#193) Near saturated stars, a lossy HCOMPRESS image (`fpack -h -s N`) decodes slightly past its type's range: 65542 for a 65535 `u16` pixel, say. The decoder now clips such values to the range, as cfitsio does. Before, it wrapped them, so saturated cores came back near-black (65542 became 6) without any error. RICE is unaffected. Found, measured and patched by @eg013ra1n.
+
 ## 0.25.0
 
 A minor release from the MWA chain's switch to fitsio-pure. Compat now writes the files `fitsio` writes byte for byte, and reads and appends far faster with far fewer syscalls. Nothing in the API is removed or changed. `GroupsWriter::with_header` and `value::cfitsio_rounded` are new. Written bytes change, so read the output changes.
