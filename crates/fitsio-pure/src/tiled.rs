@@ -1,8 +1,7 @@
 //! Tile-compressed image decompression for FITS.
 //!
-//! Supports RICE_1/RICE_ONE, GZIP_1, GZIP_2, and NOCOMPRESS per the FITS
-//! tiled image compression convention. HCOMPRESS_1 and PLIO_1 are rejected
-//! with [`Error::UnsupportedCompression`].
+//! Supports RICE_1/RICE_ONE, GZIP_1, GZIP_2, HCOMPRESS_1, PLIO_1, and
+//! NOCOMPRESS per the FITS tiled image compression convention.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -805,7 +804,22 @@ pub fn read_tiled_image(fits_data: &[u8], hdu: &Hdu) -> Result<ImageData> {
                     Ok(values)
                 })
             }
-            "PLIO_1" => args.decode(plio_decompress),
+            "PLIO_1" => {
+                // cfitsio offsets unsigned 16-bit pixels by 32768 before PLIO
+                // compression, because PLIO cannot encode negative values.
+                let offset =
+                    if zbitpix == 16 && card_float_value(&hdu.cards, "BZERO") == Some(32768.0) {
+                        32768
+                    } else {
+                        0
+                    };
+
+                args.decode(|tile, pixels| {
+                    let mut values = plio_decompress(tile, pixels)?;
+                    values.iter_mut().for_each(|value| *value -= offset);
+                    Ok(values)
+                })
+            }
             _ => {
                 let params = RiceParams::for_bytepix(rice_bytepix)?;
                 args.decode(|tile, pixels| rice_decompress(tile, pixels, blocksize, &params))
@@ -1558,6 +1572,19 @@ mod tests {
         vals.iter().flat_map(|v| v.to_be_bytes()).collect()
     }
 
+    fn plio_literal_tile(values: &[u16]) -> Vec<u8> {
+        let mut words = vec![0i16, 0, 0];
+        for value in values {
+            words.extend_from_slice(&[
+                0x1000 | (value & 0x0fff) as i16,
+                (value >> 12) as i16,
+                0x6000,
+            ]);
+        }
+        words[2] = words.len() as i16;
+        words.iter().flat_map(|word| word.to_be_bytes()).collect()
+    }
+
     #[test]
     fn test_gzip2_unshuffles_i16() {
         let vals = [0x0102i16, -3, 0x7f00];
@@ -1598,6 +1625,39 @@ mod tests {
         );
         match read_tiled_image(&data, &hdu).unwrap() {
             ImageData::I16(v) => assert_eq!(v, vals),
+            other => panic!("expected I16, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_plio_unsigned_16_undoes_cfitsio_offset() {
+        let (data, hdu) = tiled_hdu(
+            "PLIO_1",
+            16,
+            3,
+            &[("COMPRESSED_DATA", "1PB")],
+            &[vec![plio_literal_tile(&[0, 32768, u16::MAX])]],
+            None,
+            vec![integer_card("BZERO", 32768)],
+        );
+
+        match read_tiled_image(&data, &hdu).unwrap() {
+            ImageData::I16(values) => assert_eq!(values, [i16::MIN, 0, i16::MAX]),
+            other => panic!("expected I16, got {other:?}"),
+        }
+
+        let (data, hdu) = tiled_hdu(
+            "PLIO_1",
+            16,
+            3,
+            &[("COMPRESSED_DATA", "1PB")],
+            &[vec![plio_literal_tile(&[0, 1000, 2000])]],
+            None,
+            vec![],
+        );
+
+        match read_tiled_image(&data, &hdu).unwrap() {
+            ImageData::I16(values) => assert_eq!(values, [0, 1000, 2000]),
             other => panic!("expected I16, got {other:?}"),
         }
     }
