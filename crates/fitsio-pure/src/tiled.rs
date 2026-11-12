@@ -787,8 +787,21 @@ pub fn read_tiled_image(fits_data: &[u8], hdu: &Hdu) -> Result<ImageData> {
                 // and everything else in 64-bit.
                 let wide = !matches!(zbitpix, 8 | 16);
                 let smooth = compression_parameter(&hdu.cards, "SMOOTH").unwrap_or(0) != 0;
+                // Lossy HCOMPRESS can decode just outside an 8- or 16-bit
+                // range, near saturation. cfitsio clips those values to the
+                // range rather than failing, so they must not wrap. RICE
+                // relies on the wrap, so this stays here.
+                let range = match zbitpix {
+                    8 => Some((0, u8::MAX as i32)),
+                    16 => Some((i16::MIN as i32, i16::MAX as i32)),
+                    _ => None,
+                };
                 args.decode(|tile, pixels| {
-                    crate::hdecompress::decompress(tile, pixels, smooth, wide)
+                    let mut values = crate::hdecompress::decompress(tile, pixels, smooth, wide)?;
+                    if let Some((lo, hi)) = range {
+                        values.iter_mut().for_each(|v| *v = (*v).clamp(lo, hi));
+                    }
+                    Ok(values)
                 })
             }
             "PLIO_1" => {

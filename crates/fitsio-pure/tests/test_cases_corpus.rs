@@ -764,6 +764,44 @@ fn compressed_rice_float_quantized() {
     }
 }
 
+/// Images the reference `fpack` (CFITSIO 4.6.4) compressed decode as cfitsio
+/// decodes them (`tile-compression/fpack_*.expected`).
+/// - Lossy HCOMPRESS of saturated 8- and 16-bit images clips the values that
+///   decode just past the type's range, rather than wrapping them (#193).
+/// - The RICE and PLIO i16 controls are unchanged.
+#[test]
+fn fpack_written_images_decode_as_cfitsio_decodes_them() {
+    let mut failures = Vec::new();
+    for name in [
+        "fpack_hc_u16_s4",
+        "fpack_hc_i16_s16",
+        "fpack_hc_u8_s16",
+        "fpack_plio_i16",
+        "fpack_rice_u16",
+    ] {
+        let Some((bytes, fits)) = load(&format!("tile-compression/{name}.fits")) else {
+            return;
+        };
+        let expected: Vec<f64> =
+            std::fs::read(corpus_file(&format!("tile-compression/{name}.expected")).unwrap())
+                .unwrap()
+                .chunks_exact(8)
+                .map(|b| f64::from_le_bytes(b.try_into().unwrap()))
+                .collect();
+        let decoded = read_image_physical(&bytes, fits.get(1).unwrap()).unwrap();
+        assert_eq!(decoded.len(), expected.len(), "{name}");
+        let differing = decoded
+            .iter()
+            .zip(&expected)
+            .filter(|(d, e)| d != e)
+            .count();
+        if differing > 0 {
+            failures.push(format!("{name}: {differing} pixels differ"));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
 // ---------------------------------------------------------------------------
 // HEALPix tile (hipsgen)
 // ---------------------------------------------------------------------------
