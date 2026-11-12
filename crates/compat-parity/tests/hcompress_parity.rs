@@ -128,8 +128,37 @@ fn cfitsio_plio_images_decode_as_cfitsio_does() {
         .map(|i| ((i % w) / 6 + (i / w) / 4) as i32 % 5 * 77)
         .collect();
     let i16s: Vec<i16> = (0..w * h).map(|i| ((i * 31) % 1000) as i16).collect();
+    let u16s: Vec<u16> = (0..w * h)
+        .map(|i| ((i * 257 + 12345) % (u16::MAX as usize + 1)) as u16)
+        .collect();
     for spec in ["P", "P 16,8"] {
         cfitsio_round_trip(spec, ImageType::Long, &i32s, w, h);
         cfitsio_round_trip(spec, ImageType::Short, &i16s, w, h);
     }
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("unsigned.fits");
+    {
+        let mut f = CFits::create(format!("{}[compress P]", path.display()))
+            .open()
+            .unwrap();
+        let desc = ImageDescription {
+            data_type: ImageType::UnsignedShort,
+            dimensions: &[h, w],
+        };
+        let hdu = f.create_image("SCI", &desc).unwrap();
+        hdu.write_image(&mut f, &u16s).unwrap();
+    }
+
+    let expected: Vec<f64> = u16s.iter().copied().map(f64::from).collect();
+    assert_same(
+        "[compress P] unsigned u16 vs original",
+        &pure_decode(&path),
+        &expected,
+    );
+    assert_same(
+        "[compress P] unsigned u16 cfitsio vs original",
+        &cfitsio_decode(&path),
+        &expected,
+    );
 }
