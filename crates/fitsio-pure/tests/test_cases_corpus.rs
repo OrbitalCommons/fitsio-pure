@@ -768,6 +768,8 @@ fn compressed_rice_float_quantized() {
 /// decodes them (`tile-compression/fpack_*.expected`).
 /// - Lossy HCOMPRESS of saturated 8- and 16-bit images clips the values that
 ///   decode just past the type's range, rather than wrapping them (#193).
+/// - PLIO of unsigned 16-bit images takes off the +32768 cfitsio stores them
+///   with (#194).
 /// - The RICE and PLIO i16 controls are unchanged.
 #[test]
 fn fpack_written_images_decode_as_cfitsio_decodes_them() {
@@ -776,6 +778,7 @@ fn fpack_written_images_decode_as_cfitsio_decodes_them() {
         "fpack_hc_u16_s4",
         "fpack_hc_i16_s16",
         "fpack_hc_u8_s16",
+        "fpack_plio_u16",
         "fpack_plio_i16",
         "fpack_rice_u16",
     ] {
