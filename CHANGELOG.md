@@ -5,6 +5,7 @@
 ### Fixed
 
 - **Lossy HCOMPRESS no longer wraps out-of-range 8- and 16-bit values.** (#193) Near saturated stars, a lossy HCOMPRESS image (`fpack -h -s N`) decodes slightly past its type's range: 65542 for a 65535 `u16` pixel, say. The decoder now clips such values to the range, as cfitsio does. Before, it wrapped them, so saturated cores came back near-black (65542 became 6) without any error. RICE is unaffected. Found, measured and patched by @eg013ra1n.
+- **PLIO_1 unsigned 16-bit images decode correctly.** (#194) PLIO can't code negative values, so cfitsio stores unsigned 16-bit images (`ZBITPIX = 16`, `BZERO = 32768`) offset by +32768 and takes the offset off when decoding. fitsio-pure now does the same. Before, every pixel came back 32768 too high (mod 65536), without any error. Signed 16-bit and 8-bit PLIO were and are correct. fitsio-pure doesn't write PLIO. Reported, analysed and first patched by @eg013ra1n; fixed by @dannyward630 (#196).
 
 ## 0.25.0
 
