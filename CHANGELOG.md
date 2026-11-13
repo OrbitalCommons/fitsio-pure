@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.25.1
+
+A patch release fixing two silent tile-decompression bugs, found by @eg013ra1n while reviewing rustafits' compressed-image support. Both read cfitsio-written files wrongly without returning an error.
+
+- **cargo-semver-checks against 0.25.0** (`--all-features`): 202 checks, 202 pass. No API change.
+- **Fixtures:** six files written by the reference `fpack` from CFITSIO 4.6.4 are now in fits-test-cases (lossy HCOMPRESS `u16`/`i16`/`u8`, `u16` PLIO, and RICE and `i16` PLIO controls). fitsio-pure decodes every pixel as cfitsio does.
+- **Checks against this release:** FastFitsCutter, soar-video, Transit-Detector, serialimage, refimage and AstroBurst pass against it unchanged. rustafits passes but for its existing timing test.
 
 ### Fixed
 
