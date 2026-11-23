@@ -6,6 +6,7 @@
 
 - **`read_binary_column_vla` reads a table whose heap follows a gap from its data unit alone.** (#199) When `THEAP` puts the heap after a gap, `PCOUNT` already counts the gap, but the bounds check added it again. A table's data unit on its own, as compat's disk reads pass it, then failed with `UnexpectedEof`, though the whole file read fine. The check now ends the data unit at `NAXIS1 × NAXIS2 + PCOUNT`. Found while porting cool-japan/scirs's FITS module.
 - **Tile-compressed images whose heap follows a gap decode correctly.** (#204) The decoder took the heap to start right after the table's rows and ignored `THEAP`. With a gap, it read every tile from the wrong bytes: a decompression error, or wrong pixels without one. It now starts the heap at `THEAP`. cfitsio and `fpack` never write such a gap, but the FITS standard allows one.
+- **A heap that runs into its data unit's padding reads through compat from disk and through `FitsReader`.** FITS 4.0 counts a gap before the heap in `PCOUNT`, but astropy and fitsverify read `PCOUNT` as the heap's size from `THEAP`. A file written their way has its heap end past the data unit the standard computes, in the block padding. Reading a whole file in memory always handled this. A tile-compressed image read through compat from disk, or through the streaming `FitsReader`, now also reads the data unit's padding, as far as the file has it, instead of failing with end of file.
 
 ## 0.25.1
 

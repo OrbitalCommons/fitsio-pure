@@ -499,6 +499,12 @@ impl FitsFile {
     /// them. That is the whole file when it is already in memory; otherwise
     /// just the data unit is read from disk, so memory scales with the HDU
     /// rather than the file.
+    ///
+    /// From disk, the data unit's block padding is read too, as far as the
+    /// file has it. Some writers read `PCOUNT` as the size of the heap from
+    /// `THEAP`, not, as the standard has it, of the gap and the heap, so a
+    /// heap after a gap can run past the data unit the standard computes and
+    /// into its padding. It reads as it does from the whole file.
     pub(crate) fn hdu_data<'a>(
         &'a self,
         hdu: &'a crate::hdu::Hdu,
@@ -510,7 +516,9 @@ impl FitsFile {
         if let Some(data) = in_memory {
             return Ok((Cow::Borrowed(data), Cow::Borrowed(hdu)));
         }
-        let mut data = vec![0u8; hdu.data_len];
+        let padded = crate::block::padded_byte_len(hdu.data_len);
+        let len = padded.min(self.byte_len().saturating_sub(hdu.data_start));
+        let mut data = vec![0u8; len.max(hdu.data_len)];
         self.read_at(hdu.data_start, &mut data)?;
         let mut local = hdu.clone();
         local.header_start = 0;

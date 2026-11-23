@@ -329,6 +329,17 @@ impl<R: Read> FitsReader<R> {
             raw.extend_from_slice(chunk);
             Ok(())
         })?;
+        // The padding too, as far as the input has it. Some writers read
+        // `PCOUNT` as the heap's size from `THEAP`, not, as the standard has
+        // it, as the gap's and the heap's, so a heap after a gap can run into
+        // the padding.
+        let start = raw.len();
+        let pad = self.pad_left as usize;
+        raw.try_reserve_exact(pad).map_err(alloc_error)?;
+        raw.resize(start + pad, 0);
+        let read = self.read_full(&mut raw[start..])?;
+        raw.truncate(start + read);
+        self.pad_left -= read as u64;
         hdu.data_start = 0;
         crate::tiled::read_tiled_image(&raw, &hdu)
     }
