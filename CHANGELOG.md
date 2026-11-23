@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.26.0
+
+A minor release from porting [cool-japan/scirs](https://github.com/cool-japan/scirs)'s FITS module onto fitsio-pure. It adds two native helpers that adopters were writing themselves, and fixes heap reads for tables and tile-compressed images whose heap follows a gap. Thanks to the scirs port for the reports and fixtures, now in fits-test-cases.
+
+- **cargo-semver-checks against 0.25.1** (`--all-features`): 202 checks, 202 pass, no update required. The API changes are additions: `tiled::uncompressed_header`, `header::hierarch` and `header::find_hierarch`.
+- **Checks against this release:**
+  - FastFitsCutter, soar-video, Transit-Detector, serialimage, refimage and AstroBurst pass against it unchanged.
+  - rustafits, which uses `default-features = false` and the old API, builds; its tests pass but for its existing timing test.
 
 ### Added
 
