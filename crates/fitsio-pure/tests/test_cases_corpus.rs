@@ -773,7 +773,8 @@ fn compressed_rice_float_quantized() {
 ///   with (#194).
 /// - The RICE and PLIO i16 controls are unchanged.
 /// - The RICE image with a gap before its heap reads its tiles from where
-///   `THEAP` puts the heap (#204).
+///   `THEAP` puts the heap (#204), whether `PCOUNT` counts the gap, as the
+///   standard has it, or not, as astropy reads it.
 #[test]
 fn fpack_written_images_decode_as_cfitsio_decodes_them() {
     let mut failures = Vec::new();
@@ -785,6 +786,7 @@ fn fpack_written_images_decode_as_cfitsio_decodes_them() {
         "fpack_plio_i16",
         "fpack_rice_u16",
         "fpack_rice_u16_theap_gap",
+        "fpack_rice_u16_theap_gap_heap_pcount",
     ] {
         let Some((bytes, fits)) = load(&format!("tile-compression/{name}.fits")) else {
             return;
@@ -1469,4 +1471,34 @@ fn fermi_gbm_tte_gzip_through_compat_open() {
     assert_eq!(time.len(), 3_536_325);
     assert_eq!(time[0], 611989422.9725);
     assert_eq!(&pha[..5], &[3, 1, 52, 1, 5]);
+}
+
+/// Compressed images whose heap follows a gap, read through compat from
+/// disk, which reads just the HDU's data unit. In
+/// `fpack_rice_u16_theap_gap_heap_pcount`, `PCOUNT` is the heap's size, as
+/// astropy and fitsverify read it, rather than the gap plus the heap, as the
+/// standard has it, so the heap ends past the data unit the standard
+/// computes, in its block padding. Both decode as cfitsio decodes them.
+#[cfg(feature = "compat")]
+#[test]
+fn theap_gap_images_read_through_compat_from_disk() {
+    use fitsio_pure::compat::fitsfile::FitsFile;
+
+    for name in [
+        "fpack_rice_u16_theap_gap",
+        "fpack_rice_u16_theap_gap_heap_pcount",
+    ] {
+        let Some(path) = corpus_file(&format!("tile-compression/{name}.fits")) else {
+            return;
+        };
+        let expected: Vec<f64> =
+            std::fs::read(corpus_file(&format!("tile-compression/{name}.expected")).unwrap())
+                .unwrap()
+                .chunks_exact(8)
+                .map(|b| f64::from_le_bytes(b.try_into().unwrap()))
+                .collect();
+        let f = FitsFile::open(&path).unwrap();
+        let image: Vec<f64> = f.hdu(1).unwrap().read_image(&f).unwrap();
+        assert!(image == expected, "{name}");
+    }
 }
