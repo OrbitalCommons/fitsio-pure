@@ -10,6 +10,11 @@
   - every other card is kept in order.
 
   An image compressed from a primary HDU gets a primary header and one from an extension an `IMAGE` extension header. One with neither `ZSIMPLE` nor `ZTENSION` becomes a primary image, as `funpack` writes it. Every tile-compressed image in fits-test-cases gets the same header as from cfitsio, card for card. rustafits and the cool-japan/scirs port each did this translation themselves.
+- **`header::hierarch` and `header::find_hierarch`: native reads of `HIERARCH` keywords.** (#200) `parse_card` reads ESO's `HIERARCH ESO TEL TEMP = 1.5 / degC` as a commentary card: keyword `HIERARCH`, no value, the rest in the comment. Only compat's `read_key` read such cards as cfitsio does.
+  - `hierarch(&card)` gives a `HIERARCH` card's name, value and comment.
+  - `find_hierarch(&cards, name)` looks a name up as cfitsio does (ignoring case, with or without `HIERARCH `) and joins a long string continued on `CONTINUE` cards.
+
+  Compat's `read_key` now uses the same code. `parse_card` is unchanged.
 
 ### Fixed
 

@@ -58,58 +58,7 @@ fn find_card(
     }
     // Like cfitsio, find HIERARCH keywords by name ignoring case, with or
     // without the `HIERARCH ` prefix.
-    let name = crate::header::strip_hierarch(name);
-    for (i, card) in core_hdu.cards.iter().enumerate() {
-        if let Some((key, _)) = crate::header::hierarch_entry(card) {
-            if key.eq_ignore_ascii_case(name) {
-                if let Some((value, comment, _)) = hierarch_value(&core_hdu.cards, i) {
-                    return Ok((value, comment));
-                }
-            }
-        }
-    }
-    Err(Error::status(sys::KEY_NO_EXIST))
-}
-
-/// The value and comment of the `HIERARCH` card `cards[i]`, and how many
-/// `CONTINUE` cards after it hold the rest of its value. A string ending in
-/// `&` continues on the `CONTINUE` cards that follow, as cfitsio's `ffgkls`
-/// reads it; the comment is the last one among them.
-fn hierarch_value(
-    cards: &[crate::header::Card],
-    i: usize,
-) -> Option<(crate::value::Value, Option<String>, usize)> {
-    use crate::value::{parse_value, Value};
-    let (_, value) = crate::header::hierarch_entry(&cards[i])?;
-    let mut comment = hierarch_comment(&cards[i]);
-    let Value::String(mut text) = value else {
-        return Some((value, comment, 0));
-    };
-    let mut continued = 0;
-    while text.ends_with('&') {
-        let next = cards
-            .get(i + 1 + continued)
-            .filter(|c| c.keyword_str() == "CONTINUE")
-            .and_then(|c| parse_value(c.comment.as_deref()?.as_bytes()));
-        let Some((Value::String(part), part_comment)) = next else {
-            break;
-        };
-        text.pop();
-        text.push_str(&part);
-        if let Some(part_comment) = part_comment {
-            comment = Some(String::from(part_comment));
-        }
-        continued += 1;
-    }
-    Some((Value::String(text), comment, continued))
-}
-
-/// The comment after the value of a `HIERARCH` card, if it has one.
-fn hierarch_comment(card: &crate::header::Card) -> Option<String> {
-    let text = card.comment.as_deref()?;
-    let eq = text.find('=')?;
-    let (_, comment) = crate::value::parse_value(text[eq + 1..].trim_start().as_bytes())?;
-    comment.map(String::from)
+    crate::header::find_hierarch(&core_hdu.cards, name).ok_or(Error::status(sys::KEY_NO_EXIST))
 }
 
 /// Conversion of a card value to a Rust type, as `read_key` does it.
@@ -352,7 +301,9 @@ fn write_key_to_file(
         let key = existing.as_ref().map_or(wanted, |(_, key)| key.as_str());
         let old_comment = existing
             .as_ref()
-            .and_then(|&(i, _)| hierarch_value(&cards, i).map(|(_, comment, _)| comment))
+            .and_then(|&(i, _)| {
+                crate::header::hierarch_value(&cards, i).map(|(_, comment, _)| comment)
+            })
             .flatten();
         let comment = comment.map(String::from).or(old_comment);
         // cfitsio rejects a name too long to fit as BAD_KEYCHAR too.
@@ -361,7 +312,7 @@ fn write_key_to_file(
         match existing {
             Some((i, _)) => {
                 // The old value's CONTINUE cards go with it.
-                let continued = hierarch_value(&cards, i).map_or(0, |(_, _, n)| n);
+                let continued = crate::header::hierarch_value(&cards, i).map_or(0, |(_, _, n)| n);
                 cards.splice(i..=i + continued, new);
             }
             None => {
