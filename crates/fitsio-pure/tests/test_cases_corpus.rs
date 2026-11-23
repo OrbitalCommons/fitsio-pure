@@ -1502,3 +1502,73 @@ fn theap_gap_images_read_through_compat_from_disk() {
         assert!(image == expected, "{name}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// scirs port fixtures (scirs/)
+// ---------------------------------------------------------------------------
+
+/// A table whose heap pushes its data unit into a second block, then an
+/// image found after it, at the offsets astropy reports.
+#[test]
+fn scirs_layout_offsets_and_image_after_a_heap() {
+    let Some((bytes, fits)) = load("scirs/layout.fits") else {
+        return;
+    };
+    let starts: Vec<(usize, usize)> = fits
+        .iter()
+        .map(|hdu| (hdu.header_start, hdu.data_start))
+        .collect();
+    assert_eq!(starts, [(0, 2880), (2880, 5760), (11520, 14400)]);
+    let samples = read_binary_column_vla(&bytes, fits.get(1).unwrap(), 0).unwrap();
+    assert_eq!(
+        samples,
+        BinaryColumnData::VarInt(vec![(0..750).collect::<Vec<i32>>()])
+    );
+    let image = read_image_physical(&bytes, fits.get(2).unwrap()).unwrap();
+    let want: Vec<f64> = (0..12).map(|i| (i * 7 - 20) as f64).collect();
+    assert_eq!(image, want);
+}
+
+/// Exactly 36 header cards, so `END` opens a second block, with
+/// `BSCALE = 0.5`, `BZERO = 100` and a quoted value holding `''` and `/`.
+#[test]
+fn scirs_card36_header_and_scaling() {
+    let Some((bytes, fits)) = load("scirs/card36.fits") else {
+        return;
+    };
+    let hdu = fits.get(0).unwrap();
+    let before_end = hdu.cards.iter().take_while(|c| c.keyword_str() != "END");
+    assert_eq!(before_end.count(), 36);
+    assert_eq!(hdu.data_start, 5760);
+    assert_eq!(
+        find_keyword_str(&hdu.cards, "OBSERVER"),
+        Some("O'Brien / night 2")
+    );
+    let image = read_image_physical(&bytes, hdu).unwrap();
+    let want: Vec<f64> = (0..15).map(|i| 100.0 + 0.5 * (i * 3 - 7) as f64).collect();
+    assert_eq!(image, want);
+}
+
+/// `u16_none.fits.gz` decompresses to `refimage/u16_none.fits` and decodes
+/// as its `.expected`.
+#[test]
+fn scirs_gzipped_file_decompresses_to_the_refimage_original() {
+    let Some(path) = corpus_file("scirs/u16_none.fits.gz") else {
+        return;
+    };
+    let gz = std::fs::read(path).unwrap();
+    assert!(fitsio_pure::gzip::is_gzip(&gz));
+    let bytes = fitsio_pure::gzip::decompress(&gz).unwrap();
+    let (original, _) = load("refimage/u16_none.fits").unwrap();
+    assert_eq!(bytes, original);
+    let fits = parse_fits(&bytes).unwrap();
+    let expected: Vec<f64> = std::fs::read(corpus_file("refimage/u16_none.expected").unwrap())
+        .unwrap()
+        .chunks_exact(8)
+        .map(|b| f64::from_le_bytes(b.try_into().unwrap()))
+        .collect();
+    assert_eq!(
+        read_image_physical(&bytes, fits.get(0).unwrap()).unwrap(),
+        expected
+    );
+}
