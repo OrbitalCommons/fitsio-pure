@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **`read_binary_column_vla` reads a table whose heap follows a gap from its data unit alone.** (#199) When `THEAP` puts the heap after a gap, `PCOUNT` already counts the gap, but the bounds check added it again. A table's data unit on its own, as compat's disk reads pass it, then failed with `UnexpectedEof`, though the whole file read fine. The check now ends the data unit at `NAXIS1 × NAXIS2 + PCOUNT`. Found while porting cool-japan/scirs's FITS module.
+
 ## 0.25.1
 
 A patch release fixing two silent tile-decompression bugs, found by @eg013ra1n while reviewing rustafits' compressed-image support. Both read cfitsio-written files wrongly without returning an error.

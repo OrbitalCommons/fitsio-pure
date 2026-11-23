@@ -740,7 +740,8 @@ fn read_q_descriptor(data: &[u8]) -> (usize, usize) {
 ///
 /// The column must have a `VarArrayP` or `VarArrayQ` type.  Each row stores a
 /// P/Q descriptor in the main table that points to `count` elements in the heap
-/// area (which begins at `NAXIS1*NAXIS2 + THEAP` bytes after data_start).
+/// area, which begins `THEAP` bytes after data_start (by default
+/// `NAXIS1*NAXIS2`, right after the rows).
 pub fn read_binary_column_vla(
     fits_data: &[u8],
     hdu: &Hdu,
@@ -786,8 +787,11 @@ pub fn read_binary_column_vla(
         .unwrap_or(naxis1 * naxis2);
     let heap_start = data_start + theap;
 
-    // Verify heap is within bounds.
-    if heap_start + pcount > fits_data.len() {
+    // Verify the heap is within bounds. `PCOUNT` counts every byte after the
+    // rows, any gap before the heap included, so the data unit ends at
+    // `NAXIS1*NAXIS2 + PCOUNT`, wherever the heap starts in it.
+    let data_end = data_start + naxis1 * naxis2 + pcount;
+    if heap_start > data_end || data_end > fits_data.len() {
         return Err(Error::UnexpectedEof);
     }
 
@@ -2679,6 +2683,58 @@ mod tests {
         fits.extend_from_slice(&header);
         fits.extend_from_slice(&data);
         fits
+    }
+
+    /// A table whose heap starts after a gap (`THEAP` past the rows, and
+    /// `PCOUNT` counting the gap and the heap) reads the same from its data
+    /// unit alone as from the whole file (#199).
+    #[test]
+    fn read_vla_after_a_theap_gap_from_the_data_unit_alone() {
+        let (naxis1, naxis2, gap) = (8usize, 2usize, 16usize);
+        let heap = [7u8, 8, 9];
+        let theap = naxis1 * naxis2 + gap;
+        let pcount = gap + heap.len();
+        let header = serialize_header(&[
+            card_val("XTENSION", Value::String(String::from("BINTABLE"))),
+            card_val("BITPIX", Value::Integer(8)),
+            card_val("NAXIS", Value::Integer(2)),
+            card_val("NAXIS1", Value::Integer(naxis1 as i64)),
+            card_val("NAXIS2", Value::Integer(naxis2 as i64)),
+            card_val("PCOUNT", Value::Integer(pcount as i64)),
+            card_val("GCOUNT", Value::Integer(1)),
+            card_val("TFIELDS", Value::Integer(1)),
+            card_val("TFORM1", Value::String(String::from("1PB"))),
+            card_val("THEAP", Value::Integer(theap as i64)),
+        ])
+        .unwrap();
+        let mut data = vec![0u8; padded_byte_len(naxis1 * naxis2 + pcount)];
+        for (row, (count, offset)) in [(2, 0), (1, 2)].into_iter().enumerate() {
+            write_i32_be(&mut data[row * naxis1..], count);
+            write_i32_be(&mut data[row * naxis1 + 4..], offset);
+        }
+        data[theap..theap + heap.len()].copy_from_slice(&heap);
+        let primary = serialize_header(&[
+            card_val("SIMPLE", Value::Logical(true)),
+            card_val("BITPIX", Value::Integer(8)),
+            card_val("NAXIS", Value::Integer(0)),
+        ])
+        .unwrap();
+        let fits = [primary, header, data].concat();
+
+        let parsed = crate::hdu::parse_fits(&fits).unwrap();
+        let hdu = parsed.get(1).unwrap();
+        let want = BinaryColumnData::VarByte(vec![vec![7, 8], vec![9]]);
+        assert_eq!(read_binary_column_vla(&fits, hdu, 0).unwrap(), want);
+
+        let unit = &fits[hdu.data_start..hdu.data_start + hdu.data_len];
+        let mut local = hdu.clone();
+        local.data_start = 0;
+        assert_eq!(read_binary_column_vla(unit, &local, 0).unwrap(), want);
+        // A data unit cut short of PCOUNT is still an error.
+        assert!(matches!(
+            read_binary_column_vla(&unit[..unit.len() - 1], &local, 0),
+            Err(Error::UnexpectedEof)
+        ));
     }
 
     #[test]
