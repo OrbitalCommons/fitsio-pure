@@ -983,6 +983,160 @@ impl IntTiles<'_> {
     }
 }
 
+/// The header of the image that tile-compressed HDU `hdu` holds, as cfitsio
+/// presents it when it decompresses one (`fits_img_decompress_header`), without
+/// `END`.
+///
+/// The compressed HDU's header is the binary table's. Its cards are kept in
+/// their order, except that:
+/// - `ZSIMPLE`, `ZTENSION`, `ZBITPIX`, `ZNAXIS`, `ZNAXISn`, `ZEXTEND`,
+///   `ZBLOCKED`, `ZPCOUNT` and `ZGCOUNT` become the image's own `SIMPLE`,
+///   `XTENSION`, `BITPIX` and so on, and `ZHECKSUM`/`ZDATASUM` its
+///   `CHECKSUM`/`DATASUM`;
+/// - the table's structure (`XTENSION`, `BITPIX`, `NAXISn`, `PCOUNT`,
+///   `GCOUNT`, `TFIELDS`, `TTYPEn`, `TFORMn`, `THEAP`), its checksums, and the
+///   compression keywords (`ZIMAGE`, `ZCMPTYPE`, `ZTILEn`, `ZNAMEn`, `ZVALn`,
+///   `ZQUANTIZ`, `ZDITHER0`, `ZBLANK`) are dropped;
+/// - `EXTNAME = 'COMPRESSED_IMAGE'`, the name compressors give the table, is
+///   dropped; any other `EXTNAME` is kept.
+///
+/// So an image compressed from a primary HDU (`ZSIMPLE`) gets a primary
+/// header, and one from an extension (`ZTENSION`) an `IMAGE` extension
+/// header: the header `funpack` writes for it. Without either, the image
+/// becomes a primary HDU, as `funpack` writes it too: the header starts with
+/// the cards cfitsio writes for a new primary image, from `ZBITPIX` and
+/// `ZNAXISn`, and the `Z` cards that would give them are dropped.
+pub fn uncompressed_header(hdu: &Hdu) -> Result<Vec<Card>> {
+    let HduInfo::CompressedImage {
+        zbitpix, znaxes, ..
+    } = &hdu.info
+    else {
+        return Err(Error::InvalidHeader("not a compressed image HDU"));
+    };
+    let cards = || hdu.cards.iter().take_while(|c| c.keyword_str() != "END");
+    let has = |keyword: &str| cards().any(|c| c.keyword_str() == keyword);
+    let written = !has("ZSIMPLE") && !has("ZTENSION");
+    let mut out = match written {
+        true => primary_image_cards(*zbitpix, znaxes)?,
+        false => Vec::new(),
+    };
+    for card in cards() {
+        let keyword = card.keyword_str();
+        match uncompressed_keyword(keyword) {
+            Some(Some(_)) | Some(None) if written => {}
+            Some(Some(renamed)) => {
+                let mut card = card.clone();
+                card.keyword = [b' '; 8];
+                card.keyword[..renamed.len()].copy_from_slice(renamed.as_bytes());
+                out.push(card);
+            }
+            Some(None) => {}
+            None => {
+                let compressed_name = matches!(
+                    &card.value,
+                    Some(Value::String(s)) if s.trim_end() == "COMPRESSED_IMAGE"
+                );
+                if !(keyword == "EXTNAME" && compressed_name) {
+                    out.push(card.clone());
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// What cfitsio's `imcomp_copy_comp2img` makes of a compressed HDU's
+/// `keyword`: `Some(Some(name))` to rename it, `Some(None)` to drop it, `None`
+/// to keep it. The renamed `Z` keywords are the image's required ones, which
+/// are dropped instead when they're written afresh.
+fn uncompressed_keyword(keyword: &str) -> Option<Option<String>> {
+    let indexed = |prefix: &str| {
+        keyword
+            .strip_prefix(prefix)
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    };
+    let renamed = match keyword {
+        "ZSIMPLE" | "ZBITPIX" | "ZNAXIS" | "ZEXTEND" | "ZBLOCKED" | "ZPCOUNT" | "ZGCOUNT" => {
+            Some(String::from(&keyword[1..]))
+        }
+        "ZTENSION" => Some(String::from("XTENSION")),
+        "ZHECKSUM" => Some(String::from("CHECKSUM")),
+        "ZDATASUM" => Some(String::from("DATASUM")),
+        _ if indexed("ZNAXIS") => Some(String::from(&keyword[1..])),
+        _ => None,
+    };
+    if renamed.is_some() {
+        return Some(renamed);
+    }
+    let dropped = matches!(
+        keyword,
+        "XTENSION"
+            | "BITPIX"
+            | "NAXIS"
+            | "PCOUNT"
+            | "GCOUNT"
+            | "TFIELDS"
+            | "THEAP"
+            | "ZIMAGE"
+            | "ZQUANTIZ"
+            | "ZDITHER0"
+            | "ZCMPTYPE"
+            | "ZBLANK"
+            | "CHECKSUM"
+            | "DATASUM"
+    ) || ["NAXIS", "TTYPE", "TFORM", "ZTILE", "ZNAME", "ZVAL"]
+        .iter()
+        .any(|prefix| indexed(prefix));
+    dropped.then_some(None)
+}
+
+/// The cards cfitsio writes for a new primary image (`ffcrim` into an empty
+/// file).
+fn primary_image_cards(bitpix: i64, naxes: &[usize]) -> Result<Vec<Card>> {
+    let card = |keyword: &str, value: Value, comment: &str| -> Result<Card> {
+        let mut card = Card::new(keyword, value)?;
+        card.comment = Some(String::from(comment));
+        Ok(card)
+    };
+    let mut cards = alloc::vec![
+        card(
+            "SIMPLE",
+            Value::Logical(true),
+            "file does conform to FITS standard"
+        )?,
+        card(
+            "BITPIX",
+            Value::Integer(bitpix),
+            "number of bits per data pixel"
+        )?,
+        card(
+            "NAXIS",
+            Value::Integer(naxes.len() as i64),
+            "number of data axes"
+        )?,
+    ];
+    for (i, &len) in naxes.iter().enumerate() {
+        cards.push(card(
+            &alloc::format!("NAXIS{}", i + 1),
+            Value::Integer(len as i64),
+            &alloc::format!("length of data axis {}", i + 1),
+        )?);
+    }
+    cards.push(card(
+        "EXTEND",
+        Value::Logical(true),
+        "FITS dataset may contain extensions",
+    )?);
+    for text in crate::primary::FITS_DEFINITION_COMMENTS {
+        cards.push(Card {
+            keyword: *b"COMMENT ",
+            value: None,
+            comment: Some(String::from(text)),
+        });
+    }
+    Ok(cards)
+}
+
 /// The value of the compression parameter named `name`: the `ZVALn` of the
 /// `ZNAMEn` that names it. A logical is 1 or 0: astropy writes `SMOOTH` as
 /// `T`, cfitsio as `1`.
@@ -1738,6 +1892,103 @@ mod tests {
             }
             other => panic!("expected F32, got {other:?}"),
         }
+    }
+
+    /// An image compressed from an extension gets its own extension header:
+    /// the `Z` cards renamed, the table's and the compression's dropped, and
+    /// everything else kept in order (#201).
+    #[test]
+    fn test_uncompressed_header_of_a_compressed_extension() {
+        let (_, mut hdu) = tiled_hdu(
+            "RICE_1",
+            16,
+            2,
+            &[("COMPRESSED_DATA", "1PB")],
+            &[vec![vec![]]],
+            None,
+            vec![],
+        );
+        let structure = [
+            string_card("XTENSION", "BINTABLE"),
+            integer_card("BITPIX", 8),
+            integer_card("NAXIS", 2),
+            integer_card("NAXIS1", 8),
+            integer_card("NAXIS2", 1),
+            integer_card("PCOUNT", 0),
+            integer_card("GCOUNT", 1),
+            integer_card("TFIELDS", 1),
+            string_card("ZCMPTYPE", "RICE_1"),
+            integer_card("ZTILE1", 2),
+        ];
+        hdu.cards.splice(0..0, structure);
+        hdu.cards.extend([
+            string_card("ZTENSION", "IMAGE"),
+            integer_card("ZBITPIX", 16),
+            integer_card("ZNAXIS", 2),
+            integer_card("ZNAXIS1", 2),
+            integer_card("ZNAXIS2", 1),
+            integer_card("ZPCOUNT", 0),
+            integer_card("ZGCOUNT", 1),
+            string_card("EXTNAME", "SCI"),
+            string_card("OBJECT", "M13"),
+            string_card("ZHECKSUM", "abc"),
+            string_card("CHECKSUM", "def"),
+            Card {
+                keyword: *b"END     ",
+                value: None,
+                comment: None,
+            },
+        ]);
+        let header = uncompressed_header(&hdu).unwrap();
+        let keywords: Vec<&str> = header.iter().map(Card::keyword_str).collect();
+        assert_eq!(
+            keywords,
+            [
+                "XTENSION", "BITPIX", "NAXIS", "NAXIS1", "NAXIS2", "PCOUNT", "GCOUNT", "EXTNAME",
+                "OBJECT", "CHECKSUM"
+            ]
+        );
+        assert_eq!(header[0].value, Some(Value::String("IMAGE".into())));
+        assert_eq!(header[1].value, Some(Value::Integer(16)));
+        assert_eq!(header[9].value, Some(Value::String("abc".into())));
+    }
+
+    /// Without `ZSIMPLE` or `ZTENSION`, the image gets a new primary header,
+    /// and `EXTNAME = 'COMPRESSED_IMAGE'` goes; a plain image isn't
+    /// compressed.
+    #[test]
+    fn test_uncompressed_header_without_zsimple_or_ztension() {
+        let (_, mut hdu) = tiled_hdu(
+            "GZIP_1",
+            -32,
+            3,
+            &[("COMPRESSED_DATA", "1PB")],
+            &[vec![vec![]], vec![vec![]]],
+            None,
+            vec![
+                string_card("EXTNAME", "COMPRESSED_IMAGE"),
+                integer_card("ZBITPIX", -32),
+                string_card("OBSERVER", "Hubble"),
+            ],
+        );
+        let header = uncompressed_header(&hdu).unwrap();
+        let keywords: Vec<&str> = header.iter().map(Card::keyword_str).collect();
+        assert_eq!(
+            keywords,
+            [
+                "SIMPLE", "BITPIX", "NAXIS", "NAXIS1", "NAXIS2", "EXTEND", "COMMENT", "COMMENT",
+                "OBSERVER"
+            ]
+        );
+        assert_eq!(header[1].value, Some(Value::Integer(-32)));
+        assert_eq!(header[3].value, Some(Value::Integer(3)));
+        assert_eq!(header[4].value, Some(Value::Integer(2)));
+
+        hdu.info = HduInfo::Primary {
+            bitpix: 8,
+            naxes: Vec::new(),
+        };
+        assert!(uncompressed_header(&hdu).is_err());
     }
 
     /// Tiles are read from where `THEAP` puts the heap, past a gap after the

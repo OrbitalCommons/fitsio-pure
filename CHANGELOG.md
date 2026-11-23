@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Added
+
+- **`tiled::uncompressed_header`: the header of the image a tile-compressed HDU holds.** (#201) It returns the header cfitsio's `fits_img_decompress_header` (and so `funpack`) gives it:
+  - `ZSIMPLE`/`ZTENSION`/`ZBITPIX`/`ZNAXISn`/`ZEXTEND`/`ZPCOUNT`/`ZGCOUNT` become the image's own keywords, and `ZHECKSUM`/`ZDATASUM` its checksums;
+  - the binary table's structure, checksums and compression keywords, and `EXTNAME = 'COMPRESSED_IMAGE'`, are dropped;
+  - every other card is kept in order.
+
+  An image compressed from a primary HDU gets a primary header and one from an extension an `IMAGE` extension header. One with neither `ZSIMPLE` nor `ZTENSION` becomes a primary image, as `funpack` writes it. Every tile-compressed image in fits-test-cases gets the same header as from cfitsio, card for card. rustafits and the cool-japan/scirs port each did this translation themselves.
+
 ### Fixed
 
 - **`read_binary_column_vla` reads a table whose heap follows a gap from its data unit alone.** (#199) When `THEAP` puts the heap after a gap, `PCOUNT` already counts the gap, but the bounds check added it again. A table's data unit on its own, as compat's disk reads pass it, then failed with `UnexpectedEof`, though the whole file read fine. The check now ends the data unit at `NAXIS1 × NAXIS2 + PCOUNT`. Found while porting cool-japan/scirs's FITS module.
