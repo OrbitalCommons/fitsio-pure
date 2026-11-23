@@ -8,7 +8,8 @@
 use std::path::{Path, PathBuf};
 
 use fitsio_pure::bintable::{
-    parse_binary_table_columns, read_binary_column, read_binary_column_physical, BinaryColumnData,
+    parse_binary_table_columns, read_binary_column, read_binary_column_physical,
+    read_binary_column_vla, BinaryColumnData,
 };
 use fitsio_pure::hdu::{parse_fits, FitsData, HduInfo};
 use fitsio_pure::image::{extract_bscale_bzero, read_image_data, read_image_physical, ImageData};
@@ -771,6 +772,8 @@ fn compressed_rice_float_quantized() {
 /// - PLIO of unsigned 16-bit images takes off the +32768 cfitsio stores them
 ///   with (#194).
 /// - The RICE and PLIO i16 controls are unchanged.
+/// - The RICE image with a gap before its heap reads its tiles from where
+///   `THEAP` puts the heap (#204).
 #[test]
 fn fpack_written_images_decode_as_cfitsio_decodes_them() {
     let mut failures = Vec::new();
@@ -781,6 +784,7 @@ fn fpack_written_images_decode_as_cfitsio_decodes_them() {
         "fpack_plio_u16",
         "fpack_plio_i16",
         "fpack_rice_u16",
+        "fpack_rice_u16_theap_gap",
     ] {
         let Some((bytes, fits)) = load(&format!("tile-compression/{name}.fits")) else {
             return;
@@ -791,7 +795,13 @@ fn fpack_written_images_decode_as_cfitsio_decodes_them() {
                 .chunks_exact(8)
                 .map(|b| f64::from_le_bytes(b.try_into().unwrap()))
                 .collect();
-        let decoded = read_image_physical(&bytes, fits.get(1).unwrap()).unwrap();
+        let decoded = match read_image_physical(&bytes, fits.get(1).unwrap()) {
+            Ok(decoded) => decoded,
+            Err(e) => {
+                failures.push(format!("{name}: {e}"));
+                continue;
+            }
+        };
         assert_eq!(decoded.len(), expected.len(), "{name}");
         let differing = decoded
             .iter()
@@ -803,6 +813,22 @@ fn fpack_written_images_decode_as_cfitsio_decodes_them() {
         }
     }
     assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// A table whose heap follows a gap (`THEAP = 108`, `PCOUNT = 112`) reads
+/// the same from its data unit alone as from the whole file (#199).
+#[test]
+fn vla_after_a_theap_gap_reads_from_the_data_unit_alone() {
+    let Some((bytes, fits)) = load("scirs/theap_gap.fits") else {
+        return;
+    };
+    let hdu = fits.get(1).unwrap();
+    let want = BinaryColumnData::VarInt(vec![vec![7, 8, 9]]);
+    assert_eq!(read_binary_column_vla(&bytes, hdu, 0).unwrap(), want);
+    let unit = &bytes[hdu.data_start..hdu.data_start + hdu.data_len];
+    let mut local = hdu.clone();
+    local.data_start = 0;
+    assert_eq!(read_binary_column_vla(unit, &local, 0).unwrap(), want);
 }
 
 // ---------------------------------------------------------------------------
