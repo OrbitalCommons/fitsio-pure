@@ -427,7 +427,6 @@ pub fn format_card(card: &Card) -> [u8; CARD_SIZE] {
     buf
 }
 
-#[cfg(feature = "compat")]
 const KW_HIERARCH: [u8; 8] = *b"HIERARCH";
 
 /// Whether `name` needs the `HIERARCH` convention: longer than 8 characters
@@ -438,7 +437,6 @@ pub(crate) fn needs_hierarch(name: &str) -> bool {
 }
 
 /// `name` without a leading `HIERARCH ` prefix, if it has one.
-#[cfg(feature = "compat")]
 pub(crate) fn strip_hierarch(name: &str) -> &str {
     match name.get(..9) {
         Some(prefix) if prefix.eq_ignore_ascii_case("HIERARCH ") => name[9..].trim_start(),
@@ -631,7 +629,6 @@ pub(crate) fn long_string_texts(
 }
 
 /// The name and value of a `HIERARCH` card, if `card` is one.
-#[cfg(feature = "compat")]
 pub(crate) fn hierarch_entry(card: &Card) -> Option<(&str, Value)> {
     if card.keyword != KW_HIERARCH || card.value.is_some() {
         return None;
@@ -640,6 +637,68 @@ pub(crate) fn hierarch_entry(card: &Card) -> Option<(&str, Value)> {
     let eq = text.find('=')?;
     let (value, _) = parse_value(text[eq + 1..].trim_start().as_bytes())?;
     Some((text[..eq].trim(), value))
+}
+
+/// The name, value and comment of a `HIERARCH` card (ESO's convention for
+/// keyword names longer than 8 characters or with spaces), if `card` is one.
+///
+/// [`parse_card`] reads such a card as a commentary card: keyword
+/// `HIERARCH`, no value, and the rest of its text, `ESO TEL TEMP = 1.5 /
+/// degC` say, in `comment`. This reads that text as cfitsio does: the name
+/// before the `=` (`ESO TEL TEMP`), then the value and comment after it.
+/// A long string continued on `CONTINUE` cards is read by [`find_hierarch`].
+pub fn hierarch(card: &Card) -> Option<(&str, Value, Option<String>)> {
+    let (name, value) = hierarch_entry(card)?;
+    Some((name, value, hierarch_comment(card)))
+}
+
+/// The value and comment of `HIERARCH` keyword `name` in `cards`, found as
+/// cfitsio finds it: ignoring case, with or without a `HIERARCH ` prefix on
+/// `name`, the first such card. A string ending in `&` continues on the
+/// `CONTINUE` cards that follow it, as cfitsio's `ffgkls` reads it, and the
+/// comment is the last one among them.
+pub fn find_hierarch(cards: &[Card], name: &str) -> Option<(Value, Option<String>)> {
+    let name = strip_hierarch(name);
+    let i = cards.iter().position(|card| {
+        hierarch_entry(card).is_some_and(|(key, _)| key.eq_ignore_ascii_case(name))
+    })?;
+    hierarch_value(cards, i).map(|(value, comment, _)| (value, comment))
+}
+
+/// The value and comment of the `HIERARCH` card `cards[i]`, and how many
+/// `CONTINUE` cards after it hold the rest of its value (see
+/// [`find_hierarch`]).
+pub(crate) fn hierarch_value(cards: &[Card], i: usize) -> Option<(Value, Option<String>, usize)> {
+    let (_, value) = hierarch_entry(&cards[i])?;
+    let mut comment = hierarch_comment(&cards[i]);
+    let Value::String(mut text) = value else {
+        return Some((value, comment, 0));
+    };
+    let mut continued = 0;
+    while text.ends_with('&') {
+        let next = cards
+            .get(i + 1 + continued)
+            .filter(|c| c.keyword_str() == "CONTINUE")
+            .and_then(|c| parse_value(c.comment.as_deref()?.as_bytes()));
+        let Some((Value::String(part), part_comment)) = next else {
+            break;
+        };
+        text.pop();
+        text.push_str(&part);
+        if let Some(part_comment) = part_comment {
+            comment = Some(String::from(part_comment));
+        }
+        continued += 1;
+    }
+    Some((Value::String(text), comment, continued))
+}
+
+/// The comment after the value of a `HIERARCH` card, if it has one.
+fn hierarch_comment(card: &Card) -> Option<String> {
+    let text = card.comment.as_deref()?;
+    let eq = text.find('=')?;
+    let (_, comment) = parse_value(text[eq + 1..].trim_start().as_bytes())?;
+    comment.map(String::from)
 }
 
 /// The longest string, counting each `'` twice as it is written, that fits in
@@ -1131,6 +1190,64 @@ mod parse_tests {
         block.resize(BLOCK_SIZE, b' ');
         let parsed = parse_header_blocks(&block).unwrap();
         assert!(parsed.iter().any(|c| c.keyword_str() == "date-obs"));
+    }
+
+    /// `hierarch` reads a `HIERARCH` card's name, value and comment, which
+    /// `parse_card` leaves in the comment (#200).
+    #[test]
+    fn hierarch_reads_name_value_and_comment() {
+        let card = parse_card(&make_card("HIERARCH ESO TEL TEMP = 1.5 / degC")).unwrap();
+        assert_eq!(card.keyword_str(), "HIERARCH");
+        assert_eq!(card.value, None);
+        assert_eq!(
+            hierarch(&card),
+            Some((
+                "ESO TEL TEMP",
+                Value::Float(1.5),
+                Some(String::from("degC"))
+            ))
+        );
+        let card = parse_card(&make_card("HIERARCH ESO DET CHIP NAME= 'CCD-44'")).unwrap();
+        assert_eq!(
+            hierarch(&card),
+            Some(("ESO DET CHIP NAME", Value::String("CCD-44".into()), None))
+        );
+        let plain = parse_card(&make_card("EXPTIME =                 30.0")).unwrap();
+        assert_eq!(hierarch(&plain), None);
+        let comment = parse_card(&make_card("COMMENT a = b")).unwrap();
+        assert_eq!(hierarch(&comment), None);
+    }
+
+    /// `find_hierarch` finds a name as cfitsio does and joins a long string
+    /// continued on `CONTINUE` cards.
+    #[test]
+    fn find_hierarch_ignores_case_and_prefix_and_joins_long_strings() {
+        let cards: Vec<Card> = [
+            "HIERARCH ESO TEL TEMP = 1.5 / degC",
+            "HIERARCH ESO OBS NAME = 'first part &' / ignored",
+            "CONTINUE  'second part&'",
+            "CONTINUE  'end' / the comment",
+            "OBJECT  = 'M13     '",
+        ]
+        .iter()
+        .map(|text| parse_card(&make_card(text)).unwrap())
+        .collect();
+        for name in ["ESO TEL TEMP", "eso tel temp", "HIERARCH ESO TEL TEMP"] {
+            assert_eq!(
+                find_hierarch(&cards, name),
+                Some((Value::Float(1.5), Some(String::from("degC")))),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            find_hierarch(&cards, "ESO OBS NAME"),
+            Some((
+                Value::String("first part second partend".into()),
+                Some(String::from("the comment"))
+            ))
+        );
+        assert_eq!(find_hierarch(&cards, "OBJECT"), None);
+        assert_eq!(find_hierarch(&cards, "ESO TEL"), None);
     }
 
     #[test]
