@@ -148,7 +148,7 @@ fn extract_tile_bytes<'a>(
     fits_data: &'a [u8],
     data_start: usize,
     naxis1: usize,
-    naxis2: usize,
+    theap: usize,
     row: usize,
     column: &HeapColumn,
 ) -> Result<(&'a [u8], usize)> {
@@ -163,8 +163,7 @@ fn extract_tile_bytes<'a>(
         read_p_descriptor(&fits_data[desc_pos..])
     };
     let count = count * column.elem_size;
-    let heap_start = data_start + naxis1 * naxis2;
-    let tile_start = heap_start + heap_offset;
+    let tile_start = data_start + theap + heap_offset;
     let tile_end = tile_start + count;
     if tile_end > fits_data.len() {
         return Err(Error::UnexpectedEof);
@@ -855,8 +854,14 @@ where
     T: BePixel + Send + Sync,
     F: Fn(usize, &[u8], usize, usize) -> Result<Vec<T>> + Sync + Send,
 {
+    // The heap starts `THEAP` bytes into the data unit: right after the rows
+    // unless a gap precedes it.
+    let theap = match card_float_value(&hdu.cards, "THEAP") {
+        Some(theap) if theap >= 0.0 => theap as usize,
+        _ => naxis1 * naxis2,
+    };
     let tile = |row: usize, column: &HeapColumn| {
-        extract_tile_bytes(fits_data, hdu.data_start, naxis1, naxis2, row, column)
+        extract_tile_bytes(fits_data, hdu.data_start, naxis1, theap, row, column)
     };
     let decode_row = |row: usize| -> Result<Vec<T>> {
         let (tile_data, tile_count) = tile(row, &col_info.compressed_data)?;
@@ -1732,6 +1737,36 @@ mod tests {
                 assert_eq!(v[1], 12.0);
             }
             other => panic!("expected F32, got {other:?}"),
+        }
+    }
+
+    /// Tiles are read from where `THEAP` puts the heap, past a gap after the
+    /// rows, not from right after the rows (#204).
+    #[test]
+    fn test_tiles_are_read_from_the_heap_theap_points_at() {
+        let rows: Vec<Vec<Vec<u8>>> = [[1i16, -2], [300, 4]]
+            .iter()
+            .map(|row| vec![gzip(&i16_be(row))])
+            .collect();
+        let (table, mut hdu) = tiled_hdu(
+            "GZIP_1",
+            16,
+            2,
+            &[("COMPRESSED_DATA", "1PB")],
+            &rows,
+            None,
+            vec![],
+        );
+        // Junk where the heap would be without THEAP, then the heap.
+        let rows_len = 8 * rows.len();
+        let gap = [0xab; 24];
+        let data = [&table[..rows_len], &gap, &table[rows_len..]].concat();
+        hdu.cards
+            .push(integer_card("THEAP", (rows_len + gap.len()) as i64));
+        hdu.data_len = data.len();
+        match read_tiled_image(&data, &hdu).unwrap() {
+            ImageData::I16(v) => assert_eq!(v, [1, -2, 300, 4]),
+            other => panic!("expected I16, got {other:?}"),
         }
     }
 
