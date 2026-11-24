@@ -55,6 +55,9 @@ pub mod table;
 pub mod tiled;
 /// FITS header value representation (integer, float, string, logical).
 pub mod value;
+/// World Coordinate System keywords, typed: read from a header and written
+/// back.
+pub mod wcs;
 
 pub use block::{BLOCK_SIZE, CARDS_PER_BLOCK, CARD_SIZE};
 pub use error::{Error, Result};

@@ -16,8 +16,12 @@ array = ["dep:ndarray", "compat"]
 # Decode tiles and convert pixels on all cores with rayon. Off by default;
 # results are identical with it on or off.
 parallel = ["std", "dep:rayon"]
+# `TryFrom<&wcs::WcsKeys>` for the `wcs` crate's `WCSParams`, the CDS
+# projection engine.
+cds-wcs = ["std", "dep:cds-wcs", "dep:serde"]
 
 [dev-dependencies]
+serde_json = "1.0.154"
 tempfile = "3.25"
 
 [[bin]]
@@ -32,7 +36,9 @@ required-features = ["cli"]
 
 [dependencies]
 bytemuck = { version = "1.25.0", features = ["extern_crate_alloc"] }
+cds-wcs = { version = "0.4.2", package = "wcs", optional = true }
 libm = "0.2.16"
 miniz_oxide = { version = "0.9.0", default-features = false, features = ["with-alloc"] }
 ndarray = { version = "0.17.2", optional = true }
 rayon = { version = "1.12.0", optional = true }
+serde = { version = "1", optional = true }

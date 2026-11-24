@@ -1,6 +1,23 @@
 # Changelog
 
-## 0.26.0
+## Unreleased
+
+### Added
+
+- **`wcs::WcsKeys`: World Coordinate System keywords, typed.** (#211, the scope decided in #202) It reads the keyword layer of WCS Papers I and II and SIP from a header, for the primary WCS and alternates `A`–`Z`, and writes it back. It does no projection maths.
+  - **Axes:** which axes are celestial longitude and latitude, and their projection code; `CTYPEi`, `CUNITi`, `CRPIXi`, `CRVALi`; the image's `NAXISn`.
+  - **Linear part:** one CD matrix, from `CDi_j`, from `PCi_j` × `CDELTi`, or from `CDELTi` + `CROTAi` of the latitude axis. CD wins, then PC, then CROTA, as Paper I tells readers. `form` records the form the header used, and `ignored` the keywords the precedence set aside. Paper I prohibits mixing CD and PC; wcslib, and so astropy, reads such a header as PC × CDELT instead.
+  - **Projection and frame:** `LONPOLE`, `LATPOLE`, `PVi_m`, and `RADESYS`/`EQUINOX` (or the older `RADECSYS`/`EPOCH`), with Paper II's defaults from `radesys_or_default` and `equinox_or_default`.
+  - **SIP:** `A_ORDER`/`B_ORDER`/`AP_ORDER`/`BP_ORDER` and every coefficient up to the order, the low-order ones (`A_0_0`, `A_1_0`, `A_0_1`) included.
+  - **Writing:** `to_cards` writes the same cards in CD form, with SIP and the `-SIP` CTYPE suffix; `to_cards_as` writes PC × CDELT, or CROTA for a WCS read that way.
+  - `WcsKeys::from_hdu` reads a tile-compressed image's WCS from its image header.
+
+  On every WCS in fits-test-cases' new `wcs/` fixtures (PC × CDELT with an alternate, CROTA2, TAN-SIP with low-order terms, and a RA/DEC/FREQ cube), the parse matches astropy.wcs's: CD to 1e-14, every SIP coefficient, the axes, the form and the frame. Writing and reading back gives the same WCS in each form.
+- **Feature `cds-wcs`: `TryFrom<&WcsKeys>` for the `wcs` crate's `WCSParams`.** This hands a header's WCS to CDS's projection engine ([`wcs`](https://crates.io/crates/wcs) 0.4, Apache-2.0 OR MIT) without the hand-normalisation adopters were doing. Through it, the `wcs` crate puts the corpus truth points at astropy's coordinates to 1e-9° (PC × CDELT, CROTA2, the cube and three TAN headers).
+  - A WCS with SIP distortion is refused: `wcs` 0.4.2 evaluates SIP with `mapproj` 0.4.0, whose polynomial is wrong (it squares its running powers and never forms the terms without both `u` and `v`), so its positions would be wrong.
+  - So are shapes the `wcs` crate has no fields for, rather than being dropped.
+  - The feature is off by default, so default builds keep their dependencies.
+
 
 A minor release from porting [cool-japan/scirs](https://github.com/cool-japan/scirs)'s FITS module onto fitsio-pure. It adds two native helpers that adopters were writing themselves, and fixes heap reads for tables and tile-compressed images whose heap follows a gap. Thanks to the scirs port for the reports and fixtures, now in fits-test-cases.
 
