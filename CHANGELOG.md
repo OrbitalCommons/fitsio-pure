@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.27.0
+
+A minor release that adds a typed WCS keyword layer, the scope decided in #202. It also adds an optional bridge into CDS's `wcs` crate for projections.
+
+- **cargo-semver-checks against 0.26.0** (`--all-features`): 202 checks, 202 pass, no update required. The API changes are additions: the `wcs` module and the `cds-wcs` feature.
+- **Checks against this release:**
+  - FastFitsCutter, soar-video, Transit-Detector, serialimage, refimage and AstroBurst pass against it unchanged.
+  - rustafits, which uses `default-features = false` and the old API, builds; its tests pass but for its existing timing test.
+- **The `cds-wcs` bridge refuses headers with SIP distortion.** The `wcs` crate 0.4.2 evaluates SIP with `mapproj` 0.4.0, whose `SipCoeff::p` squares its running powers and never forms the low-order terms, so a SIP header's positions would be wrong (0.77° at a fixture's corner pixel). The fix is merged in `mapproj`'s repository but not yet released. `WcsKeys` reads and writes every SIP coefficient either way.
 
 ### Added
 
@@ -17,7 +25,9 @@
   - A WCS with SIP distortion is refused: `wcs` 0.4.2 evaluates SIP with `mapproj` 0.4.0, whose polynomial is wrong (it squares its running powers and never forms the terms without both `u` and `v`), so its positions would be wrong.
   - So are shapes the `wcs` crate has no fields for, rather than being dropped.
   - The feature is off by default, so default builds keep their dependencies.
+  - Pixel to world (`WCS::unproj`) agrees with astropy. World to pixel (`WCS::proj`) in `wcs` 0.4.2 is wrong when the CD matrix isn't symmetric: up to 40 px on the `wcs/` fixtures, because `mapproj` 0.4.0 swaps the off-diagonal terms of its inverse. Its fix is an open pull request upstream, so convert world to pixel another way until a `wcs` release has it.
 
+## 0.26.0
 
 A minor release from porting [cool-japan/scirs](https://github.com/cool-japan/scirs)'s FITS module onto fitsio-pure. It adds two native helpers that adopters were writing themselves, and fixes heap reads for tables and tile-compressed images whose heap follows a gap. Thanks to the scirs port for the reports and fixtures, now in fits-test-cases.
 

@@ -781,7 +781,14 @@ mod cds {
     /// polynomials with `mapproj` 0.4.0's `SipCoeff::p`, which squares its
     /// running powers (`u`, `u²`, `u⁴`, …) and never forms the terms
     /// without both `u` and `v` (`A_0_0`, `A_1_0`, …), so its positions
-    /// would be wrong. `WcsKeys::sip` still holds every coefficient.
+    /// would be wrong. `WcsKeys::sip` still holds every coefficient. (The
+    /// fix is merged in `mapproj`'s repository but not released.)
+    ///
+    /// Pixel to world (`WCS::unproj`) agrees with astropy. World to pixel
+    /// (`WCS::proj`) in `wcs` 0.4.2 is wrong when the CD matrix isn't
+    /// symmetric, up to 40 px on fits-test-cases' `wcs/` fixtures, because
+    /// `mapproj` 0.4.0 swaps the off-diagonal terms of its inverse; that fix
+    /// is still an open pull request there.
     impl TryFrom<&WcsKeys> for cds_wcs::WCSParams {
         type Error = Error;
 
